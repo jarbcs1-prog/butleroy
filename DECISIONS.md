@@ -561,3 +561,70 @@ than an error, because an error is visible.
 For the same reason the tray's "Open prompt" item reports that the overlay is not built instead of
 showing stale status, and `status` exposes `tools_executable` (3) alongside `tools_registered` (~58).
 The gap is meant to be visible.
+
+## Part VI - Confirmation (D32)
+
+### D32 - Confirmation is a foreground, payload-bound, single-use human act
+A confirmation is the highest-authority moment in the system. Everything below exists because the
+failure mode is **not an error** - it is the system confidently doing something the user did not
+sanction. An error is visible. A confidently wrong confirmation is not, which makes it the failure
+this project has to be most afraid of. Settled with the user; the constants are in `overlay.py`.
+
+**1. The dialog shows the resolved absolute path, never the model's string.** The model proposes
+`Downloads\tmp`; `tmp` is a junction to `Documents\Thesis`; the executor follows it and the thesis
+is gone. Nothing lied - the model, the dialog and the code all said what they meant, and the
+*resolution* differed. So the dialog shows the resolved path, shows the model's string beside it when
+they differ (a difference is a finding, and the user is the one who can say "that is not what I
+meant"), and **enumerates the matched files rather than showing the pattern**: `Downloads\*.tmp`
+renders as "3 files, 12.4 MB" with the names, because a human approving *3 files* and a human
+approving *11,000* are making different decisions and only the first is informed.
+
+**2. The approval is bound to a hash of the payload.** Displayed payload is hashed; the executor
+re-resolves and re-hashes at execution; a mismatch **voids the approval** and the dialog returns. This
+closes the gap between what was shown and what runs, and it is the reason an approval can never be
+replayed against a different set of files.
+
+**3. Timeout denies, and a denial is loud.** Expiry is a refusal, never an approval - a confirmation
+that expires into approval is a footgun, and one that expires into denial is merely annoying. If the
+session is **unattended**, the dialog waits indefinitely instead, because expiring unattended is the
+same footgun with a longer fuse. A denial always posts a notification naming the tool and the reason
+and leaves the request in the queue, so a timeout costs work but never silently. **One dialog at a
+time**: a second T3 queues behind the first, because two stacked modals is how the wrong thing gets
+approved.
+
+**4. Three approval scopes, and the third does not exist.**
+
+| Scope | Binds to | Chosen how |
+|---|---|---|
+| This call | exactly this payload, once, via the hash | default button |
+| This class, 600 s | `(tool, root, operation-class)` for 10 minutes | deliberate second button, never the default |
+| Always allow | - | **removed. No permanent T3 grant exists.** |
+
+The middle scope needs two invalidation rules or it is a slow-motion permanent grant: **any T2+
+action voids it** (the session has left the context the user approved for) and **loss of presence
+voids it** (the grant meant "I'll be here for a few minutes", and they are not). Both log start and
+expiry so the audit chain reconstructs which calls ran under which grant.
+
+Single-use is the default because the alternative is worse in both directions. Too strict turns
+"delete 40 files" into 40 dialogs and trains the user to hit Enter without reading, which is worse
+than no dialog. Too loose hands the assistant a standing delete capability over every approved root.
+600 s is the user's number, not a default I picked.
+
+**5. Only the foreground dialog can authorize.** The tray may *show* that a confirmation is pending
+and may *raise* the overlay, but it can never approve or deny - a transient one-click toast is the
+exact shape of a clickjacking surface, and once Telegram is live anything that can reach the pipe
+could pop one and wait. So: **only a human at the PC, looking at a foreground dialog, authorizes a
+T3 action.** Not the model, not the supervisor, not a worker, not the tray, not Telegram. If the
+dialog is not on screen, nothing is approved.
+
+### D33 - `file.delete` quarantines instead of unlinking
+Making D32 testable required at least one real T3 executor, and hard-deleting is the wrong
+implementation for a system whose whole premise is reversibility. `file.delete` **moves** the target
+into `state/quarantine/<timestamp>/<relpath>` and writes a manifest; `file.restore` puts it back.
+The user-visible result is the same (the file is gone from where it was), and the difference is that
+a mistaken T3 is a move rather than a loss.
+
+This also makes the destructive path *testable*, which a real `unlink` would not be. The quarantine is
+itself inside our own state directory, so the policy gate's self-path protection covers it: the
+assistant cannot delete its own source, its own decisions, or its own quarantine through this tool.
+

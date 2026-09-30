@@ -42,8 +42,10 @@ the only safe answer to that is no.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -220,13 +222,30 @@ class Daemon:
         self.authkey = ipc.generate_authkey()
         self.authkey_path = state / "authkey.bin"
         self.server: ipc.PipeServer | None = None
-        self._lock = threading.Lock()
+        # RLock, not Lock. op_confirm_approve calls _new_confirmation *while it
+        # holds this lock* (requeueing a confirmation whose payload changed), and
+        # _new_confirmation takes the lock itself to store the new item. With a
+        # plain Lock that is a self-deadlock, and it is a hang rather than an
+        # error - which on a 24/7 daemon means a wedged request thread with
+        # nothing in the log. Reentrancy is the correct fix here: the same lock
+        # discipline still applies, a thread can simply re-enter its own lock.
+        self._lock = threading.RLock()
         self._client: ipc.PipeClient | None = None
         self._count = 0
         # Set by request_shutdown() so the serve loop can be stopped from the tray
         # or hotkey thread. See the method for why this is an Event and not something
         # cleverer.
         self._halt = threading.Event()
+        # --- D32 confirmation state -------------------------------------------
+        # Pending confirmations, keyed by an opaque id. The payload hash is what
+        # the user actually approves, so an approval that does not carry the hash
+        # the dialog displayed is refused rather than trusted.
+        self._pending: dict[str, dict] = {}
+        # Class grants, keyed by "<tool>|<root>", value = monotonic deadline.
+        # Expiry is not enough on its own: see _invalidate_grants.
+        self._grants: dict[str, float] = {}
+        self._pending_seq = 0
+        self.quarantine = state / "quarantine"
 
     # ------------------------------------------------------------------ startup
 
@@ -458,6 +477,12 @@ class Daemon:
         before = self.attended
         self.attended = want
         self.gate.attended = want
+        # D32: a class grant meant "I'll be here for the next ten minutes". If the
+        # user is no longer here, the premise of the grant is gone, so the grant
+        # goes with it. Without this, walking away from the keyboard would silently
+        # leave standing permissions behind.
+        if before and not want:
+            self._invalidate_grants()
         self._audit(
             actor=args.get("actor", "user"),
             channel=channel,
@@ -483,7 +508,26 @@ class Daemon:
         # while the daemon runs must take effect immediately; a stale copy
         # would be a permission that outlives the decision to grant it.
         self.gate.allowed_roots = list(self.manifests.roots())
-        return self.gate.evaluate(tool, channel=channel, args=args)
+        verdict = self.gate.evaluate(tool, channel=channel, args=args)
+
+        # A live class grant downgrades CONFIRM to ALLOW, but only for the PC
+        # channel and only for a genuinely T3 tool. Both restrictions matter:
+        # a grant is something the user established while sitting at the
+        # keyboard, so it must not be cashable by a Telegram message that happens
+        # to arrive mid-window, and it must not be a way to quietly loosen T2.
+        if (
+            verdict.decision == Decision.CONFIRM
+            and channel == CHANNEL_PC
+            and verdict.tier == Tier.IRREVERSIBLE
+            and self.attended
+            and self._has_grant(tool, args)
+        ):
+            return Verdict(
+                decision=Decision.ALLOW,
+                tier=verdict.tier,
+                reason="allowed under a live class grant (D32 scope=class)",
+            )
+        return verdict
 
     def op_tool_check(self, args: dict) -> Any:
         """Ask what would happen. Does not execute, and says so in the result."""
@@ -533,20 +577,11 @@ class Daemon:
                 }
             )
             return {"queued": True, "reason": verdict.reason, "depth": len(self.queue)}
-        if verdict.decision == Decision.CONFIRM:
-            # Deliberately not executable from here. A confirmation is a human
-            # looking at a specific proposed action, which means the UI has to
-            # render it and the user has to answer - neither of which can be
-            # faked by whoever sent the request.
-            return {
-                "needs_confirmation": True,
-                "tool": tool,
-                "tier": str(verdict.tier) if verdict.tier else None,
-                "reason": verdict.reason,
-                "confirm_at": verdict.requires_confirmation_at,
-                "args": _redact(call_args),
-            }
-
+        # The executor is looked up BEFORE the CONFIRM branch, deliberately. If a
+        # destructive tool has no executor, we must not ask the user to approve
+        # something that cannot then happen - the approval would be theatre, and
+        # the user would have gone through a security ceremony for a no-op. The
+        # honest answer is "this is not built", which is a build gap, not a refusal.
         executor = self._EXECUTORS.get(tool)
         if executor is None:
             raise NotImplementedOp(
@@ -554,7 +589,381 @@ class Daemon:
                 f"executor yet. {len(self._EXECUTORS)} of {len(ALL_TOOLS)} "
                 f"tools are executable; this is a build gap, not a refusal."
             )
+
+        if verdict.decision == Decision.CONFIRM:
+            # Deliberately not executable from here. A confirmation is a human
+            # looking at a specific proposed action, which means the UI has to
+            # render it and the user has to answer - neither of which can be
+            # faked by whoever sent the request. `_new_confirmation` builds the
+            # payload preview and binds the approval to its hash (D32).
+            return self._new_confirmation(
+                tool=tool,
+                args=call_args,
+                channel=channel,
+                actor=actor,
+                reason=verdict.reason,
+            )
+
+        # A class grant is a statement about a calm period. Anything at T2 or
+        # above ends it (D32): the session has moved on, and a permission granted
+        # for routine work should not silently cover the next serious thing.
+        if verdict.tier is not None and verdict.tier >= Tier.CONSEQUENTIAL:
+            self._invalidate_grants()
         return executor(self, call_args)
+
+    # -------------------------------------------------- confirmation (D32)
+    #
+    # A confirmation is the highest-authority moment in the system, so none of this
+    # is negotiable at the call site. The shape:
+    #
+    #   tool_call -> gate says CONFIRM -> daemon builds a PREVIEW of exactly what
+    #   would happen, hashes it, and returns a confirmation_id plus that hash.
+    #   The UI renders the preview, the user decides.
+    #   confirm.approve -> the daemon RE-BUILDS the preview, RE-HASHES it, and
+    #   only proceeds if the hash still matches what the user saw.
+    #
+    # That re-hash is the whole point. Between the dialog appearing and the user
+    # clicking, the filesystem can change - a glob can now match a different set of
+    # files, a path can resolve differently. If we trusted the original hash we
+    # would be authorising an action the user never actually saw. So we refuse on
+    # any mismatch and re-queue, rather than proceeding "close enough".
+
+    _PREVIEW_LIMIT = 200  # max paths rendered into a preview; the count is the real signal
+
+    # D32: how long a "this class, not this call" approval stays cashable. The user
+    # chose 600 s. Named as a constant because a policy number that a person
+    # deliberately selected should be visible from the outside, and because the next
+    # person to shorten or lengthen it should have to find this line on purpose.
+    CLASS_GRANT_SECONDS = 600.0
+
+    def _preview_for(self, tool: str, args: dict) -> dict:
+        """Compute what a tool would do, without doing it.
+
+        Not every tool can be previewed (a preview of `system.diagnose` is just
+        the tool name). For those we fall back to a preview carrying the tool, the
+        tier, and the redacted args - enough to bind an approval to *this* call,
+        even though the exact effect is described only by the tool's own semantics.
+        The hash still changes if the args change, which is the property that
+        actually matters for D32.
+        """
+        fn = self._PREVIEWS.get(tool)
+        if fn is not None:
+            return fn(self, args)
+        return {"preview": "none - this tool has no preview builder; approving binds the call args"}
+
+    def _make_preview(self, tool: str, args: dict) -> dict:
+        preview = self._preview_for(tool, args)
+        targets = preview.get("targets") if isinstance(preview, dict) else None
+        if isinstance(targets, list) and len(targets) > self._PREVIEW_LIMIT:
+            preview = dict(preview)
+            preview["targets"] = targets[: self._PREVIEW_LIMIT]
+            preview["truncated"] = True
+            preview["note"] = (
+                f"showing first {self._PREVIEW_LIMIT} of {len(targets)} targets; "
+                "the count below is the full number"
+            )
+        return preview
+
+    @staticmethod
+    def _payload_hash(tool: str, args: dict, preview: dict) -> str:
+        body = json.dumps(
+            {"tool": tool, "args": args, "preview": preview},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    def _new_confirmation(
+        self, *, tool: str, args: dict, channel: str, actor: str, reason: str
+    ) -> dict:
+        preview = self._make_preview(tool, args)
+        phash = self._payload_hash(tool, args, preview)
+        with self._lock:
+            self._pending_seq += 1
+            cid = f"c{self._pending_seq:06d}"
+            self._pending[cid] = {
+                "id": cid,
+                "tool": tool,
+                "args": _redact(args),
+                "_raw_args": dict(args),
+                "channel": channel,
+                "actor": actor,
+                "reason": reason,
+                "preview": preview,
+                "payload_hash": phash,
+                "created": time.time(),
+            }
+        return {
+            "needs_confirmation": True,
+            "confirmation_id": cid,
+            "tool": tool,
+            "reason": reason,
+            "payload_hash": phash,
+            "preview": preview,
+            # The raw args are redacted for display, but the hash is over the raw
+            # args, so the caller must echo the hash back verbatim.
+            "args": _redact(args),
+        }
+
+    def op_confirm_list(self, args: dict) -> Any:
+        """What is waiting on the user right now."""
+        with self._lock:
+            return {
+                "pending": [
+                    {
+                        "id": p["id"],
+                        "tool": p["tool"],
+                        "reason": p["reason"],
+                        "preview": p["preview"],
+                        "created": p["created"],
+                    }
+                    for p in sorted(self._pending.values(), key=lambda x: x["created"])
+                ],
+                "grants": self._grant_summary(),
+            }
+
+    def _grant_summary(self) -> list[dict]:
+        now = time.monotonic()
+        return [
+            {"scope": k, "expires_in_s": round(v - now, 1)}
+            for k, v in sorted(self._grants.items())
+            if v > now
+        ]
+
+    def op_confirm_approve(self, args: dict) -> Any:
+        """The user approved. Re-verify everything, then execute exactly that.
+
+        There are three independent ways this refuses, and all three produce a
+        structured refusal the UI can render - none of them ever executes
+        "approximately the right thing".
+        """
+        cid = str(args["confirmation_id"])
+        claimed = str(args.get("payload_hash", ""))
+        scope = str(args.get("scope", "once"))
+        if scope not in ("once", "class"):
+            raise Refused(f"unknown approval scope {scope!r}; expected 'once' or 'class'")
+
+        with self._lock:
+            item = self._pending.get(cid)
+            if item is None:
+                raise Refused(
+                    f"no pending confirmation {cid!r} - it was denied, expired, "
+                    "or already answered"
+                )
+            tool = item["tool"]
+            raw_args = item["_raw_args"]
+            channel = item["channel"]
+            actor = str(args.get("actor", "user"))
+
+            # 1. The hash the UI displayed must match the hash of the payload we
+            #    are about to act on. Re-preview, re-hash, compare.
+            preview = self._make_preview(tool, raw_args)
+            actual = self._payload_hash(tool, raw_args, preview)
+            if claimed and claimed != actual:
+                # Something changed between display and approval. Do NOT execute.
+                # Re-queue a fresh confirmation so the user re-sees the new reality.
+                self._pending.pop(cid, None)
+                fresh = self._new_confirmation(
+                    tool=tool,
+                    args=raw_args,
+                    channel=channel,
+                    actor=actor,
+                    reason="payload changed while you were reading the confirmation",
+                )
+                return {
+                    "approved": False,
+                    "reason": "the action changed since it was shown; please confirm again",
+                    "requeued": fresh,
+                }
+
+            # 2. The gate is re-evaluated now, not trusted from display time. A
+            #    workspace could have been revoked, the session could have become
+            #    unattended. Authority is checked at the moment it is exercised.
+            #
+            #    NOTE the condition is DENY-or-QUEUE, *not* "must be ALLOW". A T3
+            #    tool's steady-state verdict IS CONFIRM - that is what makes it
+            #    T3 - and the confirmation being processed right now is the
+            #    authorisation. Requiring ALLOW here meant every single T3
+            #    approval was refused, i.e. the whole mechanism could never
+            #    approve anything. What must not survive is a DENY (the path moved
+            #    outside the approved roots, the tool was deregistered) or a
+            #    QUEUE (unattended, and above the unattended ceiling).
+            verdict = self._verdict(tool, channel, raw_args)
+            if verdict.decision in (Decision.DENY, Decision.QUEUE):
+                self._pending.pop(cid, None)
+                self._audit(
+                    actor=actor,
+                    channel=channel,
+                    tool=tool,
+                    tier=str(verdict.tier) if verdict.tier else "?",
+                    decision="refused",
+                    reason=(
+                        f"approval refused: gate re-evaluated to "
+                        f"{verdict.decision} ({verdict.reason})"
+                    ),
+                    args=raw_args,
+                )
+                return {
+                    "approved": False,
+                    "reason": f"the gate no longer permits this ({verdict.reason})",
+                }
+
+            # 2b. Presence, checked explicitly, because the gate cannot express
+            #     it. The gate's channel rule deliberately downgrades a remote T3
+            #     to CONFIRM rather than QUEUE, so at approve time a local T3 and
+            #     a remote one look identical, and a session that went unattended
+            #     still reports CONFIRM rather than QUEUE. "Someone is at the
+            #     keyboard right now" is a separate fact, and it is checked here.
+            if not self.attended:
+                self._pending.pop(cid, None)
+                self._audit(
+                    actor=actor,
+                    channel=channel,
+                    tool=tool,
+                    tier=str(verdict.tier) if verdict.tier else "?",
+                    decision="refused",
+                    reason="approval refused: the session is unattended",
+                    args=raw_args,
+                )
+                return {
+                    "approved": False,
+                    "reason": (
+                        "you are not at the keyboard any more, so this cannot be "
+                        "approved. Ask again when you are back."
+                    ),
+                }
+
+            # 3. Only now, with a matching hash, a live gate and a human present,
+            #    do we execute.
+            self._pending.pop(cid, None)
+            self._audit(
+                actor=actor,
+                channel=channel,
+                tool=tool,
+                tier=str(verdict.tier) if verdict.tier else "?",
+                decision="confirmed",
+                reason=f"user approved confirmation {cid} (scope={scope})",
+                args={"confirmation_id": cid, "payload_hash": actual, "scope": scope},
+            )
+
+        # The executor runs OUTSIDE the lock: it does filesystem I/O and must not
+        # block the gate for every other caller while it moves bytes.
+        executor = self._EXECUTORS.get(tool)
+        if executor is None:
+            raise NotImplementedOp(f"{tool} was approved but has no executor")
+        result = executor(self, raw_args)
+
+        # A class grant, if requested, is recorded AFTER a successful execution so
+        # a failed action cannot be used to obtain a standing permission.
+        if scope == "class":
+            self._grant(tool, raw_args)
+        return {"approved": True, "tool": tool, "result": result, "scope": scope}
+
+    def op_confirm_deny(self, args: dict) -> Any:
+        cid = str(args["confirmation_id"])
+        with self._lock:
+            item = self._pending.pop(cid, None)
+        self._audit(
+            actor=str(args.get("actor", "user")),
+            channel=item["channel"] if item else CHANNEL_PC,
+            tool=item["tool"] if item else "?",
+            tier="T3",
+            decision="denied",
+            reason=f"user denied confirmation {cid}",
+            args={"confirmation_id": cid},
+        )
+        return {
+            "denied": True,
+            "confirmation_id": cid,
+            "was_pending": item is not None,
+        }
+
+    # --- class grants ---------------------------------------------------------
+    def _grant_key(self, tool: str, args: dict) -> str:
+        """The class a grant covers: this tool, on this approved root.
+
+        It has to be the ROOT, not the resolved path. The dialog offers the user
+        "this class, for ten minutes" precisely so they are not asked about every
+        single file in a folder they just approved; keying on the path made the
+        second button behave identically to the first, which is worse than not
+        offering it at all - the user grants a class, gets asked again for the
+        very next file, and concludes the grant is broken.
+
+        The narrowest enclosing approved root is used, so two nested workspaces
+        still get separate grants rather than the outer one swallowing the
+        inner. If nothing encloses the path - the workspace was revoked between
+        the call and the approval - it falls back to the path itself, which
+        degrades to exact-match rather than to a global grant.
+        """
+        target: Any = "."
+        for k, v in args.items():
+            if any(
+                t in k for t in ("path", "file", "dir", "root", "target")
+            ) and isinstance(v, str):
+                try:
+                    target = Path(v).resolve()
+                except OSError:
+                    target = v
+                break
+        if isinstance(target, Path):
+            best: Path | None = None
+            for root in self.manifests.roots():
+                try:
+                    r = Path(root)
+                except (TypeError, ValueError):
+                    continue
+                if r == target or r in target.parents:
+                    if best is None or len(r.parts) > len(best.parts):
+                        best = r
+            if best is not None:
+                target = best
+        return f"{tool}|{target}"
+
+    def _grant(self, tool: str, args: dict) -> None:
+        # The window is CLASS_GRANT_SECONDS, not a literal. This is a number the
+        # user chose deliberately ("600s is fine"), so it is named and inspectable
+        # rather than buried in this line where nobody would think to look for it.
+        with self._lock:
+            self._grants[self._grant_key(tool, args)] = (
+                time.monotonic() + self.CLASS_GRANT_SECONDS
+            )
+
+    def _has_grant(self, tool: str, args: dict) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            for key, deadline in list(self._grants.items()):
+                if deadline <= now:
+                    self._grants.pop(key, None)
+                elif key == self._grant_key(tool, args):
+                    return True
+        return False
+
+    def _invalidate_grants(self) -> None:
+        """Class grants do not survive anything consequential.
+
+        A grant means "for the next ten minutes, stop asking about this one
+        operation class". That is a statement about a *calm* period. The moment
+        the assistant does something more serious, or the user stops being
+        present, the premise is gone and the grant goes with it. Leaving it alive
+        across a T3 or an absence would make it a standing permission, which is
+        exactly what D32 says must not exist.
+        """
+        with self._lock:
+            n = len(self._grants)
+            self._grants.clear()
+        if n:
+            self._audit(
+                actor="daemon",
+                channel=CHANNEL_SCHEDULED,
+                tool="confirm.grant_clear",
+                tier=str(Tier.READ),
+                decision="allow",
+                reason=(
+                    f"cleared {n} class grant(s): a T2+ action or presence loss "
+                    "invalidates them"
+                ),
+            )
 
     # ----------------------------------------------------------------- executors
 
@@ -599,6 +1008,141 @@ class Daemon:
         tmp.write_text(body, encoding="utf-8")
         os.replace(tmp, target)
         return {"path": str(target), "bytes": len(body), "existed": existed}
+
+    # --- D33: delete is a move, not an unlink --------------------------------
+    #
+    # A T3 tool whose only implementation is `Path.unlink()` is untestable and
+    # irreversible, and this system's whole premise is that its actions are
+    # reversible (D14 keeps its own vault snapshots for exactly this reason).
+    # So `file.delete` MOVES the target into state/quarantine/<batch>/ and writes
+    # a manifest beside it. The file is gone from where it was - which is what the
+    # user asked for - and it is recoverable with `file.restore`, which is also
+    # what makes the confirmation path in D32 something we can actually exercise
+    # in a test suite without destroying anything real.
+    #
+    # The quarantine lives inside our own state directory, so the gate's self-path
+    # protection covers it: the assistant cannot use this tool to delete its own
+    # source, its own decisions, or its own quarantine.
+
+    _QUARANTINE_PREVIEW_CAP = 500
+
+    def _delete_targets(self, args: dict) -> list[Path]:
+        """Resolve what a delete would touch, following the *resolved* path.
+
+        D32 rule 1: resolution happens here, once, and the preview is built from
+        the result. If we previewed the raw string and executed the resolved one,
+        the dialog would be describing something other than what happens.
+        """
+        raw = str(args["path"])
+        p = Path(raw)
+        if any(ch in raw for ch in "*?["):
+            parent = p.parent if p.parent != Path("") else Path(".")
+            pattern = p.name
+            base = parent.resolve()
+            matches = sorted(
+                (m.resolve() for m in base.glob(pattern)),
+                key=lambda q: str(q).lower(),
+            )
+        else:
+            try:
+                matches = [p.resolve()]
+            except OSError:
+                matches = [p.absolute()]
+        return matches
+
+    def _preview_file_delete(self, args: dict) -> dict:
+        targets = self._delete_targets(args)
+        described, total_bytes, missing = [], 0, 0
+        for t in targets:
+            try:
+                if t.is_dir():
+                    n = sum(1 for _ in t.rglob("*"))
+                    described.append({"path": str(t), "kind": "dir", "entries": n})
+                else:
+                    size = t.stat().st_size
+                    total_bytes += size
+                    described.append({"path": str(t), "kind": "file", "size": size})
+            except OSError:
+                missing += 1
+                described.append({"path": str(t), "kind": "missing"})
+        return {
+            "action": "move to quarantine (recoverable, not erased)",
+            "proposed": str(args["path"]),
+            "resolved": str(Path(str(args["path"])).resolve()) if not any(
+                ch in str(args["path"]) for ch in "*?["
+            ) else "(glob resolved per match below)",
+            "count": len(described),
+            "files": len(described) - missing,
+            "total_bytes": total_bytes,
+            "missing": missing,
+            "targets": described[: self._QUARANTINE_PREVIEW_CAP],
+            "truncated": len(described) > self._QUARANTINE_PREVIEW_CAP,
+        }
+
+    def _exec_file_delete(self, args: dict) -> Any:
+        targets = self._delete_targets(args)
+        if not targets:
+            raise DaemonError("nothing matched")
+        batch = time.strftime("%Y%m%d-%H%M%S") + f"-{self._pending_seq:03d}"
+        dest_root = self.quarantine / batch
+        dest_root.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "batch": batch,
+            "created": time.time(),
+            "channel": self._channel(args) if isinstance(args, dict) else "pc",
+            "entries": [],
+        }
+        moved, failed = 0, []
+        for i, src in enumerate(targets):
+            if not src.exists():
+                failed.append({"path": str(src), "error": "missing"})
+                continue
+            # Flat, collision-free name. The original location is recorded in the
+            # manifest, which is what restore uses; the on-disk name only has to
+            # be unique and not escape.
+            flat = f"{i:05d}-{src.name}"
+            dest = dest_root / flat
+            try:
+                shutil.move(str(src), str(dest))
+            except OSError as exc:
+                failed.append({"path": str(src), "error": str(exc)})
+                continue
+            manifest["entries"].append(
+                {"original": str(src), "quarantined": str(dest), "is_dir": src.is_dir()}
+            )
+            moved += 1
+        (dest_root / "manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        return {
+            "deleted": moved,
+            "failed": failed,
+            "quarantine_batch": batch,
+            "quarantine_root": str(dest_root),
+            "recoverable": True,
+        }
+
+    def _exec_file_restore(self, args: dict) -> Any:
+        batch = str(args["batch"])
+        mpath = self.quarantine / batch / "manifest.json"
+        if not mpath.is_file():
+            raise DaemonError(f"no quarantine batch {batch!r}")
+        manifest = json.loads(mpath.read_text(encoding="utf-8"))
+        restored, failed = 0, []
+        for e in manifest.get("entries", []):
+            src = Path(e["quarantined"])
+            dst = Path(e["original"])
+            if not src.exists():
+                failed.append({"path": e["original"], "error": "already moved or gone"})
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(src), str(dst))
+            except OSError as exc:
+                failed.append({"path": e["original"], "error": str(exc)})
+                continue
+            restored += 1
+        return {"restored": restored, "failed": failed, "batch": batch}
 
     # ---------------------------------------------------------------- workspaces
 
@@ -820,10 +1364,11 @@ class Daemon:
 
     _OPS: dict[str, Callable] = {}
     _EXECUTORS: dict[str, Callable] = {}
+    _PREVIEWS: dict[str, Callable] = {}
 
 
 def _install_tables() -> None:
-    """Fill the op and executor tables by name.
+    """Fill the op, executor and preview tables by name.
 
     Done after the class body so the tables are built from names that are
     checked by ``_check_tables`` below, rather than from a dict literal that
@@ -838,6 +1383,14 @@ def _install_tables() -> None:
         "file.list": Daemon._exec_file_list,
         "file.read": Daemon._exec_file_read,
         "file.create": Daemon._exec_file_create,
+        "file.delete": Daemon._exec_file_delete,
+        "file.restore": Daemon._exec_file_restore,
+    }
+    Daemon._PREVIEWS = {
+        # Only destructive tools need a real preview, because only destructive
+        # tools are the ones a human is asked to bless. A preview for a T0 read
+        # would be theatre.
+        "file.delete": Daemon._preview_file_delete,
     }
 
 
@@ -859,6 +1412,34 @@ def _check_tables() -> None:
         raise RuntimeError(
             f"executors with no registry entry: {sorted(orphans)} - these would "
             f"run without a tier, which D5 does not permit"
+        )
+    preview_orphans = set(Daemon._PREVIEWS) - registry
+    if preview_orphans:
+        raise RuntimeError(
+            f"previews with no registry entry: {sorted(preview_orphans)}"
+        )
+    # A destructive tool that is *executable* must have a preview, or the
+    # confirmation dialog would show a bare "approve file.delete?" with nothing
+    # describing what would happen. D32 requires the resolved payload, so a
+    # missing preview is a build gap that has to be visible at import rather than
+    # a surprise at the moment of a delete.
+    #
+    # Scoped to executable tools on purpose. A destructive tool with no executor
+    # can never reach a confirmation, because op_tool_call resolves the executor
+    # before the CONFIRM branch - so demanding a preview for it would be
+    # demanding ceremony for a code path that cannot execute.
+    destructive_without_preview = {
+        spec.name
+        for spec in ALL_TOOLS
+        if spec.destructive
+        and spec.name in Daemon._EXECUTORS
+        and spec.name not in Daemon._PREVIEWS
+    }
+    if destructive_without_preview:
+        raise RuntimeError(
+            "executable destructive tools with no preview builder: "
+            f"{sorted(destructive_without_preview)} - D32 requires the "
+            "confirmation dialog to show the resolved payload, not just the tool name"
         )
     dupes = {spec.name for spec in ALL_TOOLS}
     if len(dupes) != len(ALL_TOOLS):

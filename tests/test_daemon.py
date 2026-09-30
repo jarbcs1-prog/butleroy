@@ -157,9 +157,21 @@ def test_tool_check_predicts_but_never_acts_and_is_not_audited(dg: D.Daemon, wor
     assert out["ok"] is True
     res = out["result"]
     assert res["would"] == "confirm", "a T3 delete must never be predicted as allowed"
-    assert res["executable"] is False
+    # `executable` is not a constant. It tracked the real executor set, and when
+    # file.delete gained an executor (D33 quarantine) it flipped to True. Asserting
+    # the old value would have been asserting a bug.
+    assert res["executable"] is True, "file.delete has an executor now - D33"
     assert "prediction" in res["note"]
     assert len(records(dg)) == before, "a check that only asks a question is not an event"
+
+    # And the same flag must be False for a tool that genuinely has no handler,
+    # which is the case that matters: a check that reports a T3 as executable when
+    # it could not run would let the user plan around a capability that is absent.
+    out2 = req(dg, "tool_check", tool="package.install", channel=CHANNEL_PC,
+               args={"package": "ripgrep"})
+    assert out2["result"]["would"] == "confirm"
+    assert out2["result"]["executable"] is False
+    assert len(records(dg)) == before
 
 
 def test_a_denied_tool_call_is_audited_as_a_denial(dg: D.Daemon, workspace: Path):

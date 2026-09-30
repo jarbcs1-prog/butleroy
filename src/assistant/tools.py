@@ -59,6 +59,12 @@ FILE_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("file.bulk_rename", Tier.CONSEQUENTIAL, "Rename many files at once"),
     ToolSpec("file.delete", Tier.IRREVERSIBLE, "Delete files", destructive=True),
     ToolSpec("file.empty_recycle_bin", Tier.IRREVERSIBLE, "Empty the recycle bin", destructive=True),
+    # D33: because delete quarantines instead of unlinking, there has to be a way
+    # back. This is the inverse of file.delete and it is deliberately NOT
+    # destructive and only T2 - restoring something the user asked to be removed is
+    # a correction, not a consequential act. It is a separate tool rather than a
+    # flag on delete so that the restore path is itself gated and audited.
+    ToolSpec("file.restore", Tier.CONSEQUENTIAL, "Restore files from quarantine"),
 )
 
 # The assistant must not shred its own guarantees, and must not be able to

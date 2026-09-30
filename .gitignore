@@ -1,25 +1,16 @@
-# Virtual environments
 .venv/
-venv/
-
-# Model weights — never commit these
 models/
 *.gguf
-*.gguf.iml
-*.bin
 *.safetensors
-*.pt
-*.pth
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
+*.onnx
 __pycache__/
-*.py[cod]
-
-# Runtime scratch
+*.pyc
 temp_screen.png
 logs/
-*.log
 audit/
+state/
+vendor/**/node_modules/
+node_modules/
+dist/
+.env
+*.env.local

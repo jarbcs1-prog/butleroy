@@ -1,44 +1,57 @@
-# Windows AI Assistant (local)
+# Local AI Assistant
 
-Fully local Windows 11 assistant. No cloud inference, no hosted APIs, no external
-runner (no Ollama / LM Studio / `llama-server`). Inference is embedded in our own
-process, against the local RTX 3060.
+A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative
+work that needs doing, and orchestrates software projects by delegating to a team of agents — with
+all reasoning and all memory on-device.
 
-Nothing is built yet. This repo currently contains the plan.
+## Read in this order
 
-## Documents
-
-- [`DECISIONS.md`](./DECISIONS.md) — architecture decisions and their rationale,
-  including where this supersedes [`AI_Assistant_Local.md`](./AI_Assistant_Local.md).
-- [`PLAN.md`](./PLAN.md) — phased execution plan with exit gates.
-- `AI_Assistant_Local.md` — the original proposal, retained for reference.
+| File | What it is |
+|---|---|
+| **DECISIONS.md** | 21 numbered decisions with rationale and evidence. v1 is in git history. |
+| **ARCHITECTURE.md** | Four planes, the VRAM arbiter, authority tiers, memory design |
+| **PLAN.md** | Seven phases with measurable gates |
+| `AI_Assistant_Local.md` | The original source document. **Superseded** — retained for provenance only |
 
 ## The governing constraint
 
-The assistant must never be the reason the machine is slow. VRAM and RAM are shared
-with the user's actual work.
+> "As much as I'd like that my assistant would be as performant as possible, if it ends up taking
+> all my VRAM and DDRAM for itself, how am I going to get it to do anything that will also require
+> such resources?"
 
-- Assistant VRAM: ≤ 7.0 GiB of 12.0 GiB
-- Process tree RAM: ≤ 16 GiB of 32 GiB
-- Models take **turns** on the GPU; they do not coexist
-- The assistant returns the GPU when idle
+This is encoded as an invariant, not a preference: **the assistant never takes resources it needs
+from you.** The daemon is always resident (~300 MB); only the model cycles and is killed after
+90 s idle, which is the only reliable way to return VRAM on Windows. A dedicated arbiter is the
+single authority on GPU memory and always preempts the assistant's own model before it can affect
+your workload.
 
-This is a design invariant, not a tuning preference. See D1 and D3 in `DECISIONS.md`.
+## Hardware (verified 2026-09-30)
 
-## Hardware this targets
+RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 3.11.9 ·
+CUDA 13.3 · `opencode` v2.0.19 · Obsidian at `E:\Obsidian_Vault`
 
-| | |
-|---|---|
-| GPU | NVIDIA RTX 3060, 12 GB, driver 616.92 |
-| CPU | Ryzen 5 5600G — 6 cores / 6 threads |
-| RAM | 32 GB DDR4 |
-| Toolchain | Python 3.11.9, `uv`, CUDA Toolkit 13.3, VS BuildTools (no `cl.exe` on PATH) |
+## What it will and will not do
 
-Note the 6-core CPU: any layer that spills off the GPU will be painfully slow. Full GPU
-offload is a requirement, not an optimization.
+**Will:** know this machine by querying it · diagnose and maintain it locally · administer files,
+mail, Telegram and media · teach · orchestrate real software projects by delegation · reflect and
+improve against evidence.
+
+**Will not:** take over the machine · write its own code or policy · act on your behalf while
+you're asleep beyond reversible reads and writes · let Telegram authorize anything destructive.
+
+## Hard boundaries
+
+- **No cloud reasoning.** All weights, prompts, inference and memory on-device. Telegram and IMAP
+  are transports, not reasoning. Cloud model providers are permitted in exactly one place — the
+  delegated-worker plane.
+- **No listening ports.** All inter-process transport is Windows named pipes.
+- **No coupling to any other project.** This repository shares no code, config, state or runtime
+  dependency with any project on `F:` or `E:`. External directories are reached only through an
+  explicit, user-approved workspace manifest.
+- **Safety is deterministic code**, never a model, and never a prompt instruction.
 
 ## Start here
 
-Step 0 in `PLAN.md` — prove native CUDA inference from a prebuilt wheel, using a small
-model, before downloading anything large. It is the cheapest possible moment to discover
-the foundation does not work.
+**Phase 0** — prove native CUDA inference from a prebuilt wheel with one small model. Gate: N/N
+layers offloaded, measured with `nvidia-smi`. Nothing above this line is real until it passes, and
+if it fails the honest thing is to stop and reassess rather than build on sand.

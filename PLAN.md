@@ -4,7 +4,7 @@ Re-sequenced against the clarified brief. Every phase has a **gate** — a measu
 If a gate fails, we stop and reassess rather than build on sand.
 
 The ordering principle: **get the LLM-free machinery working before the model.** This way you own
-a useful system even if the 9B disappoints you, and the project is not hostage to model quality.
+a useful system even if the models disappoint you, and the project is not hostage to model quality.
 
 ---
 
@@ -14,11 +14,14 @@ Nothing above this line is real until this passes.
 
 1. `uv venv` on Python 3.11.9 at `G:\localaized\.venv`.
 2. Install `llama-cpp-python` from the prebuilt cu124 `win_amd64` index (D2).
-3. Download **one small model** (Qwen2.5-0.5B-Instruct Q4_K_M, ~400 MB). Not the 9B.
+3. Download **one small model**: `ggml-org/Qwen3.5-0.8B-GGUF` Q4_K_M, ~500 MB.
+   **Not** Qwen2.5 — every real candidate descends from Qwen3.5, so this one test closes the
+   architecture question (D9's open risk) as well as the CUDA question.
 4. Load with `n_gpu_layers=-1`. Generate.
 5. Measure with `nvidia-smi`: confirm **N/N layers offloaded to GPU**.
 
-**Gate:** N/N layers on GPU **and** verifiable GPU utilisation during generation.
+**Gate:** N/N layers on GPU **and** verifiable GPU utilisation during generation. Two questions
+answered by one test: *does CUDA work here* and *does llama.cpp understand Qwen3.5*.
 
 **If this fails, do not proceed.** Fall back to source build via VS BuildTools + `vcvars64`
 (D2), and if that fails, reassess the whole premise before writing another line.
@@ -29,24 +32,38 @@ Nothing above this line is real until this passes.
 
 ## Phase 1 — Model bake-off
 
-Real candidates only (D9), downloaded one at a time. For each:
+Real candidates only (D9/D22), downloaded **one at a time**, freed and `nvidia-smi`-confirmed
+before the next download. For each:
 
 | Measure | Why |
 |---|---|
 | Load success | **D9 open risk: unknown architecture may not load** |
 | Layers offloaded | partial offload means silent CPU spill — unusable on 6 cores |
-| VRAM at 4K ctx, measured | fills the ladder row in DECISIONS |
+| VRAM at 4K ctx, measured | file size is a floor; this is the real number |
 | VRAM at 8K ctx, measured | ditto |
 | Prefill tok/s | the RAG bottleneck, the number you actually feel |
 | Generation tok/s | the number you quote |
 | Native tool-call parse | must round-trip through pydantic |
 
-**Gate:** a model loads fully on GPU, emits a valid tool call, and measured VRAM leaves ≥1.5 GiB
-headroom. Ladder order: Q4_K_S → Q4_K_M → ~~Q5_K_M~~ (rejected, D9).
+**Candidates, in the order they earn the download:**
 
-**Kill criterion:** if the 9B candidates all fail to load on this llama.cpp build, we drop to a
-smaller uncensored model and lean harder on Plane D. This is a *planned* outcome, not a failure
-of the project — the delegation architecture does not depend on the brain being 9B.
+| # | Model | Quant | File | Role under test |
+|---|---|---|---|---|
+| 1 | `HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` | Q8_0 | 4.17 GB | **fast tier** — the one that must be good |
+| 2 | `DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF` | IQ4_XS | 5.96 GB | **deep tier** |
+| 3 | `llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF` | Q5_K_M | 5.37 GB | wildcard — MoE, if fast enough it may replace both |
+
+Cross-check each measurement against `llm-checker gpu-plan` and `llmfit`'s RTX 3060 preset
+(104 usable rows). Expect ~200 tok/s out below 6.5 GB and a fall toward ~109 tok/s above 8 GB; a
+candidate landing outside that band means our measurement is wrong, not the tool.
+
+**Gate:** a model loads fully on GPU, emits a valid tool call, and measured VRAM leaves ≥1.5 GiB
+headroom of the D1 ceiling. The fast tier is the gate — if the 4B is not competent, the tiering
+scheme is wrong and we find that out here rather than in month three.
+
+**Kill criterion:** if the 9B fails to load or misses the gate, the deep tier is simply dropped and
+Plane D does the heavy reasoning. This is a *planned* outcome, not project failure — the delegation
+architecture does not depend on the deep tier existing.
 
 ---
 
@@ -138,17 +155,21 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| 9B GGUF fails to load on this llama.cpp build | **Real** (D9) | Phase 0 proves the runtime; Phase 1 has a planned fallback to a smaller model. The delegation architecture does not depend on brain size. |
+| Qwen3.5 GGUF fails to load on this llama.cpp build | **Real** (D9) | Phase 0 tests Qwen3.5 *itself* precisely so this is caught before anything is built on it |
 | Delegated workers contend for VRAM | Medium | Arbiter leases; one worker at a time; preemption favours you |
 | Model too slow for usable interaction | Medium | Tight context (3-level allocation), measured prefill in Phase 1, TTL keeps the GPU free |
+| The 4B fast tier is not actually competent | **Medium** | Phase 1 gates on it, not on the 9B. Discovered in Phase 1, not month three |
+| Tier swap latency annoys in practice | Medium | ~5–15 s, only on hard planning turns; measure in Phase 1 and revisit if frequent |
 | Assistant over-reaches on a destructive tool | Low | Tiers are code, not prompt (D13); deny-path absolute; unattended cap |
 | Scope creep — brief is ~5× v1 plan | **High** | Gates prevent forward motion on unproven ground; each phase is independently shippable |
 | Obsidian vault too large to index | **Resolved** | ~430 indexable notes; `datasets/` hard-excluded (D14) |
+| "22 GB VRAM available" from a tool | **Resolved** | llm-checker double-counts the 3060; recorded and rejected in D23. One GPU, 12 GB |
 
 ---
 
 ## Immediate next action
 
-**Phase 0.** One command sequence: create the venv, install one wheel, fetch one ~400 MB model,
-prove full GPU offload. It either establishes the foundation or tells us quickly that it is not
-there. Nothing else in this plan can be honestly planned until it passes.
+**Phase 0.** One command sequence: create the venv, install one wheel, fetch
+`ggml-org/Qwen3.5-0.8B-GGUF` Q4_K_M (~500 MB), prove full GPU offload. It either establishes the
+foundation — CUDA *and* Qwen3.5 architecture support in one shot — or tells us quickly that it is
+not there. Nothing else in this plan can be honestly planned until it passes.

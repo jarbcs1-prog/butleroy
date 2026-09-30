@@ -50,22 +50,62 @@ or Silero VAD.
 ### D8 — Hotkey is `Ctrl+Alt+Space`
 `Win+Space` is OS-reserved; `Win+Alt+Space` collides with common vendor software.
 
-### D9 — Uncensored models, load compatibility unproven
-Candidates verified to exist on Hugging Face as GGUF with paired `mmproj`:
-`DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF` (885 likes,
-1.85 M downloads), `mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF`,
-`mradermacher/Qwen3.8-9B-heretic-uncensored-GGUF`.
-**Open risk:** a model newer than the bundled llama.cpp may fail to load due to an unknown
-architecture. This is why Step 0 exists and why it is a hard gate.
+### D9 — Uncensored models: priority order and verified VRAM
+Priority, in the user's stated order: **abliterated → heretic → uncensored.** Most candidates
+carry all three tags, so this is a tiebreaker rather than a filter.
 
-Model ladder, ordered by VRAM headroom:
-| Quant | ~VRAM | Verdict |
+Sizes below are **measured file sizes from the HuggingFace API**, not estimates. The v1 ladder was
+too optimistic and is corrected here.
+
+Reference model: `DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF`
+(887 likes, 1.85 M downloads; tags heretic / uncensored / abliterated / imatrix).
+
+| Quant | File size | + KV/cache overhead | Verdict vs 7.0 GiB ceiling |
+|---|---|---|---|
+| IQ2_M | 4.60 GB | ~5.3 GB | quality-degraded |
+| IQ3_M | 5.23 GB | ~5.9 GB | viable, mild degradation |
+| **IQ4_XS** | **5.96 GB** | **~6.7 GB** | **Safest 9B option** |
+| Q4_K_S | 6.10 GB | ~6.8 GB | tight but viable |
+| Q4_K_M | 6.36 GB | ~7.1 GB | **REJECTED — over ceiling** |
+| Q5_K_M | 7.14 GB | ~7.8 GB | **REJECTED — over ceiling** |
+| Q6_K / Q8_0 | 7.97 / 9.76 GB | — | **REJECTED** |
+| `mmproj-F16` | 0.86 GB | — | vision, loaded on demand |
+
+**Correction to v1:** Q4_K_M was recorded as "fits if audio stays on CPU". At 6.36 GB file + ~0.75 GB
+overhead it is over the 7.0 ceiling. Only IQ4_XS and below are safe at 9B.
+
+**MoE is excluded outright.** `Qwen3.5-35B-A3B` has a smallest quant of **10.74 GB** — 54 % over
+the ceiling, and most of a 12 GB card. **MoE keeps every expert resident; the "A3B" active-parameter
+count buys speed, not VRAM.** This eliminates the 35B-A3B, 122B-A10B and 397B-A17B branches
+entirely, and is the single most commonly misunderstood fact about MoE.
+
+`gpt-oss-20b` is excluded: smallest quant **11.00 GB** on a 12 GB card, leaving nothing for the OS
+or display.
+
+**Open risk retained:** a model newer than the bundled llama.cpp may fail to load due to an unknown
+architecture. Partially de-risked — `ggml-org/Qwen3.5-0.8B-GGUF` is published by llama.cpp's own
+organisation, confirming Qwen3.5 is a supported architecture, and every candidate descends from
+Qwen3.5. Phase 0 therefore proves Qwen3.5, not Qwen2.5. Remaining risk is per-repository GGUF
+conversion quality, not core architecture support.
+
+**Architectures independently confirmed present** in the `llmfit` catalog (12,937 models, verified
+2026-09-30): `qwen3_5`, `qwen3_5_text`, `gemma4`, `gemma4_unified`, `gpt_oss`. This **downgrades the
+Gemma-4 load risk** from "highest" to normal, and `gemma4_unified` indicates genuine any-to-any
+multimodality matching the candidate's `any-to-any` pipeline tag.
+
+**Additional candidates surfaced**, ordered by the user's priority (abliterated → heretic →
+uncensored):
+| Model | Tags | Note |
 |---|---|---|
-| 9B IQ4_XS / Q4_K_S | 5.2–5.5 GB | **Safest.** ~1.5 GB headroom |
-| 9B Q4_K_M | 5.7–6.2 GB | Fits only if audio stays on CPU |
-| 9B Q5_K_M | 6.6–7.0 GB | **REJECTED** — violates D1 |
+| `mckerm1t/gemma-4-e4b-it-abliterated-bf16` | **abliterated** | BF16 only — would need requantising to GGUF |
+| `llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF` | heretic, uncensored, **GGUF** | Q5_K_M 5.37 GB — Phase 1 wildcard |
+| `p-e-w/gpt-oss-20b-heretic-ara-v3` | heretic | still 11 GB — excluded on size |
+| `deadbydawn101/gemma-4-E2B-Heretic-Uncensored-*` | heretic, uncensored | E2B, smaller sibling |
 
-All figures must be **measured** with `nvidia-smi`, never estimated.
+**Note on the `llmfit` catalog's own fields:** `parameter_count` and `min_vram_gb` are unreliable for
+MLX and pre-quantised rows (a 9B listed as "1.4B, 0.7 GB VRAM"). Only its `architecture` and MoE/dense
+fields were used. Its benchmark `id`s are opaque hashes that do not join to the catalog, so **no
+per-model speed figure was taken from it** — see D22.
 
 ---
 
@@ -198,14 +238,14 @@ teaching (2e) retain their own tool sets, since those are the assistant's own jo
 ### D17 — Honest capability boundaries
 Stated plainly so the design is not built against a fiction:
 
-| Requirement | Verdict on one RTX 3060 + 9B |
+| Requirement | Verdict on one RTX 3060 + a 4B fast tier and a 9B deep tier |
 |---|---|
 | Knowledge of the system | **Strong.** Mostly tool calls, not intelligence (D15). |
 | Tech support / maintenance | **Strong**, for the same reason. Diagnosis = read state + reason. |
 | Administration (files, mail) | **Strong.** Deterministic code executes; the model selects the tool. |
 | Pedagogy | **Strong and cheap.** Small models teach well with tight retrieval and Socratic prompting. |
 | Coding | **Weak.** Competent single-file work, explanation, review. Multi-file refactors of a large codebase will be wrong. Not to run unsupervised on production code. |
-| Orchestrating real projects | **Not as the thinker.** A 9B cannot plan a 113 KB-scale project well. |
+| Orchestrating real projects | **Not as the thinker.** Neither tier can plan a 113 KB-scale project well; the deep tier is a second opinion, not the planner. |
 
 **Consequence:** the local assistant is the always-on front desk, personal automation layer, and
 orchestrator-in-chief. The engineering labour happens in Plane D. This is not a compromise — it
@@ -254,3 +294,60 @@ acceptable risk. Therefore:
   create harmful rigidity, and is validated.
 - Named anti-patterns, carried over: performative reflection, reflection without change,
   overfitting (one failure → permanent rule), endless analysis.
+
+## Part III - Model sizing (settled in v3)
+
+### D22 - The brain is two tiers that take turns, not one resident model
+A single 9B does not fit the D1 budget with the headroom the user requires, and two models cannot
+co-reside either (4.17 + 5.96 = 10.13 GB). The resolution is **eviction-based tiering**, which is
+already the mechanism D3 and the VRAM arbiter are built around:
+
+| Tier | Model | Quant | File | mmproj | Purpose |
+|---|---|---|---|---|---|
+| **Fast** (resident by default) | `HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` | Q8_0 | 4.17 GB | 0.63 GB | admin actions, tool selection, voice turns, quick questions, most planning |
+| **Deep** (on demand) | `DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF` | IQ4_XS | 5.96 GB | 0.86 GB | hard decomposition, architecture trade-offs, adversarial review of a plan |
+| Wildcard (Phase 1 only) | `llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF` | Q5_K_M | 5.37 GB | 0.92 GB | MoE — if it measures fast it may displace the fast tier entirely |
+
+Escalation protocol: on a hard planning turn the arbiter **kills the fast tier, loads the deep tier,
+serves exactly one turn, then the 90 s idle TTL kills it and the fast tier reloads.** Peak stays at
+~6.7 GB, inside the 7.0 GiB ceiling. Cost is one model load (~5–15 s) per escalation; escalations are
+rare because the fast tier handles most turns, so the amortised cost is a small tax on rare events.
+
+This is the legitimate descendant of the original plan document's "Laya in front of the heavy LLM"
+idea. The idea survives — a small fast model in front of a bigger slow one — but the 0.36-accuracy
+model does not (D19). The fast tier is a real, measured, competent 4B rather than a router.
+
+**Consequence for Plane D:** because the local brain is deliberately not a strong programmer (D17),
+the delegation path is load-bearing rather than an optimisation. The 4B is good at *deciding* and
+*explaining*; `opencode` workers do the writing.
+
+### D23 - Sizing is set by measurement, but three sizing rules are already known
+`llm-checker` was run against this machine. Two of its outputs are recorded here; one is rejected:
+
+- **Accepted:** tier `MEDIUM`, best backend `NVIDIA CUDA`, 6 physical cores, AVX2 confirmed, driver
+  616.92, fingerprint `cuda-rtx-3060-12gb`.
+- **Rejected:** it reports `Detected GPUs: 2`, `Total VRAM 24GB`, `pooled safe envelope 22GB`. It has
+  counted the single RTX 3060 twice (once via CUDA, once via its generic `systeminformation` path).
+  There is one GPU and 12 GB. This is recorded because "22 GB available" is exactly the kind of number
+  that would justify a model the user's own constraint forbids.
+- **Rejected:** `Max model size: 10GB` assumes the whole card. The D1 ceiling is 7.0 GiB, and the
+  measured RTX 3060 speed/VRAM curve shows a cliff above 8 GB where medians fall from ~200 to ~109
+  tok/s output. The ceiling is not a guess.
+
+Standing rules, all derived from measurement rather than preference:
+1. **MoE does not buy VRAM.** All expert weights stay resident. "35B-A3B" is a *speed* claim, not a
+   footprint claim — its most aggressive quant is 10.74 GB, which is over budget by 54 %. Any future
+   "it's MoE, so it must fit" argument is wrong.
+2. **A quant's file size is a floor, not a total.** Add 0.5–0.9 GB of KV cache and compute buffers
+   before judging a candidate.
+3. **Q8_0 over IQ for the resident tier.** The 4B at Q8_0 is 4.17 GB and essentially lossless; the
+   9B is where the quant has to become lossy, because it only runs alone.
+4. **A model newer than the bundled llama.cpp may not load** (D9 open risk). Phase 0 now proves
+   `Qwen3.5` itself loads, not `Qwen2.5`, because every real candidate descends from Qwen3.5 — one
+   test that closes both the CUDA question and the architecture question.
+
+### D24 - These two tools are instruments, not dependencies
+`F:\llm-checker-3.8.1` and `F:\llmfit-1.1.14` were read for numbers. No code was imported, no runtime
+dependency taken, no path baked in (D10). Their findings are transcribed into D9, D22 and D23 and
+after Phase 1 neither tool is required. Phase 1 keeps them available for cross-checking its own
+measurements, which is their entire remaining value.

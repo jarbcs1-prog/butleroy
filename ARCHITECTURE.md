@@ -10,13 +10,14 @@ Four planes. One invariant. Read DECISIONS.md first — this document assumes it
 └──────────────────────┬──────────────────────────────────────────────────────────┘
                        │ request (JSON)                    ▲ event / result
                        ▼                                    │
-┌─ PLANE B · LOCAL BRAIN ────────────────── on demand · ≤7 GiB VRAM · killed idle ┐
-│  Qwen3.5-9B + mmproj, child process, 90 s TTL                                    │
-│  intent · brainstorm · decompose · teach · emit tool-call · act as LLMJudge     │
-│  capabilities: knowledge · administration · delegate() · teach()                 │
-│  NOT capabilities: direct code editing in a target project  (D16)                │
-└──────────────────────┬──────────────────────────────────────────────────────────┘
-                       │ assignTask / cancelTask / intervene
+┌─PLANE B - LOCAL BRAIN  on demand  7 GiB ceiling  two tiers  idle TTL             
+│   FAST  Qwen3.5-4B Q8_0 4.17 GB  -  resident  -  admin / tools / voice          │
+│   DEEP  Qwen3.5-9B IQ4_XS 5.96 GB  -  loads by evicting FAST, one turn (D22)    │
+│   intent - brainstorm - decompose - teach - emit tool-call - act as LLMJudge    │
+│   capabilities: knowledge - administration - delegate() - teach()               │
+│   NOT capabilities: direct code editing in a target project  (D16)              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                       │  assignTask / cancelTask / intervene
                        ▼
 ┌─ PLANE C · SUPERVISOR ──────────────────── Node/TS · vendored fork · no LLM ───┐
 │  AgentRegistry · HeartbeatMonitor · LoopDetector(+LLMJudge) · Watchdog          │
@@ -94,6 +95,24 @@ Binding properties:
   before it causes you a stutter.
 - **Lease TTL expiry kills the process.** That is what actually returns VRAM on Windows (D3).
 - Denials are surfaced to the user, not silently retried.
+
+### Tier swap (D22)
+
+Because the two brain tiers **cannot co-reside** (4.17 + 5.96 = 10.13 GB > the 7.0 GiB ceiling),
+escalation is a swap, and the arbiter is what makes it safe:
+
+```
+needs_deep_reasoning(request):
+    if fast tier is resident:
+        kill(fast tier)              # returns ~4.8 GB immediately
+        wait for free_vram >= 6.7 GB  # 90 s TTL would have done this anyway
+    start deep tier, serve exactly one turn
+    on turn end: the 90 s idle TTL kills it, the fast tier reloads
+```
+
+The only thing that changes for the user is a ~5–15 s pause on rare, hard planning turns. The
+arbiter's `preempt_self()` is what makes the swap safe when the user's own CUDA workload is active
+at the same moment — the deep tier will be denied rather than allowed to cause a stutter.
 
 ---
 
@@ -228,13 +247,14 @@ portion (requirements 1, 2a, 2b, 2c, 2e) is entirely achievable on this hardware
 |---|---|---|---|
 | Plane A daemon | ~250–350 MB | 0 | always |
 | Plane C supervisor (Node) | ~150–250 MB | 0 | always |
-| Plane B brain (9B Q4_K_S) | ~1 GB | 5.2–5.5 GB | on demand, 90 s TTL |
-| Plane B mmproj | ~0.4 GB | ~0.6 GB | only during vision |
+| Plane B fast tier (4B Q8_0) | ~0.6 GB | ~4.8 GB incl. mmproj | resident by default |
+| Plane B deep tier (9B IQ4_XS) | ~1.0 GB | ~6.7 GB | on demand, evicts fast tier, 90 s TTL |
+| Plane B mmproj (whichever tier) | ~0.4 GB | ~0.6–0.9 GB | only during vision |
 | faster-whisper (CTranslate2) | ~1 GB | 0 (CPU) | only while listening |
 | piper + openWakeWord | ~250 MB | 0 | always, tiny |
-| **Worst case total** | **~4 GB** | **~6.1 GB** | |
+| **Worst case total** | **~3.5 GB** | **~6.7 GB** (tiers never coexist) | |
 | **Ceiling (D1)** | 16 GB | 7.0 GiB | |
-| **Left for you** | **~28 GB** | **~5.9 GiB** | |
+| **Left for you** | **~28.5 GB** | **~5.3 GiB** | |
 
 Plus one leased worker (Plane D) at a time, arbitrated. Figures are targets to be *measured* in
 Step 1, not estimates.

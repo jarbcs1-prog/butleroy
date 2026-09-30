@@ -52,6 +52,8 @@ you're asleep beyond reversible reads and writes · let Telegram authorize anyth
 
 ## Start here
 
-**Phase 0** — prove native CUDA inference from a prebuilt wheel with one small model. Gate: N/N
+**Phase 0** — prove native CUDA inference from a prebuilt wheel, using
+`ggml-org/Qwen3.5-0.8B-GGUF` so that one small download answers two questions: does CUDA work
+here, and does llama.cpp understand Qwen3.5 (which every real candidate descends from). Gate: N/N
 layers offloaded, measured with `nvidia-smi`. Nothing above this line is real until it passes, and
 if it fails the honest thing is to stop and reassess rather than build on sand.

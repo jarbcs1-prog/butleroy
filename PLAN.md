@@ -111,7 +111,7 @@ nothing about the 4B or the 9B fits the budget — that is Phase 1.
 
 ---
 
-## Phase 1 — Model bake-off
+## Phase 1 — Model bake-off — **FAST TIER PASSED, exit 0**
 
 Real candidates only (D9/D22), downloaded **one at a time**, freed and `nvidia-smi`-confirmed
 before the next download. For each:
@@ -141,6 +141,41 @@ candidate landing outside that band means our measurement is wrong, not the tool
 **Gate:** a model loads fully on GPU, emits a valid tool call, and measured VRAM leaves ≥1.5 GiB
 headroom of the D1 ceiling. The fast tier is the gate — if the 4B is not competent, the tiering
 scheme is wrong and we find that out here rather than in month three.
+
+#### Phase 1 results — candidate 1 PASSED (`phase1_measure.py`, exit 0)
+
+```
+model   : Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf  (4.17 GiB, byte-exact)
+loaded in 2.5s   offload report: 33/33 layers to GPU
+vram at 4K ctx   4.92 GiB ours  (file 4.17 + 0.74 overhead) -> 2.08 GiB spare under the 7.0 ceiling
+board total      6.91 GiB       (2.00 GiB of that was already the user's own software)
+emitted/parsed/right tool/arg present: PASS.  Did not invent the decoy tool: PASS.
+```
+
+Three things this changed, all recorded as decisions rather than notes:
+
+1. **D34 — the design is grammar-first, and D6 is superseded.** Under `tool_choice="auto"` the 4B
+   **cannot be made to decide** to call a tool: it narrates the call in prose and returns no call, which
+   is a silent failure. Pinned, it is perfect. **GBNF-constrained, it commits every time** — including
+   with no `tools=` supplied at all, because prose is not a legal token sequence in a call position.
+   The production grammar is generated from the live registry, and **the call arrives in `content`, not
+   in `tool_calls`**. I had earlier dismissed the source document's GBNF grammar as a toy; that was
+   wrong, and the correction is recorded rather than quietly overwritten.
+2. **D35 — a VRAM ceiling is about what *we* consume.** The first gate compared the *board total*
+   (6.97 GiB) to the ceiling and called it a near-failure. That reading was wrong: 2.00 GiB was already
+   the user's own software. The constraint is about what the assistant takes. Every gate from here
+   measures the **delta we caused** and also reports the board total, so the distinction survives.
+3. **D36 — a silent no-op in a constraint API is the worst failure mode available.** `grammar` nested
+   inside `response_format` is **silently ignored**: no error, and the model returns plausible output
+   that ignores the constraint entirely. Any mechanism whose job is to constrain output must be
+   *proved* active before it is relied on.
+
+**Timing numbers in the run are not results.** CPU load was ~28% with `F:\Wan2GP-Tauri` still building,
+so D28 applies: 4.5 s call latency and the tok/s figures are recorded but unusable. The structural
+half — offload, footprint, competence — is unaffected by load and stands.
+
+**Candidates 2 and 3 are not yet downloaded.** The 9B deep tier and the gemma-4 wildcard remain, and
+the deep tier's 5.96 GB would need the fast tier evicted (they cannot co-reside).
 
 **Kill criterion:** if the 9B fails to load or misses the gate, the deep tier is simply dropped and
 Plane D does the heavy reasoning. This is a *planned* outcome, not project failure — the delegation
@@ -178,8 +213,10 @@ prompts and executes nothing until confirmed at the PC; an unattended session ex
 | Named-pipe transport | `ipc.py` | done — no TCP anywhere, enforced by an AST check |
 | Workspace manifests (D10) | `manifest.py` | done — **no discovery method exists at all** |
 | Obsidian bridge (D14) | `obsidian.py` | done — 426 real notes; 7.5 GB corpus excluded |
-| Daemon | `daemon.py` | done — 24 ops, **3 executors** (`file.list/read/create`) |
+| Daemon | `daemon.py` | done — 27 ops, **5 executors** (incl. quarantine `file.delete`/`file.restore`) |
 | Tray + hotkey + presence | `tray.py` | done |
+| T3 confirmation | `daemon.py` | done — payload-bound, single-use, three-scope (D32) |
+| Quarantine (D33) | `daemon.py` | done — delete is a recoverable *move*, never an unlink |
 
 **Two design decisions worth recording, because both are cases where the obvious choice was wrong:**
 
@@ -293,8 +330,9 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 | Qwen3.5 GGUF fails to load on this llama.cpp build | **Resolved** | Phase 0 passed: 25/25 layers on GPU, Qwen3.5 understood |
 | Prebuilt wheels are unusable on this CPU | **Resolved** | D25; we build from source. Recorded so nobody reinstalls a wheel and "fixes" a working runtime |
 | Delegated workers contend for VRAM | Medium | Arbiter leases; one worker at a time; preemption favours you |
-| Model too slow for usable interaction | Medium | Tight context (3-level allocation), measured prefill in Phase 1, TTL keeps the GPU free |
-| The 4B fast tier is not actually competent | **Medium** | Phase 1 gates on it, not on the 9B. Discovered in Phase 1, not month three |
+| Model too slow for usable interaction | **Unmeasured** | D28 voided every Phase 1 timing number. Re-measure on a quiet machine before trusting any latency figure |
+| The 4B fast tier is not actually competent | **Resolved** | Phase 1 gate passed, exit 0 — but only *with* grammar constraint (D34). Without it the model narrates instead of calling, which is a silent failure |
+| A constraint silently does nothing | Medium | D36: `grammar` nested in `response_format` is ignored with no error. Every constraining mechanism must be proved active by inspecting output shape, never trusted from the flag being set |
 | Tier swap latency annoys in practice | Medium | ~5–15 s, only on hard planning turns; measure in Phase 1 and revisit if frequent |
 | Assistant over-reaches on a destructive tool | Low | Tiers are code, not prompt (D13); deny-path absolute; unattended cap |
 | Scope creep — brief is ~5× v1 plan | **High** | Gates prevent forward motion on unproven ground; each phase is independently shippable |
@@ -312,11 +350,24 @@ daemon wiring that ties the policy gate, the arbiter, the audit log and the mani
 Then download candidate 1 (`HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` Q8_0, 4.17 GB) and
 measure it on a quiet machine.
 
-Current state: **Phase 0 passed** (exit 0, foundation proven). **Phase 2 substantially built** — 213
-tests green inside the venv, tray/hotkey/presence done, but the **prompt overlay and Telegram bridge
-are not built** and only 3 of ~58 registered tools have executors. The Phase 2 vertical slice is
-therefore still open.
+Current state: **Phase 0 passed. Phase 1 candidate 1 (fast tier) passed. Phase 2 substantially
+built** — 259 tests green, tray/hotkey/presence/T3-confirmation/quarantine all done. Still open: the
+**prompt overlay** and the **Telegram bridge**, and only 5 of ~58 registered tools have executors, so
+the Phase 2 vertical slice is not yet closed.
 
-**In flight:** the 4.17 GB fast-tier model is downloading (`download_fast_tier.ps1`, resumable, with
-byte-exact verification against the Hugging Face sizes). It must reach exactly **4,482,402,656** bytes
-before Phase 1 touches it — a truncated GGUF loads and then generates nonsense rather than raising.
+**Next, in order:**
+
+1. **The brain adapter** — a child process that loads the 4B, generates a GBNF grammar **from the live
+   tool registry**, and serves one turn over `PIPE_BRAIN_REQ`. This is the first thing that needs the
+   model, and it is what makes the vertical slice closeable. D34 constrains the shape; D3 makes it a
+   disposable child with a 90 s TTL; the arbiter grants it a lease *before* it loads.
+2. **The overlay** in tkinter — frameless, always-on-top, no focus theft, with the T3 dialog wired to
+   `confirm.approve` (D32). `render_delta()` gets its first real input here.
+3. **Telegram bridge** — token already in `state/telegram.json`, allowlist `[199251286]`. Long-poll
+   only, no inbound port, `telegram.send` stays T3 (D13: a remote channel may request but never
+   authorise).
+
+**Two measurement tasks still owed, and D28 governs both:** re-take the speed numbers on a quiet
+machine (load was ~28% with `F:\Wan2GP-Tauri` building throughout Phase 1), and download candidates 2
+and 3 — the 9B deep tier at 5.96 GB and the gemma-4 wildcard at 5.37 GB. The deep tier **must evict**
+the fast tier; they cannot co-reside.

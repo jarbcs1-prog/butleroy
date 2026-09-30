@@ -43,7 +43,15 @@ promoted to GPU only while actively listening. No second multi-GB resident model
 Three-tier allow / confirm / deny, per-tool `destructive` flag, path and verb pattern rules,
 append-only audit log. Extended to a four-tier authority model in D13.
 
-### D6 — Native tool-calling, grammar only as a backstop
+### D6 - Native tool-calling, grammar only as a backstop — **SUPERSEDED by D34**
+
+> The original reasoning was that native tool-calling is cleaner and a grammar is a fallback for when
+> the model produces malformed JSON. Measurement in Phase 1 (D34) showed the opposite for a 4B: the
+> model **will not decide** to call a tool, and a grammar is the only thing that makes it commit. The
+> idea is not discarded, it is promoted — and it is the one idea from the source document that
+> survives intact.
+
+
 The toy single-action GBNF grammar in the original source doc is not sufficient. Use the model's
 native tool-calling with pydantic validation.
 
@@ -628,3 +636,65 @@ This also makes the destructive path *testable*, which a real `unlink` would not
 itself inside our own state directory, so the policy gate's self-path protection covers it: the
 assistant cannot delete its own source, its own decisions, or its own quarantine through this tool.
 
+
+## Part VI - What Phase 1 measured
+
+### D34 - The assistant is grammar-first. Native tool-calling is the fallback, not the reverse.
+Phase 1 gated the fast tier on *competence*, not on being good, and competence failed. The decisive
+experiment (`probe_tools.py`, then `probe_grammar.py`) asked three questions of the same 4B on the
+same prompt:
+
+| Decoding constraint | Result |
+|---|---|
+| `tool_choice="auto"` | **No call.** It narrates: *"I need to use the file_list function with the path parameter set to ..."* |
+| `tool_choice` pinned to `file_list` | Clean native call, correct arguments |
+| **GBNF grammar-constrained** | **Clean call, every time, in all three variants tried** |
+
+The reason is structural, not statistical. Prose is not a legal token sequence in a call position, so
+a grammar-constrained decode does not make the model *better at deciding* to call a tool. It removes
+the option of not committing, which is the only thing that was actually broken.
+
+The strongest evidence is the third variant: a raw grammar with **no `tools=` at all**. The model was
+never told a tool existed and still produced a correct call, because the grammar admits nothing else.
+
+**Consequences, and they are not small:**
+- The production grammar is **generated from the live tool registry**, never hand-maintained. A
+  grammar hand-written beside a tool list is a grammar that will be wrong in six months, and it will
+  fail in the one place where failing is unacceptable.
+- **The call arrives in `content`, not in `tool_calls`.** The brain adapter parses content. Anything
+  written against native `tool_calls` will silently see nothing.
+- Native `tool_calls` with a pinned `tool_choice` is **kept** for the case proven to work, not
+  removed. Two mechanisms, each used where it is measured to hold.
+- I had earlier dismissed the source document's GBNF grammar as a toy. That judgement was wrong and
+  the correction is recorded here rather than quietly overwritten: the original author was right about
+  the mechanism, and wrong only about the model that would consume it.
+
+### D35 - A VRAM ceiling is about what we consume, not about the board total
+The first version of the Phase 1 gate compared **board total** VRAM (6.97 GiB) against the 7.0 GiB
+ceiling and called it a failure with 0.20 GiB spare. That reading was wrong, and the user's own words
+settle it: *"if it ends up taking all my VRAM and DDRAM for itself, how am I going to get it to do
+anything that will also require such resources?"* The constraint is about **what the assistant takes**,
+not about what the user is already running.
+
+Measured, with both numbers kept visible: **2.00 GiB was already in use by the user's own software
+before we loaded anything.** Our own consumption was **4.92 GiB** for a 4.17 GiB file, leaving
+**2.08 GiB spare** under the ceiling. Read as a board total, D1 would have been "violated" by the
+user's own workload, which is exactly the situation the rule exists to prevent.
+
+**The rule:** every VRAM gate measures the **delta we caused** and additionally reports the board
+total, so the distinction cannot be quietly lost by the next person who reads a number.
+
+### D36 - A silent no-op in a constraint API is worse than an error
+Passing `grammar` **nested inside `response_format`** to `create_chat_completion` is **silently
+ignored** - no error, no warning, no log line. The model then produced output that plainly did not
+match the grammar (one run invented `{"files": ["README.txt", ...]}`), and the natural reading is
+"the model cannot do this" rather than "the constraint was never applied."
+
+The correct form is a **top-level** `grammar=` kwarg taking a `LlamaGrammar` object
+(`LlamaGrammar.from_string(...)`). A raw `str` dies loudly in the sampler, which is the better
+failure.
+
+Generalised: **for any mechanism whose whole job is to constrain output, a silent no-op is the worst
+possible failure mode**, because the system keeps working and keeps returning plausible output. Every
+such mechanism here must be proved active before it is relied on. That includes the grammar, and it
+is why `probe_grammar.py` checks the emitted shape rather than trusting that the flag was set.

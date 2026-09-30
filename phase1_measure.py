@@ -186,6 +186,30 @@ def report(rows: list[tuple[str, str]]) -> None:
     print("=" * 74)
 
 
+def _cpu_load() -> float:
+    """Instantaneous CPU load as a percentage.
+
+    Measured rather than assumed. D28 says no timing number is trustworthy
+    without a quiet machine, and the only honest way to honour that is for the
+    script that takes the timing to also report the condition it was taken
+    under - otherwise "trustworthy" is a property the reader has to guess at.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "(Get-CimInstance Win32_Processor).LoadPercentage",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = proc.stdout.strip().splitlines()[-1].strip()
+        return float(out) if out else 999.0
+    except Exception:
+        # If we cannot measure the machine's state, assume the worst and let the
+        # reader discount the numbers. An unknown is not a quiet machine.
+        return 999.0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctx", type=int, default=4096, help="context length to measure")
@@ -429,10 +453,16 @@ def main() -> int:
     if "definitely_not_a_real_tool" in names:
         failures.append("invented a tool that does not exist")
 
+    # The CPU load is sampled here, not asserted in the label. A hardcoded
+    # "(contended)" is worse than no label at all: it goes stale the moment the
+    # machine is quiet, and a stale caveat reads as a real one. A measurement
+    # script should measure the condition its measurement depends on.
+    load = _cpu_load()
+    quiet = load <= 15.0
     rows.append((
-        "call latency (contended)",
+        "call latency",
         f"{time.time() - t:.1f}s",
-        "NOT A TIMING RESULT - D28",
+        "VALID" if quiet else f"CONTENDED (cpu {load:.0f}%) - D28",
     ))
 
     # ---- optional timing ---------------------------------------------------

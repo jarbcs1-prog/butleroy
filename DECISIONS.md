@@ -698,3 +698,42 @@ Generalised: **for any mechanism whose whole job is to constrain output, a silen
 possible failure mode**, because the system keeps working and keeps returning plausible output. Every
 such mechanism here must be proved active before it is relied on. That includes the grammar, and it
 is why `probe_grammar.py` checks the emitted shape rather than trusting that the flag was set.
+
+### D37 — The fast tier's speed, measured on a quiet machine (D28 satisfied)
+D28 voided every timing number taken while the user's `Wan2GP` project was building. The user shut it
+down and `phase1_measure.py` was re-run three times. Machine verified quiet first: CPU load 4–10 %,
+and the lingering `G:\Wan2GP-Tauri` python process accumulated **0 s of CPU across three 3-second
+samples** — alive, not working.
+
+| Measurement | Contended (voided) | **Quiet (valid)** | Spread over 3 runs |
+|---|---|---|---|
+| Generation, 92 tokens | 58.28 tok/s | **57.85 tok/s** median | 56.51 – 58.07 (2.6 %) |
+| Generation, 34 tokens (grammar call) | — | **58.81 tok/s** median | 58.77 – 58.88 (0.2 %) |
+| Prefill, 427 tokens | 1076.83 tok/s | **1540 tok/s** median | 1477 – 1551 (5.0 %) |
+| Prefill, 37 tokens | — | **1096 tok/s** median | 1091 – 1108 |
+| Per-token generation | — | 17.2 – 17.7 ms | — |
+| Model load | — | 2.5 – 2.8 s | — |
+| Our VRAM at 4K ctx | 4.92 GiB | **4.92 GiB** median | 4.90 – 4.94 GiB |
+
+**The contention penalty was real but sharply asymmetric: generation was essentially unaffected
+(58.28 → 57.85, i.e. within noise and marginally *faster* when quiet), while prefill gained 43 %
+(1077 → 1540 tok/s).** That is the expected shape — prefill does tokenisation and batch preparation
+on the CPU, whereas a fully offloaded generation pass is GPU-bound. The lesson for D28's successor is
+that "the machine is busy" means different things for different measurements, and a blanket caveat
+hides that.
+
+**Prefill being ~27× generation is the number that matters for this project.** The dominant workload
+is not long answers, it is *long context*: 429 indexed vault notes, project manifests, tool schemas.
+At 1540 tok/s a 4K-token retrieval prompt assembles in under 3 seconds, while a 400-token answer takes
+about 7. The architecture is shaped accordingly — tight retrieval, short spoken and typed replies.
+
+**Tool-call latency is 4.5 – 6.3 s end to end, and that is dominated by model load (2.5 s) plus
+first-token prefill, not by the grammar.** The grammar adds no measurable cost. This is the number
+the D22 tier swap must be judged against, and it is consistent with the 5 – 15 s budget already
+recorded for a full eviction-and-reload.
+
+**A stale caveat is as misleading as no caveat.** The script had the string `(contended)` hardcoded
+into its output row. The moment the machine went quiet that label became false, and a false caveat
+reads exactly like a true one. `phase1_measure.py` now samples the CPU load itself and prints
+`VALID` or `CONTENDED (cpu N%)` accordingly; if the load cannot be measured it assumes the worst,
+because an unknown is not a quiet machine.

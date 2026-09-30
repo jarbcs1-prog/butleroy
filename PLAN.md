@@ -330,7 +330,7 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 | Qwen3.5 GGUF fails to load on this llama.cpp build | **Resolved** | Phase 0 passed: 25/25 layers on GPU, Qwen3.5 understood |
 | Prebuilt wheels are unusable on this CPU | **Resolved** | D25; we build from source. Recorded so nobody reinstalls a wheel and "fixes" a working runtime |
 | Delegated workers contend for VRAM | Medium | Arbiter leases; one worker at a time; preemption favours you |
-| Model too slow for usable interaction | **Unmeasured** | D28 voided every Phase 1 timing number. Re-measure on a quiet machine before trusting any latency figure |
+| Model too slow for usable interaction | **Resolved** | D37, measured on a verified-quiet machine: 57.9 tok/s generation, **1540 tok/s prefill**. Prefill is 27x generation, so long-context retrieval is the fast path and the architecture should lean into tight retrieval with short answers |
 | The 4B fast tier is not actually competent | **Resolved** | Phase 1 gate passed, exit 0 — but only *with* grammar constraint (D34). Without it the model narrates instead of calling, which is a silent failure |
 | A constraint silently does nothing | Medium | D36: `grammar` nested in `response_format` is ignored with no error. Every constraining mechanism must be proved active by inspecting output shape, never trusted from the flag being set |
 | Tier swap latency annoys in practice | Medium | ~5–15 s, only on hard planning turns; measure in Phase 1 and revisit if frequent |
@@ -367,7 +367,13 @@ the Phase 2 vertical slice is not yet closed.
    only, no inbound port, `telegram.send` stays T3 (D13: a remote channel may request but never
    authorise).
 
-**Two measurement tasks still owed, and D28 governs both:** re-take the speed numbers on a quiet
-machine (load was ~28% with `F:\Wan2GP-Tauri` building throughout Phase 1), and download candidates 2
-and 3 — the 9B deep tier at 5.96 GB and the gemma-4 wildcard at 5.37 GB. The deep tier **must evict**
+**One measurement task discharged, one still owed.** D28 is **satisfied** for speed: the user shut
+down `Wan2GP`, the machine was verified quiet first (load 4–10 %, the lingering Wan2GP python process
+accumulated 0 s of CPU across three 3-second samples), and `phase1_measure.py` was re-run three times
+— **57.85 tok/s generation, 1540 tok/s prefill, 2.5 s load, 4.92 GiB VRAM** (D37). The script now
+samples CPU load itself and prints `VALID` or `CONTENDED` rather than hardcoding the caveat, because a
+stale caveat reads exactly like a true one.
+
+Still owed: download candidates 2 and 3 — the 9B deep tier at 5.96 GB and the gemma-4 wildcard at
+5.37 GB. The deep tier **must evict**
 the fast tier; they cannot co-reside.

@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -25,6 +26,61 @@ MODEL = os.path.join(
     "Qwen3.5-0.8B-Q4_0.gguf",
 )
 PROMPT = "Name three uses for a paperclip. Answer in one short sentence."
+
+
+class CaptureFd:
+    """Capture C-level stderr.
+
+    llama.cpp prints its offload report from C++, not from Python, so
+    contextlib.redirect_stderr cannot see it. We have to dup2 the real file
+    descriptor. This is not gold-plating: it is the difference between reading
+    what llama.cpp *reports it did* and reading what we *asked it to do*. Those
+    are different numbers, and only the first one is evidence.
+    """
+
+    def __init__(self):
+        self.path = None
+        self._fd = None
+        self._saved = None
+
+    def __enter__(self):
+        self._fd, self.path = tempfile.mkstemp(prefix="phase0_", suffix=".log")
+        sys.stderr.flush()
+        self._saved = os.dup(2)
+        os.dup2(self._fd, 2)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            sys.stderr.flush()
+            os.dup2(self._saved, 2)
+            os.close(self._saved)
+        finally:
+            os.close(self._fd)
+        return False
+
+    def text(self):
+        try:
+            with open(self.path, "r", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+
+def parse_offload(log):
+    """Pull (offloaded, total) out of llama.cpp's own load report.
+
+    Matches the two shapes llama.cpp emits:
+        offloaded 25/25 layers to GPU
+        offloaded 24 repeating layers to GPU   (older builds count differently)
+    """
+    m = re.search(r"offloaded (\d+)/(\d+) layers to GPU", log)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"offloaded (\d+) repeating layers to GPU", log)
+    if m:
+        return int(m.group(1)), None
+    return None, None
 
 
 def nvidia_smi(query):
@@ -64,18 +120,23 @@ class GpuSampler(threading.Thread):
         super().__init__(daemon=True)
         self.interval = interval
         self.samples = []
-        self._stop = threading.Event()
+        # NOT `self._stop`. threading.Thread has its own private `_stop()` method,
+        # which CPython calls from _wait_for_tstate_lock during join(). Assigning
+        # an Event over that name shadows a real method and turns join() into
+        # `'Event' object is not callable` - and only on join, so it hides until
+        # you actually wait for the thread.
+        self._halt = threading.Event()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             row = nvidia_smi("memory.used,utilization.gpu")
             if row:
                 used, util = [x.strip() for x in row.split(",")]
                 self.samples.append((int(used), int(util)))
-            self._stop.wait(self.interval)
+            self._halt.wait(self.interval)
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         self.join(timeout=5)
 
 
@@ -97,23 +158,30 @@ def main():
     print("-" * 72)
 
     t0 = time.time()
-    llm = Llama(
-        model_path=MODEL,
-        n_ctx=2048,
-        n_gpu_layers=-1,   # offload everything; the gate is N/N or nothing
-        n_batch=512,
-        verbose=True,      # this is how we read the offload report
-    )
+    with CaptureFd() as cap:
+        llm = Llama(
+            model_path=MODEL,
+            n_ctx=2048,
+            n_gpu_layers=-1,   # offload everything; the gate is N/N or nothing
+            n_batch=512,
+            verbose=True,      # this is how we read the offload report
+        )
     load_s = time.time() - t0
     print("-" * 72)
     print(f"loaded in {load_s:.1f}s")
 
     # --- Gate check 1: architecture + full offload, read from llama.cpp's own log ---
-    # verbose output goes to stderr; if it was not captured we rely on n_gpu_layers
-    # and the VRAM delta below, which is the stronger evidence anyway.
-    n_gpu = llm.n_gpu_layers
-    n_total = llm.model_params.n_layer if hasattr(llm, "model_params") else None
-    print(f"n_gpu_layers reported: {n_gpu}  (total layers: {n_total})")
+    # The request value is NOT evidence. `-1` is stored as 0x7FFFFFFF, so asking
+    # for full offload tells us nothing about whether we got it. Read the report.
+    log = cap.text()
+    n_gpu, n_total = parse_offload(log)
+    requested = getattr(getattr(llm, "model_params", None), "n_gpu_layers", None)
+    print(f"requested n_gpu_layers : {requested}")
+    print(f"llama.cpp reported     : {n_gpu}/{n_total} layers offloaded to GPU")
+    if n_gpu is None:
+        for line in log.splitlines():
+            if "offload" in line.lower() or "CUDA_Host" in line or "buffer size" in line:
+                print(f"  | {line.strip()}")
 
     loaded = baseline()
     print(f"gpu after load: {loaded} MiB used" if loaded else "gpu after load: UNKNOWN")
@@ -164,11 +232,20 @@ def main():
     if not text.strip():
         failures.append("model produced no text - Qwen3.5 arch likely unsupported")
 
-    # 2. full offload
-    if n_gpu != -1 and n_total and n_gpu < n_total:
-        failures.append(f"partial offload {n_gpu}/{n_total} -> CPU spill on 6 cores")
-    elif n_gpu != -1 and n_gpu < 0:
-        failures.append("negative n_gpu_layers")
+    # 2. full offload - as REPORTED by llama.cpp, not as requested by us.
+    #    No report at all is itself a failure: we would be guessing.
+    if n_gpu is None:
+        failures.append(
+            "llama.cpp printed no offload report - cannot prove GPU residency"
+        )
+    elif n_total is None:
+        failures.append(
+            f"llama.cpp reported {n_gpu} layers offloaded but not a total"
+        )
+    elif n_gpu < n_total:
+        failures.append(
+            f"partial offload {n_gpu}/{n_total} -> CPU spill on 6 cores"
+        )
 
     # 3. VRAM actually moved (physical evidence, independent of the log)
     if base and loaded and (loaded[0] - base[0]) < 200:
@@ -182,9 +259,9 @@ def main():
     elif peak_util < 10:
         failures.append(f"peak GPU utilisation only {peak_util}% - likely CPU inference")
 
-    print(f"n_gpu_layers = {n_gpu}   layers_total = {n_total}")
-    print(f"vram delta   = {(loaded[0]-base[0]) if (base and loaded) else 'n/a'} MiB")
-    print(f"peak util    = {peak_util}%")
+    print(f"offloaded     = {n_gpu}/{n_total} (llama.cpp's own report)")
+    print(f"vram delta    = {(loaded[0]-base[0]) if (base and loaded) else 'n/a'} MiB")
+    print(f"peak util     = {peak_util}%")
 
     if failures:
         print("GATE: FAIL")

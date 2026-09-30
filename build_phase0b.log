@@ -20,3 +20,11 @@ Build cuda_13.3.r13.3/compiler.38244171_0
 
 Resolved 6 packages in 1.57s
    Building llama-cpp-python==0.3.35
+      Built llama-cpp-python==0.3.35
+Prepared 1 package in 20m 29s
+Uninstalled 1 package in 29ms
+Installed 1 package in 939ms
+ - llama-cpp-python==0.3.35 (from https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35-cu124/llama_cpp_python-0.3.35-py3-none-win_amd64.whl)
+ + llama-cpp-python==0.3.35
+
+=== Phase 0b build finished with exit code 0 ===

@@ -52,10 +52,15 @@ you're asleep beyond reversible reads and writes · let Telegram authorize anyth
 
 ## Start here
 
-**Phase 0b** — build `llama-cpp-python` from source with a portable CPU baseline. The prebuilt
-wheels ship a CPU backend compiled with AVX-512, which this Ryzen 5 5600G cannot execute; they die
-with `STATUS_ILLEGAL_INSTRUCTION` on the CPU path, so the fix is `GGML_NATIVE=OFF` and our own
-build. Phase 0 already proved the two things that matter and that no rebuild will change:
-**llama.cpp understands Qwen3.5 natively, and the model offloads 25/25 layers to the 3060.**
-The gate is `phase0_gate.py` exiting 0. Nothing above this line is real until it passes, and if
-it fails the honest thing is to stop and reassess rather than build on sand.
+**Phase 0 — PASSED.** The foundation is real and measured, not assumed:
+
+- Built `llama-cpp-python` 0.3.35 from source. The prebuilt wheels ship a CPU backend compiled with
+  AVX-512, which this Ryzen 5 5600G cannot execute — they die with `STATUS_ILLEGAL_INSTRUCTION` on
+  the CPU path, so the fix is `GGML_NATIVE=OFF` and our own build (D25). 20 min at `-j3`.
+- `phase0_gate.py` exits **0**: llama.cpp reports **25/25 layers on GPU**, VRAM moves **+1154 MiB**,
+  peak GPU utilisation **21 %**, 223 tok/s generation.
+- llama.cpp 0.3.35 understands **Qwen3.5**, so D9's open architecture risk is closed.
+- 106 tests green inside the venv.
+
+**Next:** finish Phase 2's zero-dependency surface (Obsidian bridge, daemon wiring), then Phase 1 —
+the model bake-off, gated on the 4B being competent. See `PLAN.md` → "Immediate next action".

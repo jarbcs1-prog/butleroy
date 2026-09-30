@@ -358,11 +358,43 @@ measurements, which is their entire remaining value.
 
 ## Part IV - What Phase 0 actually proved
 
-Phase 0 ran on 2026-09-30. The gate is **not passed**, but three things are now settled that were
-previously assumptions, and one assumption is dead.
+Phase 0 ran on 2026-09-30. **The gate is now PASSED** — `phase0_gate.py` exits 0. Three things that
+were previously assumptions are now measurements, and one assumption is dead.
+
+### D29 — D25 is confirmed, and the build must never be reverted to a wheel
+D25 predicted that a source build with a portable CPU baseline would fix the crash. It did, and the
+prediction is now verified rather than merely argued:
+
+| Evidence | Prebuilt wheel | Our build |
+|---|---|---|
+| EVEX (AVX-512) sites in `ggml-cpu.dll` | 9,786 (76.7 % of `0x62` bytes) | **10 (1.02 %)** |
+| Same scan on a control DLL known to be AVX-512-free | 2.74 % | 2.74 % |
+| `ggml-cuda.dll` size | 819 MB (8 architectures) | **66 MB** (one) |
+| `phase0_gate.py` | exit 1, `STATUS_ILLEGAL_INSTRUCTION` | **exit 0** |
+
+Our `ggml-cpu.dll` now contains *fewer* EVEX-prefixed bytes than a DLL that is definitionally
+AVX-512-free, which is the ordinary false-positive rate of the `0x62` byte and not a residue of the
+instruction set. The fix is complete, not partial.
+
+**The operational rule this creates:** a plain `uv pip install llama-cpp-python` would pull a
+prebuilt wheel and silently reintroduce a crash that only appears on this CPU. The install must
+always use `--no-binary :all:` plus the `CMAKE_ARGS` in `build_phase0b.bat`, and `probe_isa.py` is
+the standing smoke test — it is now in the risk register. This is D25's generalisable lesson made
+concrete: *verify every install on this CPU, never assume the import succeeded.*
+
+**Two build attempts were required, and the first is the more instructive one.** Attempt 1 configured
+CMake successfully and printed `Found CUDAToolkit ... 13.3.73`, then failed with `No CUDA toolset
+found`. It had silently selected the **Visual Studio** generator, which does not invoke `nvcc`
+directly — it requires a CUDA toolset registered *inside* the Visual Studio installation, and
+`nvcc` merely being on PATH is not sufficient. That is exactly why the toolkit was discovered one
+line before the failure: the two mechanisms are different. Fixed by switching to the **Ninja**
+generator. A second trap came with it: the VS generator is multi-config, so it ignores
+`CMAKE_BUILD_TYPE`; under Ninja an empty build type silently produces an unoptimised build, so it is
+now pinned to `Release`. Both flags are in `build_phase0b.bat` with the failure they address in a
+comment.
 
 ### D25 — The prebuilt wheel cannot run on this CPU; we build it ourselves
-**This is the important one, and it supersedes D2.**
+**This is the important one, and it supersedes D2.** (Proven; see D29 for the confirmation.)
 
 The symptom: every load dies at context construction with
 `OSError: [WinError -1073741795]`, i.e. `0xc000001d` = `STATUS_ILLEGAL_INSTRUCTION`. That is a
@@ -466,3 +498,7 @@ alone. Consequence: **no Phase 0 or Phase 1 timing measurement taken on this mac
 trustworthy until the machine is quiet.** The structural results (architecture support, full
 offload, the crash) are unaffected — those are not timing. Phase 1 must take its speed numbers
 with a quiet machine, and must record that it did so.
+
+For the record, the 223 tok/s figure measured *during* that contention is therefore an optimistic
+lower bound on an unloaded machine, not a baseline. It is quoted in the Phase 0 results table only
+to show the GPU was doing the work; it must not be used to predict interactive latency.

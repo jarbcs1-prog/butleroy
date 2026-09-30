@@ -56,7 +56,7 @@ context-length measurement to a load-bearing gate.
 **All timing numbers taken during Phase 0 are invalid** (D28): two `uv` processes belonging to
 `F:\Wan2GPT` were saturating the network and all 6 cores throughout.
 
-### Phase 0b — Build a runtime this CPU can execute
+### Phase 0b — Build a runtime this CPU can execute — **PASSED**
 
 The one blocking task. Nothing else can be honestly planned until inference works at all.
 
@@ -69,6 +69,45 @@ The one blocking task. Nothing else can be honestly planned until inference work
 
 **Gate: `phase0_gate.py` exits 0** — real text generated, N/N layers on GPU, VRAM delta measured,
 GPU utilisation observed.
+
+#### Phase 0b results
+
+Built in **20 min 29 s** at `-j3`, exit code 0, replacing the prebuilt wheel with a source build.
+
+| Evidence | Result |
+|---|---|
+| EVEX (AVX-512) sites in the new `ggml-cpu.dll` | **10 of 984 `0x62` bytes = 1.02 %** — was 9,786 (76.7 %) in the wheel, and *lower* than the 2.74 % of a control DLL known to be AVX-512-free |
+| `ggml-cuda.dll` size | 66 MB, was 819 MB — one CUDA arch instead of nine |
+| `llama.cpp` own offload report | **25/25 layers to GPU** |
+| VRAM moved on load | **+1154 MiB** (1189 → 2343) |
+| Peak GPU utilisation while generating | **21 %** |
+| Generation | 28 tokens, 223 tok/s, 99 tok/s prefill — *and the machine was contended* (D28) |
+| `phase0_gate.py` | **exit 0** |
+| Test suite inside the venv | **106 passed, 40 subtests** |
+
+**Two build attempts were needed, and the first is the useful record.** *Attempt 1* configured CMake
+successfully, printed `Found CUDAToolkit ... 13.3.73`, and then died with `No CUDA toolset found`. It
+had selected the **Visual Studio** generator, which does not drive `nvcc` itself — it looks for a
+CUDA toolset registered *inside the VS installation*. `nvcc` merely being on PATH is not sufficient,
+which is exactly why the toolkit was found one line before the failure. Fixed by switching to the
+**Ninja** generator, which invokes `nvcc` directly. The VS generator is also multi-config, so it
+silently ignored `CMAKE_BUILD_TYPE`; under Ninja an empty build type would have meant an unoptimised
+build, so it is now pinned to `Release`. *Attempt 2* compiled cleanly. Logs kept as
+`build_phase0b_attempt1.log` and `build_phase0b.log`.
+
+**The gate script itself was corrected before the passing run, and the correction made it stricter.**
+It had been asserting on `Llama.n_gpu_layers`, which does not exist in 0.3.35 — the value lives on
+`model_params` as `0x7FFFFFFF` for any `-1` request. That is the value we *asked for*, not the value
+we *got*, so it could never have caught partial offload. The gate now captures the C-level stderr
+(`contextlib.redirect_stderr` cannot see C++ output) and asserts on llama.cpp's own
+`offloaded N/N layers to GPU` line, treating a **missing** report as a failure rather than falling
+back to something weaker. Separately, `GpuSampler` assigned `self._stop`, shadowing
+`threading.Thread._stop`, which CPython calls from inside `join()` — a `TypeError` that only appeared
+once the thread was actually joined.
+
+**What Phase 0 established:** CUDA inference works on this machine, llama.cpp 0.3.35 understands
+Qwen3.5, and every remaining phase may now be planned on a real foundation. **What it did not:**
+nothing about the 4B or the 9B fits the budget — that is Phase 1.
 
 ---
 
@@ -197,7 +236,8 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Qwen3.5 GGUF fails to load on this llama.cpp build | **Real** (D9) | Phase 0 tests Qwen3.5 *itself* precisely so this is caught before anything is built on it |
+| Qwen3.5 GGUF fails to load on this llama.cpp build | **Resolved** | Phase 0 passed: 25/25 layers on GPU, Qwen3.5 understood |
+| Prebuilt wheels are unusable on this CPU | **Resolved** | D25; we build from source. Recorded so nobody reinstalls a wheel and "fixes" a working runtime |
 | Delegated workers contend for VRAM | Medium | Arbiter leases; one worker at a time; preemption favours you |
 | Model too slow for usable interaction | Medium | Tight context (3-level allocation), measured prefill in Phase 1, TTL keeps the GPU free |
 | The 4B fast tier is not actually competent | **Medium** | Phase 1 gates on it, not on the 9B. Discovered in Phase 1, not month three |
@@ -206,12 +246,18 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 | Scope creep — brief is ~5× v1 plan | **High** | Gates prevent forward motion on unproven ground; each phase is independently shippable |
 | Obsidian vault too large to index | **Resolved** | ~430 indexable notes; `datasets/` hard-excluded (D14) |
 | "22 GB VRAM available" from a tool | **Resolved** | llm-checker double-counts the 3060; recorded and rejected in D23. One GPU, 12 GB |
+| A `uv pip install` of llama-cpp-python silently reverts to a wheel | Medium | Install with `--no-binary :all:`; `probe_isa.py` is the standing smoke test for this CPU (D25) |
 
 ---
 
 ## Immediate next action
 
-**Phase 0.** One command sequence: create the venv, install one wheel, fetch
-`ggml-org/Qwen3.5-0.8B-GGUF` Q4_K_M (~500 MB), prove full GPU offload. It either establishes the
-foundation — CUDA *and* Qwen3.5 architecture support in one shot — or tells us quickly that it is
-not there. Nothing else in this plan can be honestly planned until it passes.
+**Phase 1 — the model bake-off**, but the *first* thing to do is finish Phase 2's zero-dependency
+surface, because it needs no model and can be finished in a sitting: the Obsidian bridge and the
+daemon wiring that ties the policy gate, the arbiter, the audit log and the manifest store together.
+Then download candidate 1 (`HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` Q8_0, 4.17 GB) and
+measure it on a quiet machine.
+
+Current state: **Phase 0 passed** (exit 0, foundation proven). **Phase 2 partially built** — 106
+tests green inside the venv across `policy`, `audit`, `tools`, `arbiter`, `ipc` and `manifest`. No
+tray, no hotkey, no Obsidian bridge, no daemon entry point yet.

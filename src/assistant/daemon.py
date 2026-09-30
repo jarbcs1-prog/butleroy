@@ -223,6 +223,10 @@ class Daemon:
         self._lock = threading.Lock()
         self._client: ipc.PipeClient | None = None
         self._count = 0
+        # Set by request_shutdown() so the serve loop can be stopped from the tray
+        # or hotkey thread. See the method for why this is an Event and not something
+        # cleverer.
+        self._halt = threading.Event()
 
     # ------------------------------------------------------------------ startup
 
@@ -324,6 +328,30 @@ class Daemon:
                 pass
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+    def request_shutdown(self, why: str = "requested") -> None:
+        """Ask the daemon to stop, from another thread.
+
+        The tray and the hotkey run on their own threads, so they cannot simply
+        return from `serve_forever`. This sets an event that the serve loop is
+        already parked on.
+
+        The obvious alternatives were rejected on purpose. Raising KeyboardInterrupt
+        from the tray thread would interrupt the tray, not the serve loop.
+        `PyThreadState_SetAsyncExc` would work and is a one-liner, but it injects an
+        exception into a thread's stack at an arbitrary point, which is exactly the
+        kind of cleverness that is fine in a demo and fatal in something meant to be
+        always-on. A flag the loop checks is boring and cannot surprise anyone.
+        """
+        self._audit(
+            actor="daemon",
+            channel=CHANNEL_SCHEDULED,
+            tool="daemon.shutdown_requested",
+            tier=str(Tier.READ),
+            decision="allow",
+            reason=why,
+        )
+        self._halt.set()
+
     def serve_forever(self, pipe: str = ipc.PIPE_BRAIN_REQ) -> None:
         checks = self.preflight()
         self._audit(
@@ -342,8 +370,8 @@ class Daemon:
         print(f"[daemon] state    {self.state}", flush=True)
         print(f"[daemon] version  {__version__}", flush=True)
         try:
-            while True:
-                time.sleep(3600)
+            while not self._halt.wait(3600):
+                pass
         except KeyboardInterrupt:
             pass
         finally:

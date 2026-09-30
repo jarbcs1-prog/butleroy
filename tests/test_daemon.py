@@ -10,12 +10,15 @@ acceptable.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from assistant import daemon as D
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 from assistant.audit import AuditLog
 from assistant.ipc import Request, next_id
 from assistant.policy import CHANNEL_PC, CHANNEL_SCHEDULED, CHANNEL_TELEGRAM, Tier
@@ -87,11 +90,33 @@ def tools_called(d: D.Daemon) -> list[str]:
 def test_no_model_runtime_is_ever_imported():
     """D1: Plane A is ~300 MB and zero VRAM. The cheapest possible proof is that
     importing it does not drag in a CUDA runtime, because a transitive import is
-    exactly how a 'small always-on resident' quietly becomes 6 GB."""
-    assert "llama_cpp" not in sys.modules, (
+    exactly how a 'small always-on resident' quietly becomes 6 GB.
+
+    This runs in a SUBPROCESS, and the reason is worth recording. The test
+    originally asserted `'llama_cpp' not in sys.modules` in-process, which passed
+    only because no other test module happened to import it first. Once
+    test_brain.py existed and legitimately called `Brain.load()` - which compiles
+    a real grammar and therefore imports llama_cpp for real - this test started
+    failing while the daemon was, in fact, still clean. A test that reads global
+    mutable state and passes by luck is worse than no test, because it will fail
+    one day for a reason that has nothing to do with the code under test.
+    """
+    import subprocess
+
+    src = (
+        "import sys; import assistant.daemon; "
+        "print('llama_cpp' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", src],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False", (
         "importing assistant.daemon pulled in the model runtime; Plane A must "
-        "stay independent of the brain so a broken model build cannot take the "
-        "daemon down"
+        f"stay independent of the brain. stdout was: {out.stdout!r}"
     )
 
 

@@ -1,0 +1,446 @@
+"""
+Plane B: the local brain, as a disposable child process.
+
+Everything about the shape of this module follows from three decisions that were
+measured rather than assumed:
+
+**D3 - one child process per model, killed on an idle TTL.** VRAM is only reliably
+returned on Windows when a process dies. So this module is a *program*, not a
+library that Plane A calls into. Plane A spawns it, it serves turns, and after 90 s
+of silence it exits and the memory goes back. Nothing here holds a lease open or
+caches a model between turns; that is the whole design.
+
+**D1 - the lease is taken BEFORE the load, not after.** This ordering is the single
+most important line in the file. If we load first and ask afterwards, we have
+already taken the memory by the time we discover we were not allowed to, and the
+only remedy left is to unload - which on a 4.9 GiB model is slow, visible, and
+racy against the user's own CUDA work. A denial that happens *before* the load
+costs nothing at all.
+
+**D34 - the assistant is grammar-first.** Measured on this exact model: under
+`tool_choice="auto"` it narrates the tool call in prose and emits nothing
+callable; pinned, it calls perfectly; under a GBNF constraint it commits every
+time. So the decision and the call are two separate constrained passes:
+
+    pass 1  root ::= "tool" | "answer"          <- a two-way choice, no room to ramble
+    pass 2  if "tool"    -> the generated per-tool grammar
+             if "answer" -> unconstrained prose
+
+That is the whole trick. A grammar-constrained decode does not make the model
+better at *deciding*; it removes the option of not committing, which is the only
+thing that was broken.
+
+Two things this module deliberately does NOT do. It does not import
+`assistant.policy` to re-derive tiers - authority belongs to Plane A and this
+process may not widen it. And it does not execute anything: it emits a proposed
+call and stops. The gate disposes.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterator, Sequence
+
+from .grammar import Grammar, GrammarError, build_decision_grammar, build_tool_grammar
+from .tools import ALL_TOOLS
+
+# The tier ceiling a brain turn may be *reasoned about*. It is a reminder in
+# code, not a control: this process cannot execute, and Plane A re-derives the
+# real tier from its own registry at the moment of action.
+MAX_TIER_FOR_TOOLS = "T3"
+
+
+class BrainError(RuntimeError):
+    """Anything that stops a turn from being answered."""
+
+
+class LeaseDenied(BrainError):
+    """The arbiter would not grant VRAM. The model was never loaded."""
+
+
+class BrainNotLoaded(BrainError):
+    """A turn was requested before the lease was taken and the model loaded."""
+
+
+@dataclass(frozen=True)
+class BrainConfig:
+    """Everything needed to load a model, in one place.
+
+    Defaults are the measured ones from D37 and Phase 1: 4.92 GiB of VRAM at 4K
+    context, 2.5 s to load, 1540 tok/s prefill. `n_ctx` is deliberately modest
+    because prefill is 27x generation on this card - the workload is long context,
+    not long answers, and a bigger window costs prefill on every single turn.
+    """
+
+    model_path: str
+    n_ctx: int = 4096
+    n_batch: int = 512
+    n_gpu_layers: int = -1
+    n_threads: int | None = None
+    max_tokens: int = 512
+    temperature: float = 0.2
+    # D26: the CUDA runtime must be on PATH and version-matched to the build.
+    # The parent sets it; we refuse to guess, because a wrong guess fails at DLL
+    # load time with a message that does not mention CUDA at all.
+    cuda_bin: str | None = None
+    idle_ttl_s: float = 90.0
+
+    def path(self) -> Path:
+        p = Path(self.model_path)
+        if not p.is_file():
+            raise BrainError(f"model not found: {p}")
+        return p
+
+    def exists(self) -> bool:
+        return Path(self.model_path).is_file()
+
+
+@dataclass
+class Decision:
+    """The result of pass 1.
+
+    `kind` is exactly one of "tool" or "answer" - the grammar admits nothing else,
+    which is the point. If the model somehow returns something else we treat it as
+    "answer", because guessing "tool" and executing nothing is worse than
+    answering when it should have acted.
+    """
+
+    kind: str
+    raw: str
+    latency_s: float
+
+    @property
+    def is_tool(self) -> bool:
+        return self.kind == "tool"
+
+
+@dataclass
+class Action:
+    """A proposed tool call, or an answer. Never an execution."""
+
+    kind: str
+    tool: str | None = None
+    arguments: dict[str, Any] = field(default_factory=dict)
+    text: str = ""
+    latency_s: float = 0.0
+    # Set when the model emitted something we could not parse. Deliberately not
+    # an exception: an unparseable call is a normal failure of a small model, and
+    # turning it into an exception would make the caller treat it as a crash.
+    parse_error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "kind": self.kind,
+            "text": self.text,
+            # Not rounded to milliseconds. A latency that reads 0.0 is
+            # indistinguishable from "not measured", and a caller that branches
+            # on slowness would treat a fast turn as a missing one. Three
+            # decimals is below the resolution of anything we can measure on
+            # Windows and still cannot hide a sub-millisecond value.
+            "latency_s": round(self.latency_s, 6),
+        }
+        if self.kind == "tool":
+            out["tool"] = self.tool
+            out["arguments"] = self.arguments
+        if self.parse_error:
+            out["parse_error"] = self.parse_error
+        return out
+
+
+def parse_action(content: str) -> tuple[str | None, dict[str, Any], str | None]:
+    """Parse the JSON body a grammar-constrained call arrives in.
+
+    D34 recorded the detail that matters here: under grammar constraint the call
+    arrives in `content`, NOT in llama-cpp's `tool_calls` field. Anything written
+    against native `tool_calls` sees nothing at all and concludes the model
+    failed. This function is the only place that knows the shape.
+    """
+    text = (content or "").strip()
+    if not text:
+        return None, {}, "empty response"
+    # A grammar-constrained decode should never wrap the body in a fence, but a
+    # model that has been loaded with a chat template sometimes adds one, and
+    # refusing to strip it would turn a formatting artefact into a parse failure.
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, {}, f"not JSON: {exc}"
+    if not isinstance(body, dict):
+        return None, {}, "response is not a JSON object"
+    tool = body.get("tool")
+    if not isinstance(tool, str) or not tool:
+        return None, {}, "no 'tool' field"
+    raw_args = body.get("arguments", body.get("parameters"))
+    if raw_args is None:
+        return tool, {}, None
+    if not isinstance(raw_args, dict):
+        return tool, {}, "'arguments' is not an object"
+    return tool, raw_args, None
+
+
+class Brain:
+    """One loaded model, answering turns, for as long as its lease lasts.
+
+    The lease-then-load ordering is enforced structurally rather than by
+    convention: `_loaded` cannot be set without `_lease` already being set, and
+    `load()` is the only thing that sets either.
+    """
+
+    def __init__(
+        self,
+        config: BrainConfig,
+        *,
+        lease: Callable[[], Any],
+        llm_factory: Callable[[BrainConfig], Any] | None = None,
+        system_prompt: str = "",
+        tools: Sequence[Any] = ALL_TOOLS,
+    ):
+        self.config = config
+        self.system_prompt = system_prompt
+        self.tools = tools
+        self._acquire = lease
+        self._lease: Any = None
+        self._llm: Any = None
+        self._llm_factory = llm_factory or _make_llama
+        self._grammar: Any = None
+        self._decision_grammar: Any = None
+        self._tool_grammar: Grammar | None = None
+        self.loaded_at: float | None = None
+        self.last_used: float | None = None
+        self.turns_served = 0
+
+    # ------------------------------------------------------------------ lifecycle
+    def load(self) -> dict[str, Any]:
+        """Take the lease, then load. In that order, always.
+
+        Returns a summary the caller can audit. A denial here means nothing was
+        loaded and nothing was taken from the user, which is the entire point.
+        """
+        if self._llm is not None:
+            return self.status()
+
+        # Before the lease, deliberately. A lease is a claim on the user's VRAM
+        # and it costs the caller nothing to give back; a 4.9 GiB load costs
+        # 2.5 s and has to be unloaded again. Refusing the cheap thing first is
+        # the whole discipline of D1.
+        self.config.path()
+
+        # ---- the ordering that matters (D1) -------------------------------
+        lease = self._acquire()
+        if lease is None:
+            raise LeaseDenied(
+                "the VRAM arbiter refused a lease, so the model was not loaded. "
+                "Nothing was taken from your GPU."
+            )
+        if getattr(lease, "denied", False):
+            raise LeaseDenied(str(lease))
+        self._lease = lease
+        # -------------------------------------------------------------------
+
+        if self.config.cuda_bin:
+            os.environ["PATH"] = self.config.cuda_bin + os.pathsep + os.environ.get("PATH", "")
+
+        t0 = time.time()
+        self._llm = self._llm_factory(self.config)
+        load_s = time.time() - t0
+
+        self._decision_grammar = self._make(self._decision_gbnf())
+        gen = build_tool_grammar(self.tools)
+        self._tool_grammar = gen
+        self._grammar = self._make(gen.gbnf)
+
+        self.loaded_at = time.time()
+        self.last_used = self.loaded_at
+        return {
+            "loaded": True,
+            "load_s": round(load_s, 2),
+            "model": Path(self.config.model_path).name,
+            "n_ctx": self.config.n_ctx,
+            "tools_in_grammar": len(gen.tools),
+            "tools_undescribed": len(gen.gaps),
+            "grammar_rules": gen.n_rules,
+        }
+
+    def _make(self, gbnf: str) -> Any:
+        """Compile a GBNF string into whatever the installed binding wants.
+
+        D36: a constraint that is silently not applied is the worst failure mode
+        available, because the system keeps working and keeps returning plausible
+        output. So this compiles the grammar *once, eagerly, at load time* and
+        raises if it cannot. There is no path where a grammar silently does
+        nothing.
+        """
+        from llama_cpp import LlamaGrammar
+
+        return LlamaGrammar.from_string(gbnf, verbose=False)
+
+    def _decision_gbnf(self) -> str:
+        return build_decision_grammar().gbnf
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "loaded": self._llm is not None,
+            "turns_served": self.turns_served,
+            "uptime_s": round(time.time() - self.loaded_at, 1) if self.loaded_at else 0.0,
+            "idle_s": round(time.time() - self.last_used, 1) if self.last_used else None,
+            "ttl_s": self.config.idle_ttl_s,
+            "lease": self._lease is not None,
+        }
+
+    def expired(self, now: float | None = None) -> bool:
+        """Whether the 90 s idle TTL has elapsed.
+
+        Checked by the *parent*, which is what actually kills us. The child
+        reporting "I think I should die" is not a shutdown mechanism; it is a
+        suggestion. The parent's clock is the one that counts.
+        """
+        if self.last_used is None:
+            return False
+        return (now or time.time()) - self.last_used > self.config.idle_ttl_s
+
+    def unload(self) -> None:
+        """Drop the model. VRAM comes back when this process exits (D3)."""
+        self._llm = None
+        self._grammar = None
+        self._decision_grammar = None
+        self._tool_grammar = None
+        self._lease = None
+        self.loaded_at = None
+        self.last_used = None
+
+    def describe(self) -> dict[str, Any]:
+        """What the grammar actually admits, and what it is missing.
+
+        Surfaced rather than logged quietly, because a tool silently missing from
+        the grammar is a tool the model can never call, and that gap has to be
+        visible to whoever is debugging "the assistant forgot how to do X".
+        """
+        gen = self._tool_grammar
+        if gen is None:
+            return {"loaded": False, "tools": [], "undescribed": []}
+        return {
+            "loaded": True,
+            "tools": sorted(gen.tools),
+            "undescribed": sorted(gen.gaps),
+            "rules": gen.n_rules,
+        }
+
+    # -------------------------------------------------------------------- prompts
+    def _messages(self, prompt: str) -> list[dict[str, str]]:
+        msgs = []
+        if self.system_prompt:
+            msgs.append({"role": "system", "content": self.system_prompt})
+        msgs.append({"role": "user", "content": prompt})
+        return msgs
+
+    # --------------------------------------------------------------------- turns
+    def _generate(self, prompt: str, grammar: Any, max_tokens: int) -> tuple[str, float]:
+        t0 = time.time()
+        out = self._llm.create_chat_completion(
+            messages=self._messages(prompt),
+            grammar=grammar,
+            max_tokens=max_tokens,
+            temperature=self.config.temperature,
+        )
+        return (out["choices"][0]["message"]["content"] or ""), time.time() - t0
+
+    def decide(self, prompt: str) -> Decision:
+        """Pass 1. A two-way choice, made under constraint.
+
+        This is the pass that fails under `auto`. There is no third option to
+        fall into, so the model cannot spend its turn describing what it is about
+        to do instead of doing it.
+        """
+        if self._llm is None:
+            raise BrainNotLoaded("no model loaded - call load() first")
+        raw, latency = self._generate(prompt, self._decision_grammar, max_tokens=8)
+        token = (raw or "").strip().strip('"').lower()
+        kind = "tool" if token.startswith("tool") else "answer"
+        self.last_used = time.time()
+        return Decision(kind=kind, raw=raw or "", latency_s=latency)
+
+    def act(self, prompt: str, decision: Decision) -> Action:
+        """Pass 2. Either a constrained tool call, or prose."""
+        if self._llm is None:
+            raise BrainNotLoaded("no model loaded - call load() first")
+        t0 = time.time()
+        if decision.is_tool:
+            raw, _ = self._generate(prompt, self._grammar, self.config.max_tokens)
+            tool, args, err = parse_action(raw)
+            self.last_used = time.time()
+            self.turns_served += 1
+            return Action(
+                kind="tool",
+                tool=tool,
+                arguments=args,
+                text=raw or "",
+                latency_s=time.time() - t0,
+                parse_error=err,
+            )
+        raw, _ = self._generate(prompt, None, self.config.max_tokens)
+        self.last_used = time.time()
+        self.turns_served += 1
+        return Action(kind="answer", text=raw or "", latency_s=time.time() - t0)
+
+    def turn(self, prompt: str) -> Action:
+        """A whole turn: decide, then act. Never executes anything."""
+        decision = self.decide(prompt)
+        action = self.act(prompt, decision)
+        action.latency_s = decision.latency_s + action.latency_s
+        return action
+
+    def stream(self, prompt: str) -> Iterator[str]:
+        """Stream an answer token by token.
+
+        0.3.35 has no `stream_callback` on `create_completion`, so streaming means
+        consuming the chunk generator. A seam left unwired would mean writing a
+        mock stream and then discovering it chunks differently than the real one;
+        this is the real one.
+        """
+        if self._llm is None:
+            raise BrainNotLoaded("no model loaded - call load() first")
+        chunks = self._llm.create_chat_completion(
+            messages=self._messages(prompt),
+            stream=True,
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
+        )
+        for chunk in chunks:
+            delta = chunk["choices"][0].get("delta", {})
+            piece = delta.get("content")
+            if piece:
+                yield piece
+        self.last_used = time.time()
+        self.turns_served += 1
+
+
+def _make_llama(config: BrainConfig) -> Any:
+    """Construct the real llama.cpp handle.
+
+    D25/D29: this must be OUR build. The prebuilt wheels ship a CPU backend
+    compiled with AVX-512, which this Ryzen 5 5600G cannot execute, and they die
+    with STATUS_ILLEGAL_INSTRUCTION on the CPU path. There is no runtime check
+    that can detect that cheaply, so `probe_isa.py` is the standing smoke test and
+    the install is pinned to `--no-binary :all:`.
+    """
+    from llama_cpp import Llama
+
+    kwargs: dict[str, Any] = {
+        "model_path": str(config.path()),
+        "n_ctx": config.n_ctx,
+        "n_batch": config.n_batch,
+        "n_gpu_layers": config.n_gpu_layers,
+        "verbose": False,
+    }
+    if config.n_threads:
+        kwargs["n_threads"] = config.n_threads
+    return Llama(**kwargs)

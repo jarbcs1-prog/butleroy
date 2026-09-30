@@ -502,3 +502,62 @@ with a quiet machine, and must record that it did so.
 For the record, the 223 tok/s figure measured *during* that contention is therefore an optimistic
 lower bound on an unloaded machine, not a baseline. It is quoted in the Phase 0 results table only
 to show the GPU was doing the work; it must not be used to predict interactive latency.
+
+## Part V - Decisions taken while building Plane A
+
+These came out of writing the code rather than out of planning it, which is why they are recorded
+here rather than in Part I. Each one is a case where the obvious choice was the wrong one.
+
+### D30 - The hotkey is a Win32 `RegisterHotKey`, and presence is read from the OS
+Both are about the same thing: **the assistant must not be able to lie about who is in front of it.**
+
+**The hotkey.** `Ctrl+Alt+Space` (D8) is registered through `ctypes` against `user32.RegisterHotKey`,
+not through the `keyboard` library, which *is* installed and which Phase 5 will use for the wake word.
+`RegisterHotKey` was verified to return success in a non-elevated session on this machine. Three
+reasons, in order of importance:
+
+1. `keyboard` requires administrator rights. Silent elevation is out of scope (PLAN.md), and a hotkey
+   that only works in an elevated prompt is not a hotkey - it is a feature you cannot use.
+2. It installs a low-level keyboard hook, so the process observes every keystroke, always. For a
+   resident 24/7 daemon that is a standing liability, and it buys nothing when we want exactly one
+   chord.
+3. It is a dependency for a single integer.
+
+The generalisable form: **prefer the mechanism with the smallest blast radius.** A process that can
+only ever see one specific chord cannot be turned into a keylogger by a later refactor. That property
+is worth more than the convenience of a library, and it is the kind of thing that is cheap to decide
+correctly now and expensive to retrofit.
+
+Two Win32 details that are not optional: `MOD_NOREPEAT` (0x4000) must be set or holding the chord
+fires repeatedly, and the message pump must run on **the same thread that registered the hotkey**,
+because hotkey registration is per-thread. Both failure modes look identical from the user's side -
+"the hotkey sometimes doesn't come" - which is why they are written down.
+
+**Presence.** D13's unattended cap needs to know whether a human is at the keyboard. Asking the caller
+over the transport would be worthless: whoever sends the request can simply claim to be present, and
+the whole ceiling becomes decorative. Presence is therefore read from `GetLastInputInfo`, which the
+OS maintains and no message can forge. Consequences:
+
+- `session.set_attended` may only **narrow** authority. Only `CHANNEL_PC` may assert presence; a
+  remote channel requesting `attended=true` is **refused**, not ignored.
+- Presence transitions go through the audited op, so the log reconstructs who was there and when.
+- **A failed presence check does not mark the session unattended.** The honest response to not knowing
+  is to keep the current state, not to assume the worst and silently stop working.
+
+### D31 - The tray is a client of the daemon, never a second front door
+Every tray action calls `daemon.handle` with `actor="tray"` and `channel="pc"`, exactly as a pipe peer
+does. There is no privileged path from the icon to the filesystem. A tray that could do more than the
+pipe would be a tray nobody audits, and the audit chain is the only evidence this system produces about
+itself.
+
+The same principle appears in three other places and is worth naming as one decision rather than four
+coincidences: the manifest store has **no discovery method at all**; the gate recomputes
+`allowed_roots` from the manifest store on **every** call rather than caching at construction; and a
+tool with no executor raises "not implemented" rather than returning an empty success. In all four
+cases the failure being avoided is the same one - **a component that appears to have done something it
+did not do.** That is the failure that makes an assistant untrustworthy, and it is much more dangerous
+than an error, because an error is visible.
+
+For the same reason the tray's "Open prompt" item reports that the overlay is not built instead of
+showing stale status, and `status` exposes `tools_executable` (3) alongside `tools_registered` (~58).
+The gap is meant to be visible.

@@ -165,6 +165,60 @@ This is the 24/7 promise, and it costs no GPU. Ship it before touching the brain
 prompts and executes nothing until confirmed at the PC; an unattended session executes T0/T1 only;
 `nvidia-smi` shows VRAM at baseline throughout.
 
+### Phase 2 results — **substantially built; the gate is not yet fully closed**
+
+**213 tests green inside the venv.** Built, all pure-stdlib except the tray:
+
+| Component | File | State |
+|---|---|---|
+| Policy gate (D13) | `policy.py` | done — tiers, path allow/deny, unattended cap, channel rule |
+| Hash-chained audit | `audit.py` | done — `verify()` recomputes hash, linkage and contiguity |
+| Tool registry (D5) | `tools.py` | done — the full capability surface, gated, mostly unimplemented |
+| VRAM arbiter | `arbiter.py` | done — leases, 90 s TTL, self-preemption only |
+| Named-pipe transport | `ipc.py` | done — no TCP anywhere, enforced by an AST check |
+| Workspace manifests (D10) | `manifest.py` | done — **no discovery method exists at all** |
+| Obsidian bridge (D14) | `obsidian.py` | done — 426 real notes; 7.5 GB corpus excluded |
+| Daemon | `daemon.py` | done — 24 ops, **3 executors** (`file.list/read/create`) |
+| Tray + hotkey + presence | `tray.py` | done |
+
+**Two design decisions worth recording, because both are cases where the obvious choice was wrong:**
+
+1. **The hotkey is Win32 `RegisterHotKey` via ctypes, not the `keyboard` library.** `keyboard` is
+   installed and Phase 5 will use it for the wake word, but not for this: it requires administrator
+   rights (silent elevation is out of scope), it installs a low-level hook so a 24/7 daemon observes
+   every keystroke always, and it is a dependency for a single integer. A process that can only see
+   one specific chord has a far smaller blast radius than one that can see everything.
+2. **Presence is read from the OS (`GetLastInputInfo`), never claimed over the transport.** Asking the
+   caller "are you there?" would be worthless — whoever sends the request could just say yes. The
+   daemon's `session.set_attended` may only ever be *narrowed* by a remote channel, and only
+   `CHANNEL_PC` may assert it.
+
+**What is not done, and why the gate is not closed:** the **prompt overlay is not built** — the tray's
+"Open prompt" item says so plainly rather than faking it, because a menu item that appears to work
+and shows stale information is worse than one that admits the feature does not exist. The
+**Telegram bridge is not built**. Only **3 of ~58 registered tools have executors**, by design: the
+gap is visible in `status` rather than hidden behind a stub that returns success. So the vertical
+slice — hotkey → prompt → streamed answer → execute, with no terminal visible — is still outstanding,
+and it is the real Phase 2 gate.
+
+**Bugs found in my own code along the way**, recorded because each was invisible until tested
+against the real thing rather than a mock:
+
+- The **policy gate failed open with zero approved roots** — a fresh install, the state in which the
+  user has approved *nothing*, was the single most permissive configuration possible. Now empty
+  denies.
+- The **authkey was written in Windows text mode**, translating `0x0A` to `0x0D 0x0A`. Measured 280
+  corruptions in 2000 round-trips; ~1 daemon start in 8 would have failed to authenticate on restart.
+- A **dangling symlink escaped the Obsidian write jail**: the guard was
+  `if resolved.exists() and resolved.is_symlink()`, and a symlink to a non-existent target reports
+  `is_symlink()==True` but `exists()==False`. A dangling symlink is precisely what one plants to
+  redirect a write.
+- The **presence monitor flooded**: `_held` only updated on success, so a refused transition
+  re-attempted every poll — 13 calls in 0.4 s at test speed, which in production is a permanent
+  refusal every 2 seconds burying the audit chain.
+- The **presence monitor desynced**: `_held` started at `False` while the daemon starts *attended*,
+  so a first observation of "nobody present" concluded the state already matched and never spoke.
+
 ---
 
 ## Phase 3 — Supervisor fork + brain, wired together
@@ -258,6 +312,11 @@ daemon wiring that ties the policy gate, the arbiter, the audit log and the mani
 Then download candidate 1 (`HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` Q8_0, 4.17 GB) and
 measure it on a quiet machine.
 
-Current state: **Phase 0 passed** (exit 0, foundation proven). **Phase 2 partially built** — 106
-tests green inside the venv across `policy`, `audit`, `tools`, `arbiter`, `ipc` and `manifest`. No
-tray, no hotkey, no Obsidian bridge, no daemon entry point yet.
+Current state: **Phase 0 passed** (exit 0, foundation proven). **Phase 2 substantially built** — 213
+tests green inside the venv, tray/hotkey/presence done, but the **prompt overlay and Telegram bridge
+are not built** and only 3 of ~58 registered tools have executors. The Phase 2 vertical slice is
+therefore still open.
+
+**In flight:** the 4.17 GB fast-tier model is downloading (`download_fast_tier.ps1`, resumable, with
+byte-exact verification against the Hugging Face sizes). It must reach exactly **4,482,402,656** bytes
+before Phase 1 touches it — a truncated GGUF loads and then generates nonsense rather than raising.

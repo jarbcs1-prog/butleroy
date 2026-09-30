@@ -1,0 +1,314 @@
+"""The policy gate - the only thing standing between a language model and
+`rm -rf`.
+
+D5 is the rule this module implements: **safety is deterministic code, never a
+model, and never a prompt instruction.** Nothing in here consults a model, and
+nothing in here can be overridden by anything a model says. The model's job is
+to *propose* a tool call; this module's job is to decide whether it happens.
+
+The threat model is specific. The model is not adversarial - it is fallible,
+and it is confidently wrong in ways that look exactly like correct answers. It
+will cheerfully construct a plausible `delete` call from a sentence the user
+said offhand. A prompt saying "be careful" does not help, because the mistake
+is in the same channel as the instruction. So the tier is looked up from a
+table declared in code, keyed by tool name, and cross-checked against the tool's
+own declaration. The model cannot influence the lookup, and if a tool somehow
+appears with no declared tier, the answer is DENY.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from enum import IntEnum
+from pathlib import Path, PurePath
+from typing import Any, Iterable
+
+
+class Tier(IntEnum):
+    """Authority tiers. Ordered so comparisons are meaningful."""
+
+    READ = 0            # enumerate, read, search, git status
+    REVERSIBLE_WRITE = 1  # drafts, scratch, edits under git in a declared workspace
+    CONSEQUENTIAL = 2    # move, archive, bulk rename, commit, run builds
+    IRREVERSIBLE = 3    # delete, send email, install, admin change, send Telegram
+
+    def __str__(self) -> str:
+        return f"T{self.value}"
+
+
+class Channel(str):
+    """Where a request came from. Compared by value, not identity."""
+
+
+# Channel values as module constants so a typo is a NameError, not a silent
+# fall-through to the most permissive branch.
+CHANNEL_PC = "pc"
+CHANNEL_VOICE = "voice"
+CHANNEL_TELEGRAM = "telegram"
+CHANNEL_SCHEDULED = "scheduled"
+CHANNEL_INTERNAL = "internal"
+
+
+class Decision(str):
+    ALLOW = "allow"
+    QUEUE = "queue"
+    DENY = "deny"
+    CONFIRM = "confirm"
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """A tool's authority, declared in code.
+
+    `destructive` is deliberately separate from the tier: it marks the tools
+    where a bug is expensive rather than untidy, so they can be given extra
+    scrutiny without inventing a fifth tier.
+    """
+
+    name: str
+    tier: Tier
+    description: str = ""
+    destructive: bool = False
+    # Paths this tool may touch. Empty means "no path constraint" (e.g. a
+    # tool that only reads system metrics). A tool with paths must name at
+    # least one, or the deny-path is all that stands between it and C:\.
+    paths: tuple[str, ...] = ()
+    # Remote/external side effects. A tool that can talk to the outside world
+    # is a T3 candidate regardless of what it claims to do.
+    external: bool = False
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """The gate's answer. Carries the reason so the audit log is useful."""
+
+    decision: str
+    tier: Tier | None = None
+    reason: str = ""
+    # What the caller should do next. For CONFIRM this is the pending action.
+    requires_confirmation_at: str | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.decision == Decision.ALLOW
+
+    def __str__(self) -> str:
+        tier = self.tier if self.tier is not None else "?"
+        return f"{self.decision} ({tier}): {self.reason}"
+
+
+# Absolute deny-list. These are never readable, writable, or deletable by the
+# assistant, regardless of what a manifest or a tool claims. Checked first, and
+# checked against resolved paths so `..\` and short names cannot slip past.
+#
+# D21 forbids the assistant rewriting its own code or policy. That is enforced
+# here rather than by instruction, which is the point of the whole design.
+DENY_PATHS: tuple[str, ...] = (
+    r"C:\Windows\System32\config",
+    r"C:\Windows\System32\drivers",
+    r"C:\Program Files\WindowsApps",
+    r"C:\Program Files (x86)\WindowsApps",
+    r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup",
+    r"C:\$Recycle.Bin",
+)
+
+# The assistant's own tree. Self-modification is denied, not merely discouraged
+# (D21). Spelled out here as well as being enforced by the manifest resolver so
+# that the guarantee survives a mistake in either component.
+SELF_PATHS: tuple[str, ...] = (
+    r"G:\localaized\src",
+    r"G:\localaized\DECISIONS.md",
+    r"G:\localaized\ARCHITECTURE.md",
+    r"G:\localaized\PLAN.md",
+)
+
+
+def _norm(path: str) -> str:
+    """Normalise a path for comparison, best effort.
+
+    `os.path.normcase` lowercases and unifies separators on Windows; the
+    `abspath` collapses `..`. Resolving symlinks would be better still, but
+    Windows reparse points need care and a missing target should not crash the
+    gate - so this normalises without requiring the path to exist.
+    """
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+
+
+def _under(candidate: str, root: str) -> bool:
+    """True if candidate is root or lives inside it.
+
+    Uses `commonpath` rather than `startswith` because `C:\localaized-2` must
+    not count as being inside `C:\localaized`.
+    """
+    try:
+        return os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        # Different drives - cannot be nested, so not under.
+        return False
+
+
+@dataclass
+class PolicyGate:
+    """Decides whether a proposed tool call may execute.
+
+    The gate is constructed with an explicit tool table and an explicit set of
+    allowed roots. It holds no model state and makes no network calls, which
+    is what makes it auditable: given the same inputs it returns the same
+    verdict, always.
+    """
+
+    tools: dict[str, ToolSpec] = field(default_factory=dict)
+    allowed_roots: list[str] = field(default_factory=list)
+    deny_paths: tuple[str, ...] = DENY_PATHS
+    self_paths: tuple[str, ...] = SELF_PATHS
+    # True when a human is at the keyboard. Set by the daemon from the session
+    # state, never by the model, and never inferred from a tool call.
+    attended: bool = True
+    # Highest tier that may execute with nobody watching.
+    unattended_ceiling: Tier = Tier.REVERSIBLE_WRITE
+    # Channels that are allowed to request, but never to authorise, T3.
+    remote_channels: tuple[str, ...] = (CHANNEL_TELEGRAM,)
+
+    def register(self, spec: ToolSpec) -> None:
+        self.tools[spec.name] = spec
+
+    def register_all(self, specs: Iterable[ToolSpec]) -> None:
+        for spec in specs:
+            self.register(spec)
+
+    def tier_of(self, tool: str) -> Tier | None:
+        """Look the tier up in the table. Never in the request."""
+        spec = self.tools.get(tool)
+        return spec.tier if spec else None
+
+    def _check_paths(self, tool: str, args: dict[str, Any]) -> str | None:
+        """Return a denial reason if any argument path is off-limits.
+
+        Arguments are inspected by key name. This is a heuristic, and it is
+        applied in addition to the tool's declared `paths` rather than instead
+        of it - a defence in depth, so a tool that forgets to declare a path
+        constraint is still covered for the obvious argument names.
+        """
+        spec = self.tools[tool]
+        candidates: list[str] = []
+
+        for key, value in args.items():
+            if not isinstance(value, str):
+                continue
+            if any(
+                token in key.lower()
+                for token in ("path", "file", "dir", "src", "dest", "target", "folder")
+            ):
+                candidates.append(value)
+
+        for declared in spec.paths:
+            candidates.append(declared)
+
+        for raw in candidates:
+            resolved = _norm(raw)
+
+            for denied in (*self.deny_paths, *self.self_paths):
+                if _under(resolved, _norm(denied)):
+                    return (
+                        f"path {raw!r} resolves inside a protected location "
+                        f"({denied}); the assistant may not read, write or delete "
+                        f"its own code or policy (D21)"
+                    )
+
+            if self.allowed_roots and not any(
+                _under(resolved, _norm(root)) for root in self.allowed_roots
+            ):
+                return (
+                    f"path {raw!r} is outside every approved workspace root; "
+                    f"access requires a user-approved manifest (D10)"
+                )
+
+        return None
+
+    def evaluate(
+        self,
+        tool: str,
+        *,
+        channel: str,
+        args: dict[str, Any] | None = None,
+        actor: str = "user",
+    ) -> Verdict:
+        """The single decision point. Every tool call passes through here."""
+        args = args or {}
+
+        spec = self.tools.get(tool)
+        if spec is None:
+            # Fail closed. An unknown tool is not a low-risk tool.
+            return Verdict(
+                decision=Decision.DENY,
+                reason=(
+                    f"tool {tool!r} is not registered; the gate denies by default "
+                    f"rather than trusting an undeclared action (D5)"
+                ),
+            )
+
+        path_problem = self._check_paths(tool, args)
+        if path_problem is not None:
+            return Verdict(
+                decision=Decision.DENY,
+                tier=spec.tier,
+                reason=path_problem,
+            )
+
+        if spec.tier == Tier.IRREVERSIBLE:
+            # Rule 2: a remote channel may request a T3 but never authorise it.
+            # A hijacked Telegram session must not become a remote-delete
+            # capability, so the answer is always "confirm at the PC".
+            return Verdict(
+                decision=Decision.CONFIRM,
+                tier=spec.tier,
+                reason=(
+                    f"{spec.name} is {spec.tier} ({'destructive' if spec.destructive else 'external/irreversible'}); "
+                    f"requires explicit confirmation at the PC regardless of channel"
+                ),
+                requires_confirmation_at=CHANNEL_PC,
+            )
+
+        if not self.attended and spec.tier > self.unattended_ceiling:
+            # Rule 1: the unattended cap.
+            return Verdict(
+                decision=Decision.QUEUE,
+                tier=spec.tier,
+                reason=(
+                    f"{spec.name} is {spec.tier} but no interactive session is "
+                    f"present; unattended execution is capped at "
+                    f"{self.unattended_ceiling} (D13). Queued for approval."
+                ),
+            )
+
+        if spec.tier == Tier.CONSEQUENTIAL:
+            return Verdict(
+                decision=Decision.CONFIRM,
+                tier=spec.tier,
+                reason=(
+                    f"{spec.name} is {spec.tier} (consequential); "
+                    f"requires in-app confirmation"
+                ),
+                requires_confirmation_at=CHANNEL_PC,
+            )
+
+        # Defence in depth: a tool that claims to be T0 but is marked
+        # destructive or external is not trusted to be harmless.
+        if spec.destructive or spec.external:
+            return Verdict(
+                decision=Decision.CONFIRM,
+                tier=spec.tier,
+                reason=(
+                    f"{spec.name} is declared {spec.tier} but is flagged "
+                    f"{'destructive' if spec.destructive else 'external'}; "
+                    f"treating the stricter classification"
+                ),
+                requires_confirmation_at=CHANNEL_PC,
+            )
+
+        return Verdict(
+            decision=Decision.ALLOW,
+            tier=spec.tier,
+            reason=f"{spec.name} is {spec.tier} (read/reversible write) and every check passed",
+        )

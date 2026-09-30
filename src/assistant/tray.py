@@ -114,21 +114,48 @@ class HotkeyUnavailable(RuntimeError):
 class Hotkey:
     """A single global chord, delivered to a callback on its own thread."""
 
-    def __init__(self, callback, *, label=HOTKEY_LABEL, vk=VK_SPACE, mods=MOD_CONTROL | MOD_ALT):
+    def __init__(self, callback, *, label=HOTKEY_LABEL, vk=VK_SPACE,
+                 mods=MOD_CONTROL | MOD_ALT, hotkey_id=HOTKEY_ID):
         self.callback = callback
         self.label = label
         self.vk = vk
         self.mods = mods | MOD_NOREPEAT
+        # A per-instance id, so a caller that legitimately wants two chords does not
+        # have to fight itself, and so tests can use distinct ids. Windows scopes a
+        # NULL-hWnd registration to the *current thread*, so this is not what caused
+        # the intermittent tray failures - see trigger() for that.
+        self.hotkey_id = hotkey_id
         self.registered = False
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._error: Exception | None = None
 
+    def trigger(self) -> bool:
+        """Synthesise a press of this chord, as if the user had hit the key.
+
+        This exists because it is the only *safe* way to test the pump, and because
+        the tray's own "Summon" menu item should travel the identical path a real key
+        press does rather than calling the callback directly.
+
+        Hand-rolling this in a test means posting to `thread.ident`, and Windows
+        recycles thread identifiers. A message addressed to a thread that has already
+        exited can land in an unrelated, newly-created thread that happens to have
+        been handed the same id - which is precisely the intermittent failure seen
+        in the tray tests, and it is a race, not a flake in the test's logic. Going
+        through the instance removes the guesswork: if the thread is gone, this
+        returns False instead of misdelivering.
+        """
+        if self._thread is None or not self._thread.is_alive():
+            return False
+        return bool(
+            user32.PostThreadMessageW(self._thread.ident, WM_HOTKEY, self.hotkey_id, 0)
+        )
+
     def start(self, timeout: float = 5.0) -> "Hotkey":
         # Register from this thread. The registration is per-thread on Windows, which
         # is precisely why the message pump below has to live in the same thread: a
         # WM_HOTKEY posted to a thread that did not register it is never delivered.
-        if not user32.RegisterHotKey(None, HOTKEY_ID, self.mods, self.vk):
+        if not user32.RegisterHotKey(None, self.hotkey_id, self.mods, self.vk):
             raise HotkeyUnavailable(
                 f"could not register {self.label} - another program already owns it. "
                 "Common culprits: an IME (Ctrl+Alt+Space toggles several), or another "
@@ -154,7 +181,8 @@ class Hotkey:
                 got = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
                 if got in (0, -1):  # WM_QUIT, or an outright error
                     break
-                if got > 0 and msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                if (got > 0 and msg.message == WM_HOTKEY
+                        and msg.wParam == self.hotkey_id):
                     # A failure inside the callback must not take the pump down. This
                     # thread is the only thing that can report the hotkey, so if it
                     # dies the assistant silently becomes unsummonable - the exact
@@ -172,7 +200,7 @@ class Hotkey:
 
     def stop(self) -> None:
         if self.registered:
-            user32.UnregisterHotKey(None, HOTKEY_ID)
+            user32.UnregisterHotKey(None, self.hotkey_id)
             self.registered = False
         self.post_quit()
         if self._thread and self._thread.is_alive():
@@ -294,9 +322,14 @@ class Tray:
     audits.
     """
 
-    def __init__(self, daemon, *, title=f"Local assistant {__version__}"):
+    def __init__(self, daemon, *, title=f"Local assistant {__version__}",
+                 hotkey=None):
         self.daemon = daemon
         self.title = title
+        # Optional, and deliberately so: the tray must work with no hotkey at all
+        # (headless, or a second instance that lost the chord to an IME), rather
+        # than refusing to start.
+        self.hotkey = hotkey
         self.icon = None
         self._notice: str | None = None
         self._color: tuple | None = None
@@ -345,6 +378,14 @@ class Tray:
         )
 
     def _set_attended(self, icon=None, item=None) -> None:
+        """Summon, from the menu.
+
+        If a Hotkey is attached, it goes *through* it, so the menu item and the
+        keyboard chord execute the same code path. A menu item with its own private
+        route to the callback is a second, untested way to be summoned.
+        """
+        if self.hotkey is not None and self.hotkey.trigger():
+            return
         self.call("session.set_attended", attended=True, why="summoned from the tray")
         self.notify("Marked attended. Remote channels still cannot authorise T3.")
 

@@ -115,19 +115,21 @@ def test_a_raising_callback_does_not_kill_the_message_pump():
 
 
 def _post_hotkey(hk: Hotkey, times: int = 1) -> None:
-    """Post a WM_HOTKEY to the pump's thread queue.
+    """Press the chord, without synthesising a keystroke.
 
-    Posting directly to the thread's queue exercises the pump and the dispatch
-    without synthesising a keystroke, so the test never steals focus or fires the
-    chord in whatever else the user has open. The registration path is covered
-    separately by the tests above.
+    Delegates to `Hotkey.trigger()` rather than posting to `hk._thread.ident` by
+    hand. That indirection is the point: Windows recycles thread identifiers, so a
+    message addressed to a thread that has already exited can be delivered to an
+    unrelated thread that was later handed the same id. Hand-posting is therefore a
+    race, and it showed up as two tests that failed only in a full-suite run and
+    passed in isolation. The instance knows whether its own thread is still alive,
+    and returns False instead of misdelivering.
+
+    The real registration path is covered by the tests above, which do call
+    RegisterHotKey.
     """
-    from assistant.tray import user32
-
-    assert hk._thread is not None and hk._thread.ident
     for _ in range(times):
-        ok = user32.PostThreadMessageW(hk._thread.ident, WM_HOTKEY, HOTKEY_ID, 0)
-        assert ok, "PostThreadMessageW failed - the pump thread is not accepting messages"
+        assert hk.trigger(), "the pump thread is not accepting messages"
 
 
 def test_posting_a_hotkey_message_reaches_the_callback():

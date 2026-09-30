@@ -313,13 +313,31 @@ class PipeServer:
 
 #: Transport diagnostics, drained by the daemon into the audit log. Bounded so a
 #: bug that spams cannot grow without limit in a process that never restarts.
+#: Locked, because notes arrive from every connection thread and a list.append
+#: is not atomic with respect to a concurrent drain.
 _NOTES: list[str] = []
 _NOTES_LIMIT = 1000
+_NOTES_LOCK = threading.Lock()
+
+
+def note(message: str) -> None:
+    """Record a local-only diagnostic.
+
+    This module deliberately refuses to send a traceback to a peer, because a
+    traceback carries absolute paths. That is only safe if the detail is kept
+    *somewhere*, so callers that catch-and-report push it here and the daemon
+    drains it into the audit log.
+    """
+    with _NOTES_LOCK:
+        _NOTES.append(message)
+        if len(_NOTES) > _NOTES_LIMIT:
+            del _NOTES[: len(_NOTES) - _NOTES_LIMIT]
 
 
 def drain_notes() -> list[str]:
-    out = list(_NOTES)
-    _NOTES.clear()
+    with _NOTES_LOCK:
+        out = list(_NOTES)
+        _NOTES.clear()
     return out
 
 

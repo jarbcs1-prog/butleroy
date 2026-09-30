@@ -232,5 +232,52 @@ class TestMisdeclarationIsCaught(unittest.TestCase):
         self.assertEqual(v.decision, Decision.CONFIRM)
 
 
+class TestEmptyAllowedRootsIsNotUnrestricted(unittest.TestCase):
+    """The fail-open this suite did not have until the daemon exposed it.
+
+    `_check_paths` used to be guarded by `if self.allowed_roots and not
+    any(...)`, on the reasoning that an unconfigured gate should not constrain a
+    caller. It did the opposite: with zero approved roots the containment test
+    was skipped entirely, so a fresh install - the state in which the user has
+    approved *nothing* - was the most permissive configuration possible.
+    """
+
+    def _gate(self) -> PolicyGate:
+        gate = PolicyGate(allowed_roots=[])
+        gate.register(ToolSpec("file.read", Tier.READ))
+        return gate
+
+    def test_no_approved_root_means_no_path_is_approved(self):
+        gate = self._gate()
+        for path in (r"C:\Users\PC Principal\.ssh\id_rsa",
+                     r"E:\somewhere\else.txt",
+                     r"D:\data\private.md"):
+            with self.subTest(path=path):
+                v = gate.evaluate("file.read", channel=CHANNEL_PC, args={"path": path})
+                self.assertEqual(v.decision, Decision.DENY)
+
+    def test_the_refusal_explains_why_and_how_to_fix_it(self):
+        gate = self._gate()
+        v = gate.evaluate("file.read", channel=CHANNEL_PC, args={"path": r"E:\x.txt"})
+        self.assertIn("no workspace has been approved", v.reason)
+        self.assertIn("D10", v.reason)
+
+    def test_an_outside_root_still_explains_which_roots_exist(self):
+        gate = PolicyGate(allowed_roots=[r"F:\theseas"])
+        gate.register(ToolSpec("file.read", Tier.READ))
+        v = gate.evaluate("file.read", channel=CHANNEL_PC, args={"path": r"F:\crm\x.md"})
+        self.assertEqual(v.decision, Decision.DENY)
+        self.assertIn("outside every approved workspace root", v.reason)
+
+    def test_a_tool_with_no_path_arguments_is_unaffected(self):
+        """Only paths are constrained this way. A tier-only tool must still work
+        with no manifests configured, or the fix would have broken T0 reads that
+        are not path-scoped."""
+        gate = PolicyGate(allowed_roots=[])
+        gate.register(ToolSpec("system.info", Tier.READ))
+        v = gate.evaluate("system.info", channel=CHANNEL_PC)
+        self.assertEqual(v.decision, Decision.ALLOW)
+
+
 if __name__ == "__main__":
     unittest.main()

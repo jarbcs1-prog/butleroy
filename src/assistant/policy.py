@@ -216,13 +216,26 @@ class PolicyGate:
                         f"its own code or policy (D21)"
                     )
 
-            if self.allowed_roots and not any(
-                _under(resolved, _norm(root)) for root in self.allowed_roots
-            ):
-                return (
-                    f"path {raw!r} is outside every approved workspace root; "
-                    f"access requires a user-approved manifest (D10)"
-                )
+            # No `self.allowed_roots and` guard here. An earlier version had one,
+            # on the reasoning that "no roots configured" should not constrain a
+            # caller who is legitimately unrestricted. It does the opposite: with
+            # zero approved roots the whole test was skipped, so a fresh install -
+            # the state in which the user has approved nothing at all - was the
+            # single most permissive configuration possible, reading anything
+            # anywhere. Empty means nothing is approved, so empty denies (D10).
+            if not any(_under(resolved, _norm(root)) for root in self.allowed_roots):
+                if self.allowed_roots:
+                    reason = (
+                        f"path {raw!r} is outside every approved workspace root; "
+                        f"access requires a user-approved manifest (D10)"
+                    )
+                else:
+                    reason = (
+                        f"path {raw!r} cannot be allowed because no workspace has "
+                        f"been approved. A fresh install authorises nothing; add a "
+                        f"manifest to grant access (D10)"
+                    )
+                return reason
 
         return None
 

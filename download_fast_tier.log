@@ -1,0 +1,21 @@
+=== START HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive ===
+--- Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf
+    have=227405321 want=4482402656
+    fetching with resume (-C -)
+** Resuming transfer from byte position 227405321
+  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current
+                                 Dload  Upload  Total   Spent   Left   Speed
+
+  0      0   0      0   0      0      0      0                              0
+100   1198 100   1198   0      0   3174      0                              0
+100   1198 100   1198   0      0   3173      0                              0
+
+  0      0   0      0   0      0      0      0                              0
+  0  3.96G   0      0   0      0      0      0           00:01              0
+  0  3.96G   0  1.25M   0      0 476.9k      0 2:25:11   00:02 2:25:09 583.7k
+  0  3.96G   0  2.70M   0      0 751.2k      0 1:32:11   00:03 1:32:08 866.7k
+  0  3.96G   0  3.82M   0      0 834.6k      0 1:22:58   00:04 1:22:54 932.2k
+  0  3.96G   0  4.64M   0      0 834.1k      0 1:23:01   00:05 1:22:56 912.8k
+  0  3.96G   0  5.17M   0      0 790.5k      0 1:27:36   00:06 1:27:30  1.03M
+  0  3.96G   0  5.82M   0      0 774.9k      0 1:29:21   00:07 1:29:14 934.6k
+  0  3.96G   0  6.61M   0      0 777.7k      0 1:29:02   00:08 1:28:54 797.3k

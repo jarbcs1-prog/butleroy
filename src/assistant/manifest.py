@@ -122,20 +122,22 @@ def _is_under(child: str, parent: str) -> bool:
 #: Tier names as they appear in a manifest. ``Tier`` is an ``IntEnum`` whose
 #: *member names* are ``READ``/``REVERSIBLE_WRITE``/... while its ``str()`` is
 #: ``T0``..``T3``; manifests use the latter, so ``Tier["T0"]`` would raise.
-_TIER_BY_NAME: dict[str, Tier] = {str(t): t for t in Tier}
-_TIER_BY_NAME.update({t.name: t for t in Tier})
+#: Public because the daemon accepts the same spellings when a caller passes
+#: ``allow_tiers`` over the transport - one table, one place to get it wrong.
+TIER_BY_NAME: dict[str, Tier] = {str(t): t for t in Tier}
+TIER_BY_NAME.update({t.name: t for t in Tier})
 
 
 def _tier_list(names: Iterable[str]) -> tuple[Tier, ...]:
     out: list[Tier] = []
     for name in names:
         key = str(name).strip().upper()
-        if key not in _TIER_BY_NAME:
+        if key not in TIER_BY_NAME:
             raise ManifestInvalid(
                 f"unknown authority tier {name!r}; expected one of "
                 + ", ".join(sorted(str(t) for t in Tier))
             )
-        out.append(_TIER_BY_NAME[key])
+        out.append(TIER_BY_NAME[key])
     return tuple(sorted(set(out), key=lambda t: int(t)))
 
 

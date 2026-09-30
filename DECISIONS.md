@@ -19,10 +19,14 @@ only while actively answering. Rationale is the user's own constraint:
 Models **take turns, they do not coexist**. VRAM is a leased resource, not a setting.
 Enforced by D3 and the arbiter in ARCHITECTURE.md, not by good intentions.
 
-### D2 — Embedded inference from prebuilt CUDA wheels
-Use `llama-cpp-python` from the `abetlen` prebuilt index (`win_amd64`, CUDA **cu124**,
-sm_86 covers the 3060). Available through **v0.3.35**; no MSVC build required.
-Fallback if unavailable: source build using VS BuildTools + `vcvars64`.
+### D2 — Embedded inference, built by us (SUPERSEDED by D25 — see the correction below)
+~~Use `llama-cpp-python` from the `abetlen` prebuilt index (`win_amd64`, CUDA **cu124**,
+sm_86 covers the 3060). Available through **v0.3.35**; no MSVC build required.~~
+
+**Phase 0 proved this wrong.** The prebuilt wheels are compiled with AVX-512 and cannot run on a
+Ryzen 5 5600G. D25 replaces this decision: we build `llama-cpp-python` from source with a
+portable CPU baseline. The embedded-Python-runtime choice survives; only the "prebuilt wheel"
+half of it is dead.
 PyTorch never enters the stack (see D18).
 
 ### D3 — One child process per model, killed on idle TTL
@@ -351,3 +355,114 @@ Standing rules, all derived from measurement rather than preference:
 dependency taken, no path baked in (D10). Their findings are transcribed into D9, D22 and D23 and
 after Phase 1 neither tool is required. Phase 1 keeps them available for cross-checking its own
 measurements, which is their entire remaining value.
+
+## Part IV - What Phase 0 actually proved
+
+Phase 0 ran on 2026-09-30. The gate is **not passed**, but three things are now settled that were
+previously assumptions, and one assumption is dead.
+
+### D25 — The prebuilt wheel cannot run on this CPU; we build it ourselves
+**This is the important one, and it supersedes D2.**
+
+The symptom: every load dies at context construction with
+`OSError: [WinError -1073741795]`, i.e. `0xc000001d` = `STATUS_ILLEGAL_INSTRUCTION`. That is a
+hardware fault — the CPU tried to execute an opcode it does not have.
+
+The diagnosis, in order, each step eliminating an alternative:
+
+1. **Not the model, not the architecture, not VRAM.** The GGUF parses perfectly and
+   `llama_print_system_info` reports `arch = qwen35`, `n_layer = 24`, correct tensor shapes.
+2. **Not CUDA.** A run with `n_gpu_layers=0` — pure CPU, no CUDA code path whatsoever — fails with
+   the *identical* error code at the *identical* call site. The GPU is exonerated.
+3. **This CPU has no AVX-512.** Probed directly: `np.longdouble(1).nbytes == 8`. A Ryzen 5 5600G
+   is Zen 3; Zen 3 has no AVX-512. The maximum x87 width is 80-bit.
+4. **The wheel's CPU backend is compiled with AVX-512 anyway.** `llama_print_system_info` prints
+   `AVX512 = 1`, which in ggml reflects a *compile-time* `__AVX512F__`, not a runtime check. The
+   build machine had AVX-512; the flag was baked in and shipped to every user.
+5. **Direct binary evidence.** Scanning `ggml-cpu.dll` for EVEX-prefixed instructions (the 4-byte
+   AVX-512 prefix `0x62` followed by a valid EVEX payload byte) against a control DLL that
+   certainly has no AVX-512:
+
+   | DLL | Size | `0x62` bytes | EVEX-shaped | Ratio |
+   |---|---|---|---|---|
+   | `ggml-cpu.dll` (the wheel's) | 1.01 MB | 12,754 | **9,786** | 76.7 % |
+   | `cudart64_12.dll` (control) | 0.57 MB | 621 | 17 | 2.7 % |
+
+   A megabyte of x86 code containing ~9,800 AVX-512 instruction sites is an entire AVX-512 kernel
+   set compiled in. The control's 2.7 % is the ordinary false-positive rate of the `0x62` byte.
+   This is not a theory any more.
+
+**Consequence:** the `abetlen` prebuilt wheels are unusable on this machine, at every version on
+the cu124 index that carries Qwen3.5 support. The fix is a source build with a portable baseline:
+
+| Flag | Value | Why |
+|---|---|---|
+| `GGML_NATIVE` | `OFF` | stops `-march=native` baking the build machine's ISA in |
+| `GGML_AVX512` | `OFF` | explicit, so it does not depend on the default |
+| `GGML_AVX2` | `ON` | Zen 3 genuinely has it; we keep the speed we are entitled to |
+| `CMAKE_CUDA_ARCHITECTURES` | `86` | only the 3060. The wheel ships `sm_600…900`; we need one |
+| `CMAKE_CUDA_COMPILER` | CUDA 13.3 `nvcc` | matches the newest installed toolkit and MSVC 14.51 |
+| `LLAMA_CURL` / tests / examples / server | `OFF` | nothing in this project opens a socket (D3) |
+
+Building for a single CUDA architecture instead of eight is also the single biggest lever on
+compile time, which matters on 6 cores.
+
+**Generalisable lesson, and the reason this is a decision rather than a note:** a prebuilt binary
+inherits its producer's assumptions. Nobody at `abetlen` was targeting a Zen 3 desktop, and there
+was no reason for them to notice. This is the same failure class as D9 (a model newer than the
+runtime) and D10 (a tool whose output contradicted reality): **a third party's claim about your
+machine is an input to be verified, never a premise.** Every install from here on gets a smoke
+test that runs *on this CPU*, not an import check.
+
+### D26 — The CUDA runtime must be on PATH, and the version must match the build
+`import llama_cpp` failed first with `Failed to load shared library llama.dll: Could not find
+module`. The wheel's `lib\` directory is complete — `llama.dll`, `ggml.dll`, `ggml-base.dll`,
+`ggml-cpu.dll`, `ggml-cuda.dll` (819 MB), `mtmd.dll` all present. The missing piece was the CUDA
+**runtime**: only `CUDA\v13.3\bin` was on PATH, and the cu124 wheel wants
+`cudart64_12.dll` / `cublas64_12.dll` / `cublasLt64_12.dll`, which live in `CUDA\v12.8\bin`. Both
+toolkits are installed side by side and coexist because the DLL names differ per major version.
+
+Because D25 now builds against CUDA 13.3, the 12.8 entry is only needed for the old wheel. The
+general rule, which the daemon must implement: **the assistant launches its own model children
+with a PATH it controls**, prepending the exact CUDA toolkit it was built against. It must never
+inherit whatever PATH the desktop session happens to have, or it will break the first time the
+user installs a different CUDA version.
+
+### D27 — Qwen3.5 is a hybrid SSM model, so KV-cache arithmetic is invalid
+Measured from the loaded model, not assumed:
+
+```
+ssm_d_conv = 4      ssm_d_state = 128     ssm_dt_rank = 16
+ssm_n_group = 16    ssm_d_inner = 2048    full_attention_interval = 4
+mrope sections = [11, 11, 10, 0]         n_ctx_train = 262144
+```
+
+Only every **4th** layer is full attention; the rest are Mamba-style linear-attention SSM blocks
+with their own conv, decay and gate tensors. The tensor list confirms it — even blocks carry
+`attn_qkv` plus `ssm_conv1d` / `ssm_dt` / `ssm_a` / `ssm_beta` / `ssm_alpha`; odd blocks carry
+separate `attn_q` / `attn_k` / `attn_v` and no SSM tensors. The vocabulary also carries
+`<|vision_pad|>`, `<|audio_pad|>`, `<|video_pad|>` and `<tts_*>` tokens, confirming the
+any-to-any multimodality that D4 relies on.
+
+**What this invalidates:** every closed-form KV-cache estimate in this document, including the ones
+inside D1 and D22. A hybrid model does not allocate a KV cache per layer, so the familiar
+`2 × layers × kv_heads × head_dim × ctx × bytes` calculation is simply the wrong formula. It is not
+that the answer came out differently — the question does not apply.
+
+**What survives:** the *ceiling* in D1, which was never a calculation. It is a line drawn for the
+user's benefit, and it is unaffected by how the model spends its memory. The 4B/9B file sizes in
+D22 are byte counts from Hugging Face and remain exact.
+
+**New rule:** for hybrid architectures, **VRAM is measured, never modelled.** This promotes Phase
+1's 4K-vs-8K context measurement from a nice-to-have to a load-bearing gate, and it means the
+D22 headroom figures are provisional until measured. The hybrid structure may well be kinder to
+VRAM than a plain GQA model at the same parameter count, in which case there is more room than
+D22 assumed. That is a pleasant possibility, not a plan.
+
+### D28 — Phase 0 timing numbers taken now are invalid
+Two unrelated `uv` processes belonging to the user's `F:\Wan2GPT` project were running for the
+whole of Phase 0, saturating the network and all 6 cores. They are not ours and were correctly left
+alone. Consequence: **no Phase 0 or Phase 1 timing measurement taken on this machine is
+trustworthy until the machine is quiet.** The structural results (architecture support, full
+offload, the crash) are unaffected — those are not timing. Phase 1 must take its speed numbers
+with a quiet machine, and must record that it did so.

@@ -28,6 +28,48 @@ answered by one test: *does CUDA work here* and *does llama.cpp understand Qwen3
 
 *Nothing has been installed yet. This is the first thing that happens.*
 
+### Phase 0 results — 2026-09-30 — **GATE NOT PASSED**
+
+| Question | Verdict | Evidence |
+|---|---|---|
+| Does llama.cpp understand Qwen3.5? | **YES** | `arch = qwen35`, 24 layers, hybrid SSM tensors present. **D9's open risk is closed.** |
+| Does the model fully offload to the GPU? | **YES** | `offloaded 25/25 layers to GPU`, 526.50 MiB on CUDA0, 11255 MiB free at load |
+| Can this runtime actually run on this CPU? | **NO** | `0xc000001d` `STATUS_ILLEGAL_INSTRUCTION` at context construction, on CPU *and* CUDA |
+
+The third question is the gate, and it fails. `phase0_gate.py` exits 1.
+
+**Root cause, proven rather than assumed (D25).** The `abetlen` prebuilt wheel ships a
+`ggml-cpu.dll` compiled with **AVX-512**, which a Ryzen 5 5600G (Zen 3) cannot execute. 9,786
+EVEX-prefixed instruction sites in that DLL against 17 in a control DLL. A `n_gpu_layers=0` run
+fails identically, so CUDA is not involved.
+
+**Consequence:** D2's "no MSVC build required" was wrong. The prebuilt wheels are unusable on this
+machine. We build `llama-cpp-python` from source with a portable baseline
+(`GGML_NATIVE=OFF`, `GGML_AVX512=OFF`, single CUDA arch `86`) — MSVC 14.51.36231 is installed in
+VS 18 BuildTools, so the build is possible.
+
+Two side findings worth keeping: the CUDA **runtime** must be on PATH or `import llama_cpp` fails
+outright (D26), and Qwen3.5's **hybrid SSM architecture invalidates every closed-form KV-cache
+estimate in these documents** (D27) — VRAM must be measured from here on, which promotes Phase 1's
+context-length measurement to a load-bearing gate.
+
+**All timing numbers taken during Phase 0 are invalid** (D28): two `uv` processes belonging to
+`F:\Wan2GPT` were saturating the network and all 6 cores throughout.
+
+### Phase 0b — Build a runtime this CPU can execute
+
+The one blocking task. Nothing else can be honestly planned until inference works at all.
+
+1. Invoke the build from a `vcvars64.bat` shell (VS 18 BuildTools, MSVC 14.51.36231).
+2. `CMAKE_CUDA_ARCHITECTURES=86` only — the wheel compiles eight architectures, we need one. This
+   is the biggest single lever on a 6-core build.
+3. `GGML_NATIVE=OFF` and `GGML_AVX512=OFF` are the fix; `GGML_AVX2=ON` keeps the speed Zen 3 earns.
+4. Re-run `phase0_gate.py` **verbatim**. An unchanged gate script is what makes the second run
+   comparable to the first.
+
+**Gate: `phase0_gate.py` exits 0** — real text generated, N/N layers on GPU, VRAM delta measured,
+GPU utilisation observed.
+
 ---
 
 ## Phase 1 — Model bake-off

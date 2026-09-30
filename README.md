@@ -52,8 +52,10 @@ you're asleep beyond reversible reads and writes · let Telegram authorize anyth
 
 ## Start here
 
-**Phase 0** — prove native CUDA inference from a prebuilt wheel, using
-`ggml-org/Qwen3.5-0.8B-GGUF` so that one small download answers two questions: does CUDA work
-here, and does llama.cpp understand Qwen3.5 (which every real candidate descends from). Gate: N/N
-layers offloaded, measured with `nvidia-smi`. Nothing above this line is real until it passes, and
-if it fails the honest thing is to stop and reassess rather than build on sand.
+**Phase 0b** — build `llama-cpp-python` from source with a portable CPU baseline. The prebuilt
+wheels ship a CPU backend compiled with AVX-512, which this Ryzen 5 5600G cannot execute; they die
+with `STATUS_ILLEGAL_INSTRUCTION` on the CPU path, so the fix is `GGML_NATIVE=OFF` and our own
+build. Phase 0 already proved the two things that matter and that no rebuild will change:
+**llama.cpp understands Qwen3.5 natively, and the model offloads 25/25 layers to the 3060.**
+The gate is `phase0_gate.py` exiting 0. Nothing above this line is real until it passes, and if
+it fails the honest thing is to stop and reassess rather than build on sand.

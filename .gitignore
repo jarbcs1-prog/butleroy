@@ -1,4 +1,5 @@
 .venv/
+.uvcache/
 models/
 *.gguf
 *.safetensors
@@ -7,6 +8,7 @@ __pycache__/
 *.pyc
 temp_screen.png
 logs/
+logs_*.txt
 audit/
 state/
 vendor/**/node_modules/
@@ -14,3 +16,10 @@ node_modules/
 dist/
 .env
 *.env.local
+
+# Build artefacts from the Phase 0b source build
+build/
+_skbuild/
+*.obj
+*.pdb
+*.ilk

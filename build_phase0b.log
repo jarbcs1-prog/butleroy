@@ -20,3 +20,100 @@ Build cuda_13.3.r13.3/compiler.38244171_0
 
 Resolved 6 packages in 5m 09s
    Building llama-cpp-python==0.3.35
+  × Failed to build `llama-cpp-python==0.3.35`
+  ├─▶ The build backend returned an error
+  ╰─▶ Call to `scikit_build_core.build.build_wheel` failed (exit code: 1)
+
+      [stdout]
+      *** scikit-build-core 1.1.0 using CMake 4.3.1 (wheel)
+      *** Configuring CMake...
+      loading initial cache file
+      C:\Users\PCPRIN~1\AppData\Local\Temp\tmppdvhawf4\build\CMakeInit.txt
+      -- Building for: Visual Studio 18 2026
+      -- Selecting Windows SDK version 10.0.26100.0 to target Windows
+      10.0.26200.
+      -- The C compiler identification is MSVC 19.51.36257.0
+      -- The CXX compiler identification is MSVC 19.51.36257.0
+      -- Detecting C compiler ABI info
+      -- Detecting C compiler ABI info - done
+      -- Check for working C compiler: C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe
+      - skipped
+      -- Detecting C compile features
+      -- Detecting C compile features - done
+      -- Detecting CXX compiler ABI info
+      -- Detecting CXX compiler ABI info - done
+      -- Check for working CXX compiler:
+      C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe
+      - skipped
+      -- Detecting CXX compile features
+      -- Detecting CXX compile features - done
+      -- llama.cpp version: 0.1.0-dev
+      -- Found Git: C:/Program Files/Git/cmd/git.exe (found version
+      "2.55.0.windows.3")
+      -- The ASM compiler identification is MSVC
+      -- Found assembler: C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe
+      -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+      -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+      -- Looking for pthread_create in pthreads
+      -- Looking for pthread_create in pthreads - not found
+      -- Looking for pthread_create in pthread
+      -- Looking for pthread_create in pthread - not found
+      -- Found Threads: TRUE
+      -- Warning: ccache not found - consider installing it for faster
+      compilation or disable this warning with GGML_CCACHE=OFF
+      -- CMAKE_SYSTEM_PROCESSOR: AMD64
+      -- CMAKE_GENERATOR_PLATFORM: x64
+      -- GGML_SYSTEM_ARCH: x86
+      -- Found OpenMP_C: -openmp (found version "2.0")
+      -- Found OpenMP_CXX: -openmp (found version "2.0")
+      -- Found OpenMP: TRUE (found version "2.0")
+      -- Including CPU backend
+      -- x86 detected
+      -- Adding CPU backend variant ggml-cpu: /arch:AVX2
+      GGML_AVX2;GGML_FMA;GGML_F16C;__BMI2__;GGML_BMI2
+      -- Found CUDAToolkit: C:/Program Files/NVIDIA GPU Computing
+      Toolkit/CUDA/v13.3/include;C:/Program Files/NVIDIA GPU Computing
+      Toolkit/CUDA/v13.3/include/cccl (found version "13.3.73")
+      -- CUDA Toolkit found
+      -- Configuring incomplete, errors occurred!
+
+      [stderr]
+      CMAKE_BUILD_TYPE=
+      CMake Warning (dev) at C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeDetermineASMCompiler.cmake:234
+      (message):
+        Policy CMP194 is not set: MSVC is not an assembler for language ASM.
+      Run
+        "cmake --help-policy CMP194" for policy details.  Use the cmake_policy
+        command to set the policy and suppress this warning.
+      Call Stack (most recent call first):
+        vendor/llama.cpp/ggml/CMakeLists.txt:3 (project)
+      This warning is for project developers.  Use -Wno-dev to suppress it.
+
+      CMake Error at C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeDetermineCompilerId.cmake:682
+      (message):
+        No CUDA toolset found.
+      Call Stack (most recent call first):
+        C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeDetermineCompilerId.cmake:8
+      (CMAKE_DETERMINE_COMPILER_ID_BUILD)
+        C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeDetermineCompilerId.cmake:53
+      (__determine_compiler_id_test)
+        C:/Program Files (x86)/Microsoft Visual
+      Studio/18/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeDetermineCUDACompiler.cmake:163
+      (CMAKE_DETERMINE_COMPILER_ID)
+        vendor/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt:59
+      (enable_language)
+
+
+
+      *** CMake configuration failed
+
+
+hint: Build failures usually indicate a problem with the package or the build environment
+=== Phase 0b build finished with exit code 1 ===

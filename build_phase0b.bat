@@ -24,14 +24,36 @@ echo.
 REM Three jobs, not six. See header.
 set CMAKE_BUILD_PARALLEL_LEVEL=3
 
-REM The fix for the crash. GGML_NATIVE=OFF stops -march=native baking the build
-REM machine's instruction set in; GGML_AVX512=OFF is the explicit belt-and-braces
-REM so the result does not depend on a default. AVX2 stays on: Zen 3 really has it.
+REM ATTEMPT 2 (see D29). The first attempt died in CMake configure with
+REM   "No CUDA toolset found" at ggml/src/ggml-cuda/CMakeLists.txt:59 (enable_language(CUDA)).
+REM Cause: CMake picked the *Visual Studio* generator, and that generator does not
+REM drive nvcc itself - it looks for a "CUDA toolset" registered inside the VS
+REM installation. nvcc being on PATH is not sufficient. That is why the log showed
+REM "Found CUDAToolkit ... 13.3.73" immediately before failing.
+REM Fix: the Ninja generator, which invokes nvcc directly and needs no VS CUDA
+REM toolset. ninja.exe ships inside this same VS BuildTools install.
+set VSCMD_ROOT=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools
+set "PATH=%VSCMD_ROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
+set CMAKE_MAKE_PROGRAM=%VSCMD_ROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe
+
+REM Pin both compilers explicitly. "Newest on PATH" is how attempt 1 ended up with
+REM nvcc 13.3 from a PATH that also listed 13.2, and an unpinned CUDA compiler
+REM makes a build unreproducible for no benefit.
+set CMAKE_CUDA_COMPILER=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe
+
+REM The fix for the original crash. GGML_NATIVE=OFF stops -march=native baking the
+REM build machine's instruction set in; GGML_AVX512=OFF is explicit
+REM belt-and-braces. AVX2 stays on: Zen 3 really has it.
 REM
 REM One CUDA architecture, not eight. The wheel ships sm_600..900; we need sm_86
 REM for the RTX 3060 and nothing else. This is the single biggest lever on
 REM compile time for this build.
-set CMAKE_ARGS=-DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX2=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DGGML_CUDA_ARCHITECTURES=86 -DGGML_CUDA_FA_ALL_QUANTS=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF
+REM
+REM CMAKE_BUILD_TYPE=Release is NOT optional. Attempt 1 logged
+REM "CMAKE_BUILD_TYPE=" (empty) because the VS generator is multi-config and
+REM ignores it. Under Ninja an empty build type means an unoptimised build:
+REM several times slower and far larger. Must be explicit.
+set CMAKE_ARGS=-G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CCACHE=OFF -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX2=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DGGML_CUDA_ARCHITECTURES=86 -DGGML_CUDA_FA_ALL_QUANTS=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF
 
 REM Project-local cache: the shared uv cache is 37.6 GB and is contended.
 set UV_CACHE_DIR=G:\localaized\.uvcache

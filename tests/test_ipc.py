@@ -88,6 +88,21 @@ def test_authkey_round_trips(tmp_path) -> None:
     assert load_authkey(path) == key
 
 
+def test_authkey_survives_every_possible_byte(tmp_path) -> None:
+    """Regression: the store once wrote in text mode.
+
+    A 32-byte random key contains a 0x0A byte roughly one time in eight, and
+    Windows text-mode translation would rewrite it to 0x0D 0x0A on the way to
+    disk. A single random round trip passes most of the time, so the only test
+    that reliably catches this writes every byte value there is to write.
+    """
+    hostile = bytes(range(256)) * 2
+    path = tmp_path / "authkey"
+    store_authkey(path, hostile)
+    assert load_authkey(path) == hostile
+    assert path.stat().st_size == len(hostile)
+
+
 def test_authkey_is_never_silently_overwritten(tmp_path) -> None:
     """Two daemons on one machine is a bug we want to hear about loudly."""
     path = tmp_path / "authkey"

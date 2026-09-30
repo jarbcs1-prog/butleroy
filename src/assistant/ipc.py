@@ -98,10 +98,19 @@ def store_authkey(path: Path, authkey: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Create exclusively so we never silently overwrite a key a live daemon is
     # using - two daemons on one machine is a bug we want to hear about.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    #
+    # os.O_BINARY is not optional. On Windows a descriptor opened without it is
+    # in *text* mode, and os.write() then translates every 0x0A in the payload
+    # to 0x0D 0x0A. A 32-byte random key contains a 0x0A byte about one time in
+    # eight, so the file on disk would silently disagree with the key the
+    # daemon is using, and the symptom would be a child process that
+    # occasionally and unprovably cannot connect. Write bytes, or write nothing.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY
     fd = os.open(path, flags, 0o600)
     try:
-        os.write(fd, authkey)
+        written = 0
+        while written < len(authkey):
+            written += os.write(fd, authkey[written:])
         os.fsync(fd)
     finally:
         os.close(fd)

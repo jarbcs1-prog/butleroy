@@ -29,14 +29,17 @@ from .policy import ToolSpec, Tier
 # --------------------------------------------------------------------------
 
 SYSTEM_TOOLS: tuple[ToolSpec, ...] = (
-    ToolSpec("system.info", Tier.READ, "CPU/GPU/RAM/disk facts, read live"),
-    ToolSpec("system.processes", Tier.READ, "List running processes"),
-    ToolSpec("system.service_status", Tier.READ, "Windows service status"),
-    ToolSpec("system.disk_usage", Tier.READ, "Free space per volume"),
-    ToolSpec("system.event_log", Tier.READ, "Recent Windows event log entries"),
-    ToolSpec("system.gpu_state", Tier.READ, "nvidia-smi VRAM/utilisation"),
-    ToolSpec("system.package_list", Tier.READ, "Installed software inventory"),
-    ToolSpec("system.diagnose", Tier.READ, "Rule-based health diagnosis"),
+    ToolSpec("system.info", Tier.READ, "CPU/GPU/RAM/disk facts, read live", parameters={}),
+    ToolSpec("system.processes", Tier.READ, "List running processes",
+             parameters={"limit": {"type": "int", "required": False}}),
+    ToolSpec("system.service_status", Tier.READ, "Windows service status",
+             parameters={"name": {"type": "str", "required": False}}),
+    ToolSpec("system.disk_usage", Tier.READ, "Free space per volume", parameters={}),
+    ToolSpec("system.event_log", Tier.READ, "Recent Windows event log entries",
+             parameters={"hours": {"type": "int", "required": False}}),
+    ToolSpec("system.gpu_state", Tier.READ, "nvidia-smi VRAM/utilisation", parameters={}),
+    ToolSpec("system.package_list", Tier.READ, "Installed software inventory", parameters={}),
+    ToolSpec("system.diagnose", Tier.READ, "Rule-based health diagnosis", parameters={}),
 )
 
 # --------------------------------------------------------------------------
@@ -44,27 +47,51 @@ SYSTEM_TOOLS: tuple[ToolSpec, ...] = (
 # emails, Telegram messages, documents, media files, files in general)
 # --------------------------------------------------------------------------
 
+# Schemas for the file tools. Kept next to the tools, not in a table beside them
+# (D34, D36): the registry describes itself, so adding an argument and describing
+# it are the same edit. `file.delete` and `file.restore` are spelled out fully
+# because they are the first tools a caller will actually reach for and the
+# grammar is what stops the model inventing an argument for them.
+_PATH = {"path": {"type": "str"}}
+
 FILE_TOOLS: tuple[ToolSpec, ...] = (
-    ToolSpec("file.list", Tier.READ, "List a directory"),
-    ToolSpec("file.read", Tier.READ, "Read a text file"),
-    ToolSpec("file.search", Tier.READ, "Search file contents"),
-    ToolSpec("file.metadata", Tier.READ, "Size, dates, hash of a file"),
-    ToolSpec("file.preview", Tier.READ, "Render a document/image to text"),
-    ToolSpec("file.create", Tier.REVERSIBLE_WRITE, "Create a new file"),
-    ToolSpec("file.edit", Tier.REVERSIBLE_WRITE, "Edit a file under version control"),
-    ToolSpec("file.write_notes", Tier.REVERSIBLE_WRITE, "Write to the Obsidian Assistant/ folder"),
-    ToolSpec("file.copy", Tier.CONSEQUENTIAL, "Copy files (may be large or many)"),
-    ToolSpec("file.move", Tier.CONSEQUENTIAL, "Move/rename files"),
-    ToolSpec("file.archive", Tier.CONSEQUENTIAL, "Create an archive"),
-    ToolSpec("file.bulk_rename", Tier.CONSEQUENTIAL, "Rename many files at once"),
-    ToolSpec("file.delete", Tier.IRREVERSIBLE, "Delete files", destructive=True),
-    ToolSpec("file.empty_recycle_bin", Tier.IRREVERSIBLE, "Empty the recycle bin", destructive=True),
+    ToolSpec("file.list", Tier.READ, "List a directory", parameters=dict(_PATH)),
+    ToolSpec("file.read", Tier.READ, "Read a text file",
+             parameters={"path": {"type": "str"},
+                         "max_bytes": {"type": "int", "required": False}}),
+    ToolSpec("file.search", Tier.READ, "Search file contents",
+             parameters={"path": {"type": "str"},
+                         "query": {"type": "str"},
+                         "max_bytes": {"type": "int", "required": False}}),
+    ToolSpec("file.metadata", Tier.READ, "Size, dates, hash of a file", parameters=dict(_PATH)),
+    ToolSpec("file.preview", Tier.READ, "Render a document/image to text", parameters=dict(_PATH)),
+    ToolSpec("file.create", Tier.REVERSIBLE_WRITE, "Create a new file",
+             parameters={"path": {"type": "str"}, "content": {"type": "str"}}),
+    ToolSpec("file.edit", Tier.REVERSIBLE_WRITE, "Edit a file under version control",
+             parameters={"path": {"type": "str"}, "content": {"type": "str"}}),
+    ToolSpec("file.write_notes", Tier.REVERSIBLE_WRITE, "Write to the Obsidian Assistant/ folder",
+             parameters={"subdir": {"type": "str"}, "title": {"type": "str"},
+                         "body": {"type": "str"}}),
+    ToolSpec("file.copy", Tier.CONSEQUENTIAL, "Copy files (may be large or many)",
+             parameters={"path": {"type": "str"}, "destination": {"type": "str"}}),
+    ToolSpec("file.move", Tier.CONSEQUENTIAL, "Move/rename files",
+             parameters={"path": {"type": "str"}, "destination": {"type": "str"}}),
+    ToolSpec("file.archive", Tier.CONSEQUENTIAL, "Create an archive",
+             parameters={"path": {"type": "str"}, "destination": {"type": "str"}}),
+    ToolSpec("file.bulk_rename", Tier.CONSEQUENTIAL, "Rename many files at once",
+             parameters={"path": {"type": "str"}, "pattern": {"type": "str"},
+                         "replacement": {"type": "str"}}),
+    ToolSpec("file.delete", Tier.IRREVERSIBLE, "Delete files", destructive=True,
+             parameters=dict(_PATH)),
+    ToolSpec("file.empty_recycle_bin", Tier.IRREVERSIBLE, "Empty the recycle bin", destructive=True,
+             parameters={}),
     # D33: because delete quarantines instead of unlinking, there has to be a way
     # back. This is the inverse of file.delete and it is deliberately NOT
     # destructive and only T2 - restoring something the user asked to be removed is
     # a correction, not a consequential act. It is a separate tool rather than a
     # flag on delete so that the restore path is itself gated and audited.
-    ToolSpec("file.restore", Tier.CONSEQUENTIAL, "Restore files from quarantine"),
+    ToolSpec("file.restore", Tier.CONSEQUENTIAL, "Restore files from quarantine",
+             parameters={"batch": {"type": "str"}}),
 )
 
 # The assistant must not shred its own guarantees, and must not be able to

@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path, PurePath
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 class Tier(IntEnum):
@@ -77,6 +77,29 @@ class ToolSpec:
     # Remote/external side effects. A tool that can talk to the outside world
     # is a T3 candidate regardless of what it claims to do.
     external: bool = False
+    # The tool's own arguments, so the registry can describe itself.
+    #
+    # D34 requires the decoding grammar to be generated from the live registry,
+    # and a grammar needs each tool's argument names and types. The obvious
+    # shortcut is a second table of schemas sitting beside the registry, and that
+    # is exactly the drift D36 warns about: two tables that must agree, silently
+    # disagreeing the first time someone adds a tool. So the knowledge lives on
+    # the tool itself, where adding an argument and describing it are the same
+    # edit.
+    #
+    # Deliberately tiny - {"path": {"type": "str"}, "max_bytes": {"type": "int"}}
+    # with an optional "required": False. Not JSON Schema, because a grammar
+    # generator needs three types and a required flag, and every feature of JSON
+    # Schema beyond that is a way for the grammar and the executor to disagree.
+    #
+    # None and {} mean different things, and the difference is the whole point:
+    #   None - nobody has described this tool's arguments yet. It is EXCLUDED from
+    #          the generated grammar and reported as a gap, because a grammar that
+    #          guessed its shape would let the model emit an argument the executor
+    #          does not accept (D31).
+    #   {}   - this tool provably takes no arguments. It is IN the grammar, with
+    #          an empty argument object, and is not a gap.
+    parameters: Mapping[str, Mapping[str, Any]] | None = None
 
 
 @dataclass(frozen=True)

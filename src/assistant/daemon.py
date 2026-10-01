@@ -46,6 +46,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -246,6 +247,24 @@ class Daemon:
         self._grants: dict[str, float] = {}
         self._pending_seq = 0
         self.quarantine = state / "quarantine"
+        # D3 child bookkeeping. `_brain_last_used` is 0.0 rather than None so the
+        # arithmetic in the sweeper is uniform; the ops that report idle time
+        # check for 0.0 and say "never used" rather than showing a number
+        # derived from the epoch.
+        self._brain: subprocess.Popen | None = None
+        self._brain_client: ipc.PipeClient | None = None
+        self._brain_last_used = 0.0
+        self._brain_loaded = False
+        self._sweeper: threading.Thread | None = None
+        #: The pipe the child *serves* turns on. Distinct from PIPE_BRAIN_REQ,
+        #: which is the pipe we *serve* on and the child *calls* to ask for its
+        #: lease. Sharing one name would mean the child asks itself for
+        #: permission, which fails in a way that looks like a refusal.
+        self.brain_pipe = ipc.PIPE_BRAIN_RESP
+        #: The pipe we serve on, and the one the child calls back through.
+        #: Set by serve_forever so a caller that moved the daemon's pipe is
+        #: followed by the child rather than being silently bypassed.
+        self.daemon_pipe = ipc.PIPE_BRAIN_REQ
 
     # ------------------------------------------------------------------ startup
 
@@ -384,10 +403,21 @@ class Daemon:
         )
         ipc.store_authkey(self.authkey_path, self.authkey)
         self.server = ipc.PipeServer(pipe, self.handle, authkey=self.authkey)
+        # The child must call back on the pipe we actually bound. If --pipe moved
+        # us, a child told to call the default would reach nothing, and the lease
+        # denial would be the only symptom.
+        self.daemon_pipe = pipe
         self.server.start()
         print(f"[daemon] listening on {pipe}", flush=True)
         print(f"[daemon] state    {self.state}", flush=True)
         print(f"[daemon] version  {__version__}", flush=True)
+        # Start the idle sweeper only when actually serving. A Daemon built in a
+        # test, or in --check, must not gain a background thread that outlives the
+        # assertion that produced it.
+        self._sweeper = threading.Thread(
+            target=self._brain_sweeper, name="brain-sweeper", daemon=True
+        )
+        self._sweeper.start()
         try:
             while not self._halt.wait(3600):
                 pass
@@ -408,6 +438,11 @@ class Daemon:
             )
         if self.server is not None:
             self.server.stop()
+        # Kill the brain before we record the stop. A daemon that shut down
+        # leaving a child holding 5 GiB would hand the memory back only when the
+        # machine reboots, and the audit line "clean shutdown" would be the last
+        # and most reassuring thing on record about it.
+        self._brain_stop("daemon shutting down")
         self._audit(
             actor="daemon",
             channel=CHANNEL_SCHEDULED,
@@ -1357,6 +1392,363 @@ class Daemon:
             reason=reason,
         )
         return {"recorded": True}
+
+    # ------------------------------------------------------------------- brain
+    #
+    # D3. The brain is a child process, not a thread, and the reason is physical
+    # rather than architectural taste: on Windows, GPU memory comes back only when
+    # the process holding it dies. There is no unload that releases it. So the
+    # daemon's job is not to manage a brain, it is to *run one up on demand and
+    # kill it when it goes quiet* - and only process death is a mechanism we can
+    # rely on rather than hope for.
+    #
+    # The child asks this daemon for its VRAM lease over the same pipe, so the
+    # component holding the most precious resource on the machine is the one
+    # component that cannot grant it to itself. Every lease it takes is audited
+    # here, and the 90s TTL sweep that reclaims it is a second line of defence:
+    # even if the child hung rather than exited, the lease would expire.
+
+    #: How long the child is allowed to sit idle before it is killed (D3).
+    BRAIN_IDLE_TTL_S = 90.0
+    #: How often the sweeper looks. Short enough that a killed child is noticed
+    #: promptly, long enough that the check is not itself a busy loop.
+    BRAIN_SWEEP_EVERY_S = 15.0
+    #: How long to wait for a freshly spawned child to answer `ping`. Generous,
+    #: because a cold start includes importing torch-free llama_cpp and binding
+    #: the pipe; too short and we would declare a healthy child dead.
+    BRAIN_START_TIMEOUT_S = 60.0
+    #: Bytes the fast tier needs. Deliberately a *claim*, not a reservation: the
+    #: arbiter re-measures live VRAM and this is only what we ask for. The real
+    #: measured cost is 4.92 GiB, so asking for 5 keeps a little slack for the
+    #: compute buffer without inviting a lease we could not honour.
+    BRAIN_LEASE_BYTES = 5 * 1024 ** 3
+    #: The holder name used in the arbiter and in the audit chain. The child's PID
+    #: is recorded alongside it, because "brain" on its own does not say which
+    #: process held 5 GiB and a stale brain is exactly the thing to be able to
+    #: find later.
+    BRAIN_HOLDER = "brain"
+
+    def _brain_env(self) -> dict[str, str]:
+        """The environment the child is launched with (D26).
+
+        D26 says the daemon must not hand a model child the ambient desktop
+        PATH, because a different CUDA version appearing on PATH is how a
+        working setup breaks with no change on our side. So the toolkit the build
+        was made against is put *first* and the rest of the environment is kept
+        - the child still needs PATH for the system DLLs, it just must not get
+        first refusal on which CUDA runtime it loads.
+        """
+        env = dict(os.environ)
+        cuda_bin = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+        if os.path.isdir(cuda_bin):
+            env["PATH"] = cuda_bin + os.pathsep + env.get("PATH", "")
+        # PYTHONPATH so `python -m assistant.brain_server` resolves without the
+        # child having to know where it was installed from.
+        src_root = str(Path(__file__).resolve().parent.parent)
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = src_root + (os.pathsep + existing if existing else "")
+        return env
+
+    def _brain_alive(self) -> bool:
+        child = self._brain
+        return bool(child is not None and child.poll() is None)
+
+    def _brain_stop(self, why: str) -> None:
+        """Kill the child, if there is one. Never raises.
+
+        D3 again: this is the moment the VRAM comes back, so it must not be
+        conditional on the child being in a good mood. `kill()` first rather
+        than a polite `terminate()` - a child blocked inside a CUDA call will not
+        see a terminate request until it returns to the interpreter, and the whole
+        point is that we do not wait. `kill()` is a hard process death, which is
+        the only shutdown mechanism Windows makes reliable for GPU memory.
+        """
+        with self._lock:
+            child = self._brain
+            self._brain = None
+            self._brain_client = None
+            self._brain_last_used = 0.0
+        if child is None or child.poll() is not None:
+            return
+        self._audit(
+            actor="daemon",
+            channel=CHANNEL_SCHEDULED,
+            tool="brain.unload",
+            tier=str(Tier.READ),
+            decision="allow",
+            reason=f"stopped brain pid={child.pid} ({why})",
+        )
+        # The lease is released explicitly as well as by TTL. The arbiter's
+        # contract is that release does not kill and expiry does not release, so
+        # doing only one of the two would leave a phantom lease on the books for
+        # up to 90 seconds after the memory is actually free.
+        try:
+            self.arbiter.release(self.BRAIN_HOLDER)
+        except Exception:  # noqa: BLE001 - releasing must never block a stop
+            pass
+        try:
+            child.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            child.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _brain_ensure(self) -> Any:
+        """Start the child if it is not running, and return a client for it.
+
+        Raises ``BrainUnavailable`` rather than returning None, because every
+        caller would otherwise have to check, and a caller that forgets the check
+        reports a dead brain as an empty answer - which is the failure mode D31
+        exists to prevent.
+        """
+        with self._lock:
+            if self._brain_alive() and self._brain_client is not None:
+                return self._brain_client
+
+            # A previous child that died without being stopped leaves its lease
+            # behind. Reclaim it here rather than letting the next turn be denied
+            # by our own corpse.
+            if self._brain is not None:
+                self._brain = None
+                self._brain_client = None
+            try:
+                self.arbiter.release(self.BRAIN_HOLDER)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # The authkey is the only thing proving a caller is us. It is written
+            # by serve_forever; if it is not there we are being called without a
+            # daemon having been started properly, and we should say so rather
+            # than mint a key that nothing else will trust.
+            if not self.authkey_path.exists():
+                raise Refused(
+                    "no authkey on disk - the daemon has not been started properly, "
+                    "so a brain child could not be authenticated"
+                )
+
+            args = [
+                sys.executable,
+                "-m",
+                "assistant.brain_server",
+                # The child *serves* turns on this pipe...
+                "--pipe",
+                self.brain_pipe,
+                # ...and calls *out* on the daemon's own pipe to ask for its VRAM
+                # lease. Two pipes, because one pipe would have the child asking
+                # itself for permission.
+                "--upstream",
+                self.daemon_pipe,
+                # The child must read *this* daemon's authkey, not one it guesses
+                # at relative to the repo. A daemon run from a test state dir
+                # would otherwise silently authenticate against whatever key the
+                # production daemon last wrote - or against nothing at all.
+                "--authkey",
+                str(self.authkey_path),
+            ]
+            child = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                args,
+                env=self._brain_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(ROOT),
+            )
+            self._brain = child
+            client = ipc.PipeClient(self.brain_pipe, authkey=self.authkey, timeout=120.0)
+            self._brain_client = client
+
+        # Wait for the pipe to answer, outside the lock: the child needs no lock,
+        # and holding the daemon's lock for up to a minute would stall every other
+        # caller including policy checks. This is a real deadlock if done inside.
+        deadline = time.time() + self.BRAIN_START_TIMEOUT_S
+        last: Exception | None = None
+        while time.time() < deadline:
+            if child.poll() is not None:
+                out = ""
+                try:
+                    out = (child.stdout.read() or b"").decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    pass
+                self._brain_stop("child exited during start-up")
+                # The *tail* of a traceback is the interesting part. The head is
+                # always runpy boilerplate, and quoting the head means every
+                # child failure looks like the same useless thing.
+                tail = out.strip()[-800:]
+                raise Refused(
+                    f"brain child exited immediately (rc={child.returncode}). "
+                    f"End of its output: {tail or '(none captured)'}"
+                )
+            try:
+                client.call("ping")
+                self._brain_last_used = time.time()
+                self._audit(
+                    actor="daemon",
+                    channel=CHANNEL_SCHEDULED,
+                    tool="brain.load",
+                    tier=str(Tier.READ),
+                    decision="allow",
+                    reason=f"brain child ready pid={child.pid}",
+                )
+                return client
+            except Exception as exc:  # noqa: BLE001 - not up yet, keep trying
+                last = exc
+                time.sleep(0.25)
+        self._brain_stop("start-up timed out")
+        raise Refused(
+            f"brain child did not answer within {self.BRAIN_START_TIMEOUT_S:.0f}s "
+            f"({type(last).__name__ if last else 'no error'}); it was killed"
+        )
+
+    def _brain_call(self, op: str, **args: Any) -> Any:
+        """One round trip to the child, with the idle clock touched.
+
+        Every op goes through here rather than touching the client directly, so
+        that there is exactly one place where "the brain is alive" is established
+        and exactly one place where the idle timer is reset. A path that
+        refreshed the timer by hand would eventually be one that forgot, and a
+        brain that is never marked idle never gets evicted - which would quietly
+        cost the user 5 GiB indefinitely, which is the exact thing D1 forbids.
+        """
+        client = self._brain_ensure()
+        self._brain_last_used = time.time()
+        # `PipeClient.call` returns the *unwrapped* result and raises on a failed
+        # response - there is no {"ok": ...} envelope to inspect. Treating the
+        # result as an envelope makes every call look like a failure, because a
+        # successful turn dict has no "ok" key to be truthy.
+        result = client.call(op, **args)
+        # A turn that came back with its own error is reported as a failure of
+        # that op, not as a successful turn with an empty answer. The distinction
+        # matters: the caller must be able to tell "the model declined" from
+        # "the child is broken", and only the daemon can tell them apart.
+        if isinstance(result, dict) and result.get("error"):
+            raise Refused(str(result["error"]))
+        return result
+
+    def op_brain_status(self, args: dict) -> Any:
+        """Is there a brain, and has it been touched recently?
+
+        Reports the idle seconds even when no child exists, because "it is not
+        running" and "it is running and was just used" are the two answers a user
+        needs when they are wondering why the card is busy.
+        """
+        idle = (
+            time.time() - self._brain_last_used if self._brain_last_used else None
+        )
+        return {
+            "running": self._brain_alive(),
+            "pid": self._brain.pid if self._brain_alive() and self._brain else None,
+            "idle_s": round(idle, 1) if idle is not None else None,
+            "ttl_s": self.BRAIN_IDLE_TTL_S,
+            "model_loaded": bool(self._brain_loaded),
+            "note": (
+                "no child is running; the next brain.turn starts one "
+                "(~2.5s model load, D22)"
+            )
+            if not self._brain_alive()
+            else "the child is up; the model is loaded only after a turn",
+        }
+
+    def op_brain_load(self, args: dict) -> Any:
+        """Ask the child to load the model now rather than on the next turn.
+
+        Exists because the first turn after a cold daemon otherwise pays the
+        model load silently, and a user watching a 6 second pause has no way to
+        tell load from thinking. Making it explicit means the overlay can show it.
+        """
+        result = self._brain_call("load")
+        self._brain_loaded = bool(result.get("loaded"))
+        return result
+
+    def op_brain_turn(self, args: dict) -> Any:
+        """One turn: decide, then act. The returned Action is a proposal.
+
+        The critical boundary is that this returns a *proposal*. The daemon does
+        not run it. It returns the tool name and arguments to the caller, who must
+        send them back through `tool_call`, where the policy gate and - for
+        anything T3 - a human get to see them. A brain that could execute its own
+        decision would make the entire gate decorative.
+        """
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            raise Refused("brain.turn needs a non-empty prompt")
+        result = self._brain_call("turn", prompt=prompt)
+        self._brain_loaded = bool(result.get("loaded", True))
+        # Audited at proposal time, with the tier the *model* chose to reach for,
+        # because a brain that keeps reaching for T3 tools is a fact worth having
+        # in the log even though nothing has been executed yet.
+        self._audit(
+            actor=str(args.get("actor", "brain")),
+            channel=self._channel(args),
+            tool=f"brain.turn:{result.get('tool') or result.get('kind')}",
+            tier=str(Tier.READ),
+            decision="allow",
+            reason=f"brain proposed {result.get('tool') or result.get('kind')!r}",
+            args={"kind": result.get("kind")},
+        )
+        return result
+
+    def op_brain_stream(self, args: dict) -> Any:
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            raise Refused("brain.stream needs a non-empty prompt")
+        result = self._brain_call("stream", prompt=prompt)
+        self._brain_loaded = bool(result.get("loaded", True))
+        return result
+
+    def op_brain_unload(self, args: dict) -> Any:
+        """Kill the child. The whole model goes with it.
+
+        There is deliberately no "unload the model but keep the process". On
+        Windows an unloaded llama context does not reliably give its VRAM back, so
+        a keep-the-process-unload-the-model design would look like it saved the
+        user's memory while in fact holding 5 GiB. Killing is the only version of
+        this that is true.
+        """
+        was = self._brain_alive()
+        self._brain_stop("explicit unload")
+        self._brain_loaded = False
+        return {"stopped": was, "vram_returned": was}
+
+    def op_brain_describe(self, args: dict) -> Any:
+        """What the brain can see, from the child that would use it.
+
+        Deliberately asks the child rather than reading the registry here: the
+        number that matters is the one the model was actually given, and a local
+        re-derivation could disagree with it without anything noticing.
+        """
+        return self._brain_call("describe")
+
+    def _brain_sweeper(self) -> None:
+        """Kill the child once it has been idle past the TTL (D3).
+
+        This is the mechanism the whole resource model rests on, so it is written
+        to be boring: a loop, a comparison against the parent's own clock, and a
+        kill. It catches everything because an exception escaping this thread
+        would silently end the only thing reclaiming the user's VRAM, and the
+        symptom would be a card that stays busy forever with no error anywhere.
+        """
+        while not self._halt.wait(self.BRAIN_SWEEP_EVERY_S):
+            try:
+                if not self._brain_alive():
+                    continue
+                idle = time.time() - self._brain_last_used
+                if idle >= self.BRAIN_IDLE_TTL_S:
+                    self._brain_stop(f"idle for {idle:.0f}s (D3 TTL)")
+            except Exception:  # noqa: BLE001 - a broken sweeper must not be silent
+                self._brain_stop("sweeper error")
+
+    def _brain_sweep_now(self, args: dict) -> Any:
+        """Force a TTL check now. Exposed so the behaviour is testable and
+        inspectable rather than only reachable by waiting 15 seconds."""
+        if not self._brain_alive():
+            return {"running": False, "stopped": False}
+        idle = time.time() - self._brain_last_used
+        if idle < self.BRAIN_IDLE_TTL_S:
+            return {"running": True, "stopped": False, "idle_s": round(idle, 1)}
+        self._brain_stop(f"idle for {idle:.0f}s (D3 TTL)")
+        return {"running": False, "stopped": True, "idle_s": round(idle, 1)}
 
     # ------------------------------------------------------------------ wiring
 

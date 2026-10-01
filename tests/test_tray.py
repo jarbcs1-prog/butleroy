@@ -189,7 +189,7 @@ class FakeDaemon:
 
 def test_presence_marks_attended_when_someone_is_typing():
     d = FakeDaemon()
-    p = Presence(d, idle_after=300, poll=0.05)
+    p = Presence(d, idle_after=300, poll=0.05, seconds_since=lambda: 1)
     p.start()
     try:
         deadline = time.time() + 3
@@ -207,7 +207,7 @@ def test_presence_marks_attended_when_someone_is_typing():
 def test_presence_does_not_repeat_itself_while_nothing_changes():
     """A monitor that calls every 2s forever would flood the audit chain."""
     d = FakeDaemon()
-    p = Presence(d, idle_after=300, poll=0.02)
+    p = Presence(d, idle_after=300, poll=0.02, seconds_since=lambda: 1)
     p.start()
     time.sleep(0.5)
     p.stop()
@@ -221,19 +221,16 @@ def test_presence_ignores_its_own_result():
     busy loop against a subsystem that is already unhappy.
     """
     d = FakeDaemon(ok=False)
-    p = Presence(d, idle_after=300, poll=0.02)
+    p = Presence(d, idle_after=300, poll=0.02, seconds_since=lambda: 1)
     p.start()
     time.sleep(0.4)
     p.stop()
     assert len(d.calls) == 1, "a refused transition was retried"
 
 
-def test_presence_reports_absence_after_the_idle_window(monkeypatch):
-    idle = {"value": 10_000}
-    monkeypatch.setattr(tray, "seconds_since_input", lambda: idle["value"])
+def test_presence_reports_absence_after_the_idle_window():
     d = FakeDaemon()
-    p = Presence(d, idle_after=300, poll=0.02)
-    idle["value"] = 10_000  # nobody has touched the keyboard
+    p = Presence(d, idle_after=300, poll=0.02, seconds_since=lambda: 10_000)
     p.start()
     try:
         deadline = time.time() + 3
@@ -243,6 +240,8 @@ def test_presence_reports_absence_after_the_idle_window(monkeypatch):
         p.stop()
     assert d.calls
     assert d.calls[0].args["attended"] is False
+    # (the monitor is given a large `seconds_since` above, so this asserts the
+    # idle-window logic rather than whether a human happened to be typing)
 
 
 def test_presence_uses_the_daemons_audited_path(monkeypatch):
@@ -258,7 +257,7 @@ def test_presence_uses_the_daemons_audited_path(monkeypatch):
             seen.append(request.op)
             return {"ok": True, "result": {}}
 
-    p = Presence(Recorder(), idle_after=300, poll=0.02)
+    p = Presence(Recorder(), idle_after=300, poll=0.02, seconds_since=lambda: 1)
     p.start()
     time.sleep(0.3)
     p.stop()

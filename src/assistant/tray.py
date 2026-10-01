@@ -43,6 +43,7 @@ import ctypes
 import ctypes.wintypes as wt
 import threading
 import time
+from typing import Callable
 
 from . import __version__, ipc
 from .policy import CHANNEL_PC
@@ -216,10 +217,25 @@ class Presence:
     transition and a reader can reconstruct who was at the keyboard and when.
     """
 
-    def __init__(self, daemon, *, idle_after: int = 300, poll: float = 2.0, retry_after: float = 60.0):
+    def __init__(
+        self,
+        daemon,
+        *,
+        idle_after: int = 300,
+        poll: float = 2.0,
+        retry_after: float = 60.0,
+        seconds_since: Callable[[], int] | None = None,
+    ):
         self.daemon = daemon
         self.idle_after = idle_after
         self.poll = poll
+        # Presence is read from the OS, which is the whole point (D30) -- and also
+        # the reason the monitor is untestable by default. A test that lets it read
+        # real input state passes only while a human is at the keyboard, and fails
+        # for anyone else, so it asserts on who happens to be sitting there rather
+        # than on the logic. Injected the same way VramArbiter takes its snapshot
+        # function: the default is the real thing, tests pass a fake.
+        self.seconds_since = seconds_since or seconds_since_input
         self.retry_after = retry_after
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -261,7 +277,7 @@ class Presence:
         while not self._stop.is_set():
             try:
                 now = time.monotonic()
-                idle = seconds_since_input()
+                idle = self.seconds_since()
                 present = idle < self.idle_after
                 if self._should_speak(present, now):
                     self._attempted = present

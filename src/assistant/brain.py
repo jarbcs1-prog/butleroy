@@ -54,6 +54,65 @@ from .tools import ALL_TOOLS
 MAX_TIER_FOR_TOOLS = "T3"
 
 
+def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS) -> str:
+    """The prompt a brain turn runs under.
+
+    This is not decoration. Measured on this machine with the 4B fast tier:
+    asked to list a directory using a tool, with the two-word decision grammar
+    and NO system prompt, it answered `answer` and then narrated the tool call
+    in prose -- the exact failure D34 recorded for `tool_choice="auto"`. With a
+    system prompt naming the tools, the same grammar returned `tool` in 0.15s.
+
+    So the decision pass is not broken and the two-pass design is sound. What
+    was missing was the model being told it has tools. `system_prompt` defaulted
+    to the empty string, which meant the assistant was asked to choose between
+    "tool" and "answer" while never having been introduced to a tool at all, and
+    "answer" was the honest answer to that question.
+
+    The tool list is generated from the live registry rather than written out
+    here, for the reason D34 gives for generating the grammar from it: a second
+    hand-maintained list of tools is a list that will be wrong, and it will be
+    wrong silently.
+
+    Kept short deliberately. Prefill runs at ~1540 tok/s against generation's
+    ~58 tok/s (D37), so a long prompt is comparatively cheap -- but every token
+    here is also a token the 4B has to spend attention on, and the shortest
+    prompt that states the contract is the one least likely to distract it.
+    """
+    lines = [
+        "You are the assistant on the user's own Windows machine. You run "
+        "entirely locally; there is no cloud service and no internet.",
+        "",
+        "You act by calling exactly one tool. Calling a tool is not something "
+        "you describe afterwards or alongside - the call IS the action. Never "
+        "write prose that describes, explains or narrates a tool call, and never "
+        "write out the shape of a call by hand.",
+        "",
+        "A separate, always-on process decides whether your call is permitted "
+        "and executes it. You propose; you do not execute. You may reason about "
+        f"tools up to {MAX_TIER_FOR_TOOLS} (T3 is the most consequential). If an "
+        "action needs the user's confirmation you will be told, so propose it "
+        "normally and do not hedge.",
+        "",
+        "If the request is ordinary conversation, teaching or explanation, and no "
+        "tool is called for, answer in plain prose instead.",
+        "",
+        "Tools available:",
+    ]
+    for tool in tools:
+        if tool.parameters is None:
+            # Not described, therefore not callable. Listing it would advertise a
+            # tool that the grammar will refuse to emit.
+            continue
+        args = []
+        for key, spec in tool.parameters.items():
+            flag = "" if spec.get("required", True) else ", optional"
+            args.append(f"{key}: {spec.get('type', 'str')}{flag}")
+        shape = f" ({', '.join(args)})" if args else " (takes no arguments)"
+        lines.append(f"- {tool.name}{shape} - {tool.description}")
+    return "\n".join(lines)
+
+
 class BrainError(RuntimeError):
     """Anything that stops a turn from being answered."""
 
@@ -273,11 +332,27 @@ class Brain:
     def _make(self, gbnf: str) -> Any:
         """Compile a GBNF string into whatever the installed binding wants.
 
-        D36: a constraint that is silently not applied is the worst failure mode
-        available, because the system keeps working and keeps returning plausible
-        output. So this compiles the grammar *once, eagerly, at load time* and
-        raises if it cannot. There is no path where a grammar silently does
-        nothing.
+        Compiling eagerly, at load time, is still the right call - a grammar that
+        cannot even be built should stop the child immediately rather than at the
+        first turn.
+
+        But compiling is NOT proof, and this docstring used to claim it was. It is
+        not. Measured against llama-cpp-python 0.3.35 on this machine:
+
+          * an undefined rule reference makes `LlamaGrammar.from_string` print a
+            parse error to stderr and **return a broken object** - no exception;
+          * sampling with that broken object then dies with an access violation
+            inside `llama_sampler_sample`.
+
+        And the converse also bites: a grammar that compiles perfectly can still
+        segfault the sampler at sample time if it uses a bare unquoted `-` or a
+        multi-line alternation. All three were found by running the sampler, not
+        by compiling the text.
+
+        So the protection is two layers and neither is sufficient alone:
+        `grammar.py` refuses the shapes that crash the sampler, and this compile
+        is the second layer. A grammar that survives both still has to be proved
+        against the real sampler before anyone relies on it.
         """
         from llama_cpp import LlamaGrammar
 

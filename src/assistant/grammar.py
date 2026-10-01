@@ -58,13 +58,159 @@ __all__ = [
 # about what an argument means. `int` is the only non-string type the executors
 # actually take (max_bytes, limit, hours).
 _TYPE_RULES = {
-    "str": r'[^"\\]*',
-    "string": r'[^"\\]*',
-    "int": r'-?[0-9]+',
-    "integer": r'-?[0-9]+',
+    # A JSON string is QUOTED in the output, so a string value must emit a quote,
+    # then the content, then another quote. In GBNF that is three fragments:
+    # a literal for the quote character (`"\""`), the character class, and the
+    # literal again.
+    #
+    # Writing it as one literal, `"[^"\\]*"`, is the obvious-looking thing and it
+    # is WRONG: inside double quotes a GBNF character class is just characters,
+    # so that rule matches the seven-character string `[^"\\]*` and nothing else.
+    # This was the third instance of the one bug - the tool name was unquoted,
+    # then the argument key, then the value - and each was only found by running
+    # the emitted text through json.loads, which is why the check has to be that
+    # and not "does the grammar look right".
+    "str": r'"\"" [^"\\]* "\""',
+    "string": r'"\"" [^"\\]* "\""',
+    # The minus is QUOTED and it must stay that way. A bare `-` makes
+    # llama.cpp's sampler die with an access violation, and it dies at *sample*
+    # time, long after LlamaGrammar.from_string returned a perfectly good
+    # object. Measured: `root ::= - [0-9]+` crashes the process, while
+    # `root ::= "-"? [0-9]+` is fine. This was the only unquoted literal in the
+    # whole generator, which is exactly how it survived review.
+    #
+    # A number is NOT quoted, unlike a string - which is why this one is left
+    # emitting bare digits and the two above do not.
+    "int": r'"-"? [0-9]+',
+    "integer": r'"-"? [0-9]+',
     "bool": r"(true|false)",
     "boolean": r"(true|false)",
 }
+
+# Characters that are NEVER structural in the GBNF this generator emits, and so
+# can only be a mistake if they appear bare.
+#
+# The list is one character long, and that is the point. Two earlier, broader
+# versions of this check were both wrong, in opposite directions:
+#   * flagging every metacharacter fired on `bool`, which legitimately emits
+#     `(true|false)`, and on `[^"\\]*`, where the `*` is a repetition operator.
+#     A check that rejects correct output gets deleted rather than fixed.
+#   * flagging `-` and `*` missed that `*` is the quantifier in `[0-9]+`.
+# So only `-` is flagged: it is the one character proven to crash the sampler,
+# and this generator has no use for it bare anywhere.
+_BARE_LITERALS = set("-")
+
+
+def _assert_single_line_alternations(gbnf: str) -> None:
+    """Refuse an alternation spread over several lines.
+
+    The second sampler crash found in this grammar, and the more surprising of
+    the two because it depends only on formatting. Measured, one process per
+    case:
+
+        root ::= "a" | "b"                       PASS
+        root ::=                                     PASS
+          | "a"
+        root ::=                                     CRASH
+          | "a"
+          | "b"
+
+    `LlamaGrammar.from_string` accepts all three. So the grammar compiles, the
+    model loads, `load()` reports the rule count, and the process dies with an
+    access violation the first time a token is sampled against it -- which for
+    the tool grammar is the first tool call the user makes.
+
+    The tidy multi-line form with a leading bar reads better in a diff, which is
+    exactly why it will be reintroduced by someone who has not seen this.
+    """
+    rules: list[tuple[int, list[str]]] = []
+    current: list | None = None
+    for i, raw in enumerate(gbnf.splitlines()):
+        text = raw.split("#", 1)[0]
+        if "::=" in text:
+            if current is not None:
+                rules.append(current)
+            current = [i + 1, [text.split("::=", 1)[1]]]
+        elif text.strip() and current is not None:
+            current[1].append(text.strip())
+    if current is not None:
+        rules.append(current)
+
+    for lineno, body in rules:
+        joined = " ".join(body)
+        if joined.lstrip().startswith("|"):
+            raise GrammarError(
+                f"line {lineno} starts an alternation with a leading '|', which "
+                "makes the first alternative empty. Emit 'rule ::= \"a\" | \"b\"'."
+            )
+        if len(body) > 1 and "|" in joined:
+            raise GrammarError(
+                f"the alternation on line {lineno} spans {len(body)} lines. "
+                "llama.cpp's sampler dies with an access violation on a "
+                "multi-line alternation even though the grammar compiles. Emit "
+                "every alternative on one line after '::='."
+            )
+
+
+def _assert_no_bare_metacharacters(gbnf: str) -> None:
+    """Refuse generated GBNF containing a bare `-` or `*`.
+
+    The generator quotes every literal it emits -- tool names, argument keys,
+    braces -- and `_TYPE_RULES` is the one place a character can reach the
+    output without passing through the quoter. That is exactly where the
+    segfault lived, and `LlamaGrammar.from_string` accepted it without
+    complaint: the grammar compiled, `Brain.load()` reported success, and the
+    process died at the first sampled token.
+
+    Character classes and string literals are skipped wholesale. `[^"\\]` is
+    full of characters this check would reject if it looked inside one, and
+    neither is a position where a bare `-` means anything.
+    """
+    for lineno, line in enumerate(gbnf.splitlines(), start=1):
+        text = line.split("#", 1)[0]
+        i = 0
+        found: list[str] = []
+        while i < len(text):
+            ch = text[i]
+            # character class: [^"\\], [0-9], [ \t\n]
+            if ch == "[":
+                i += 1
+                while i < len(text) and text[i] != "]":
+                    i += 1
+                i += 1
+                continue
+            # string literal: "{", ":", "-"
+            if ch == '"':
+                i += 1
+                while i < len(text):
+                    if text[i] == "\\":
+                        i += 2
+                        continue
+                    if text[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+                continue
+            # bare identifier: ws, args, num, args-file-read. These are rule
+            # REFERENCES or rule names, not literals, and our own naming scheme
+            # puts hyphens inside them -- `_rule_name` builds `args-file-read`
+            # from `args` + `file.read`. Treating them as literals is what made
+            # the first version of this check reject every multi-word tool.
+            if ch.isalpha() or ch == "_":
+                while i < len(text) and (text[i].isalnum() or text[i] in "_-"):
+                    i += 1
+                continue
+            if ch in _BARE_LITERALS:
+                found.append(ch)
+            i += 1
+        if found:
+            where = ", ".join(repr(c) for c in sorted(set(found)))
+            raise GrammarError(
+                f"line {lineno} contains unquoted GBNF literal(s) {where}: "
+                f"{line.strip()!r}. Quote them. A bare '-' crashes llama.cpp's "
+                "sampler with an access violation after the grammar has already "
+                "compiled cleanly, so nothing upstream of sampling would notice."
+            )
 
 _JSON_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
@@ -83,13 +229,20 @@ class GrammarError(ValueError):
 
 
 def _gbnf_literal(s: str) -> str:
-    """A GBNF string literal for `s`.
+    """A GBNF string literal whose *content* is `s`.
 
     `repr()` was tempting and wrong: Python's repr uses single quotes and switches
     escaping scheme for embedded quotes, so a name containing an apostrophe would
     produce a literal that means something else. Tool names are dotted
     identifiers and safe by construction, but a name is data, and data surprises.
+
+    Read `_json_quoted_literal` before concluding this is the quoter to reach for.
     """
+    return '"%s"' % _json_body(s)
+
+
+def _json_body(s: str) -> str:
+    """`s` escaped as the inside of a JSON string."""
     out = []
     for ch in s:
         if ch in _JSON_ESCAPES:
@@ -98,7 +251,41 @@ def _gbnf_literal(s: str) -> str:
             out.append("\\u%04x" % ord(ch))
         else:
             out.append(ch)
-    return '"%s"' % "".join(out)
+    return "".join(out)
+
+
+def _json_quoted_literal(s: str) -> str:
+    """A GBNF literal that EMITS `s` as a JSON string, quotes included.
+
+    This is the one that matters, and getting it wrong is invisible until a tool
+    call comes back unparseable.
+
+    In GBNF the quotes around a literal are *syntax*: they delimit it, and the
+    model never emits them. So `toolname ::= "file.list"` makes the model emit
+    `file.list` - which is not valid JSON, because a JSON string needs its own
+    quotes in the output text. The first live run of the brain produced exactly
+    that:
+
+        {"tool":
+        file.list,
+        "arguments": ...
+
+    `"tool":` came out quoted because `root` spells it `"\\"tool\\":"`, and
+    `file.list` came out bare because `toolname` did not. It parses as far as
+    character 9 and then stops, so `json.loads` raises and `parse_action`
+    returns `tool=None` with a parse error - the call the grammar so carefully
+    forced is thrown away at the last step.
+
+    The grammar had to be quoted *twice over*: JSON-escape the content, add the
+    JSON quotes, then GBNF-escape the whole thing so the quotes survive as
+    content.
+    """
+    emitted = '"' + _json_body(s) + '"'
+    # GBNF escaping, after the JSON escaping. Backslashes first: the JSON body may
+    # already contain `\\`, and doubling those before touching the quotes is what
+    # keeps the two layers distinguishable.
+    body = emitted.replace("\\", "\\\\").replace('"', '\\"')
+    return '"%s"' % body
 
 
 def _rule_name(*parts: str) -> str:
@@ -195,17 +382,24 @@ def _args_rule(name: str, params: dict[str, dict[str, Any]]) -> str:
     required = sorted(k for k, v in params.items() if v["required"])
     optional = sorted(k for k, v in params.items() if not v["required"])
 
+    # The separator is a BARE comma. The closing quote of the previous value is
+    # already emitted by the value rule itself - `str` ends in its own `"\""` -
+    # so a separator that also supplied one produced `""` between arguments and
+    # the object stopped parsing at the first one.
     parts = []
     for i, key in enumerate(required):
-        lead = "" if i == 0 else '"," '
+        lead = "" if i == 0 else _gbnf_literal(",") + " "
         parts.append(
-            f'{lead}{_gbnf_literal(key)} ws ":" ws {_value_rule(params[key])}'
+            f'{lead}{_json_quoted_literal(key)} ws ":" ws {_value_rule(params[key])}'
         )
     body = " ".join(parts)
 
     tail = ""
     for key in reversed(optional):
-        tail = f' ( ws "," ws {_gbnf_literal(key)} ws ":" ws {_value_rule(params[key])})?'
+        tail = (
+            f' ( ws {_gbnf_literal(",")} ws {_json_quoted_literal(key)} ws ":"'
+            f' ws {_value_rule(params[key])})?'
+        )
 
     # When every argument is optional there is no required part, so emitting the
     # separator unconditionally would leave `"{" ws  ( ... )? "}"` with a dangling
@@ -231,15 +425,15 @@ def build_tool_grammar(tools: Sequence[Any]) -> Grammar:
     The shape:
 
         root     ::= "{" ws "\\"tool\\":" ws toolname "," ws "\\"arguments\\":" ws args "}"
-        toolname ::= "file.list" | "file.read" | ...
-        args     ::= "file.list" args-file-list | "file.read" args-file-read
+        toolname ::= "\\"file.list\\"" | "\\"file.read\\"" | ...
+        args     ::= args-file-list | args-file-read | ...
         args-... ::= "{" ws "\\"path\\":" ws <str> "}"
 
-    `args` re-reads the tool name to pick the shape, which works because `args`
-    immediately follows `toolname` in `root` and GBNF is a plain CFG. That also
-    means the arguments must appear in the generated order, which is a real
+    Within one shape the arguments appear in a fixed order, which is a real
     constraint and is the point: the model cannot invent a key, reorder the
-    required ones, or slip prose in between.
+    required ones, or slip prose in between. Across shapes it is free to pick the
+    wrong one, and `parse_action` is what catches that - see the note on `args`
+    below for why that trade is correct rather than a compromise.
     """
     included: list[tuple[str, dict[str, dict[str, Any]]]] = []
     gaps: list[str] = []
@@ -271,16 +465,50 @@ def build_tool_grammar(tools: Sequence[Any]) -> Grammar:
     included.sort(key=lambda pair: pair[0])
     names = [n for n, _ in included]
 
+    # Alternations are emitted on ONE line, without the leading `|` that reads
+    # tidily in a diff.
+    #
+    # This is not a style choice. llama.cpp's sampler dies with an access
+    # violation on the multi-line, leading-bar form as soon as a rule has more
+    # than one alternative, and LlamaGrammar.from_string accepts it without
+    # complaint -- the grammar compiles, load() reports success, and the process
+    # dies at the first sampled token. Measured: `root ::=\n  | "a"\n  | "b"`
+    # crashes while `root ::= "a" | "b"` does not; and a three-alternative rule
+    # crashes either way unless it is a single line. With 23 tools this is the
+    # difference between a working assistant and a child process that dies the
+    # first time a tool is called.
     lines = [
         "# generated from the live tool registry - do not edit by hand",
         'root ::= "{" ws "\\"tool\\":" ws toolname "," ws "\\"arguments\\":" ws args "}"',
-        "toolname ::=",
+        # Tool names and argument keys are JSON strings, so they are emitted
+        # quoted. `root`'s own braces and colons are not - those are JSON
+        # punctuation, and GBNF's own quotes already supply them. That asymmetry
+        # is the whole bug this module had, so it is worth stating.
+        "toolname ::= " + " | ".join(_json_quoted_literal(n) for n in names),
+        # A FLAT alternation of the argument shapes, not a dispatcher keyed on the
+        # tool name.
+        #
+        # The dispatcher was `args ::= "file.list" args-file-list | ...`, on the
+        # reasoning that `args` follows `toolname` so it could re-read the name.
+        # That reasoning is wrong, and it produced invalid JSON in the first live
+        # run:
+        #
+        #     {"tool": "file.list", "arguments": "file.list"{"path": "C:/x"}}
+        #
+        # GBNF is a forward CFG. It cannot look back at what `toolname` emitted,
+        # so the name in the dispatcher is not a match against the name - it is
+        # more text the model must produce. The "constraint" was a duplication
+        # requirement, and duplication is not JSON. It also means the second
+        # occurrence need not equal the first, so it constrained nothing at all.
+        #
+        # What is given up: the grammar no longer forces the argument shape to
+        # match the named tool. That is a real weakening and it is the right
+        # trade, because a shape mismatch is caught by `parse_action` against the
+        # registry, where the tool's real schema lives - which is a stronger check
+        # than the grammar ever was, since it sees the tool that was actually
+        # named rather than only what the grammar would have permitted.
+        "args ::= " + " | ".join(_rule_name("args", n) for n in names),
     ]
-    for n in names:
-        lines.append(f"  | {_gbnf_literal(n)}")
-    lines.append("args ::=")
-    for n in names:
-        lines.append(f'  | {_gbnf_literal(n)} {_rule_name("args", n)}')
     for n, params in included:
         lines.append(_args_rule(n, params))
     lines.append(r"ws ::= [ \t\n]?")
@@ -289,6 +517,8 @@ def build_tool_grammar(tools: Sequence[Any]) -> Grammar:
     # The rules `root` names: the tool-name list, the args dispatcher, and the
     # whitespace rule. Passed in rather than re-parsed - see _validate.
     referenced = ["toolname", "args", "ws"] + [_rule_name("args", n) for n in names]
+    _assert_no_bare_metacharacters(gbnf)
+    _assert_single_line_alternations(gbnf)
     _validate(gbnf, names, referenced)
 
     return Grammar(
@@ -350,15 +580,21 @@ def _validate(gbnf: str, names: Sequence[str], referenced: Sequence[str]) -> Non
         )
 
     for n in names:
-        lit = _gbnf_literal(n)
-        # A tool name has to appear in BOTH places: `toolname` so the name itself
-        # is legal, and `args` so the argument shape is selected. Appearing in only
-        # one would mean the model can name a tool whose arguments it may not
-        # supply, which is the D31 failure with extra steps.
-        if gbnf.count(lit) < 2:
+        # Quoted, because that is how the name appears in the emitted JSON. A
+        # check written against the unquoted spelling would pass against a
+        # grammar that produces unparseable output, which is the one thing this
+        # check exists to catch.
+        #
+        # It must appear EXACTLY once. It used to have to appear twice, once in
+        # `toolname` and once in the `args` dispatcher - but GBNF cannot match the
+        # second against the first, so the second occurrence was text the model
+        # had to emit, which is not JSON. Requiring two occurrences now would
+        # re-introduce that bug in the name of validating it.
+        lit = _json_quoted_literal(n)
+        if gbnf.count(lit) != 1:
             raise GrammarError(
-                f"{n} appears {gbnf.count(lit)} time(s) in the grammar; it must "
-                "appear in both `toolname` and `args`"
+                f"{n} appears {gbnf.count(lit)} time(s) in the grammar; a tool "
+                "name must appear exactly once, in `toolname`"
             )
 
 

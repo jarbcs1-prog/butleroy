@@ -1,3 +1,10 @@
+import tempfile
+from assistant.daemon import Refused
+from assistant.voice_loop import LoopStats
+from pathlib import Path
+from types import SimpleNamespace
+import threading
+
 """The voice tools, wired.
 
 These tests do not open a microphone or speak. What they check is the wiring and
@@ -45,9 +52,19 @@ def test_they_are_reached_through_tool_call_like_every_other_tool():
     """Not through ops. No file tool has an `op_*` either: tools are reached by
     `tool_call`, which is the only path to an action, and an op per tool would be
     a second door to the same room. Asserting the absence on purpose, because the
-    obvious-looking `op_voice_speak` is not what should exist."""
-    assert [k for k in Daemon._OPS if k.startswith("voice_")] == []
-    assert [k for k in Daemon._OPS if k.startswith("file_")] == []
+    obvious-looking `op_voice_speak` is not what should exist.
+
+    Stated as the general rule rather than as a string prefix, because `voice.watch`
+    *is* an op and is not a counterexample: it is not a registered tool, so an op
+    for it is not a second door to anything. A test written as "no key starts with
+    voice_" would have "fixed" this by deleting a legitimate op, or by renaming it
+    to something the assertion could not see.
+    """
+    by_op = {k.replace("_", ".", 1) for k in Daemon._OPS}
+    assert by_op.isdisjoint(Daemon._EXECUTORS), (
+        "a registered tool also has a per-tool op: "
+        f"{sorted(by_op & set(Daemon._EXECUTORS))}"
+    )
 
 
 # -- the reason they are T3 ----------------------------------------------------
@@ -388,3 +405,123 @@ def test_a_fragment_with_no_punctuation_is_still_speakable(desk, monkeypatch):
     )
     desk._exec_voice_speak({"text": "yes"})
     assert seen["sentences"] == ["yes"]
+
+# -- the loop op ---------------------------------------------------------------
+
+
+def test_watch_is_refused_without_a_trained_wake_word(desk):
+    """The op must not silently fall back to listening for everything.
+
+    A wake word that is not there is a refusal, not a microphone opened on a
+    string match. Falling back would mean the assistant transcribing every room
+    sound, which is the opposite of what turning it on asked for.
+    """
+    desk._wake_model_path = lambda: Path("G:/nowhere/yo_archie.onnx")
+    with pytest.raises(Refused) as caught:
+        desk.op_voice_watch({})
+    assert "yo_archie" in str(caught.value)
+
+
+def test_watch_reports_the_second_time_that_it_is_already_listening(desk):
+    """Starting a second loop would open a second microphone on one device."""
+    desk._voice_loop = SimpleNamespace(
+        stats=LoopStats(turns=3),
+        _mic=SimpleNamespace(device_name="fake", rate=44100),
+    )
+    desk._voice_thread = SimpleNamespace(is_alive=lambda: True)
+    out = desk.op_voice_watch({})
+    assert out["started"] is False
+    assert out["turns"] == 3
+
+
+def test_watch_starts_a_loop_and_reports_the_device(desk, loop_ready):
+    loop = desk.op_voice_watch({"device": "fake"})
+    assert loop["started"] is True
+    assert loop["device"] == "fake mic"
+    assert loop["rate"] == 44100
+    assert desk._voice_thread is not None
+
+
+def test_the_loop_runs_on_its_own_thread_not_the_callers(desk, loop_ready):
+    """A voice turn asks for 4.9 GiB of VRAM. Blocking the pipe on that would
+    stall every other caller, including policy checks."""
+    desk.op_voice_watch({"turns": 1})
+    thread = desk._voice_thread
+    assert thread is not None
+    assert thread is not threading.main_thread()
+    assert thread.daemon, "a stuck microphone must not keep the daemon alive"
+    thread.join(timeout=10)
+
+
+def test_status_says_whether_the_loop_is_running(desk, loop_ready):
+    """"Am I listening?" must be answerable without asking the microphone."""
+    before = desk._exec_voice_status({})
+    assert before["loop"]["running"] is False
+    # The fixture put a real file there, so the model *is* present before the loop
+    # starts. Asserting otherwise would be asserting the fixture is broken.
+    assert before["loop"]["wake_model_present"] is True
+
+    desk.op_voice_watch({"turns": 1})
+    desk._voice_thread.join(timeout=10)
+    after = desk._exec_voice_status({})
+    assert after["loop"]["running"] is False, "the loop should have finished"
+    assert after["loop"]["wake_model_present"] is True
+
+
+def test_status_loads_no_models(desk):
+    """`voice.status` is the thing you call when voice is broken. It must work
+    when voice is broken."""
+    desk._exec_voice_status({})   # must not raise, must not load anything
+    assert "inputs" in desk._exec_voice_status({})
+
+@pytest.fixture
+def loop_ready(monkeypatch):
+    """Make `loop.open()` succeed without touching hardware.
+
+    Three things, and each one is a real constructor the loop calls: the device,
+    the wake model, and the calibration. Replacing only the microphone would still
+    load two ONNX models and read 1.5 s of silence.
+    """
+    from assistant import audio as audio_mod
+
+    class FakeMic:
+        device_name = "fake mic"
+        rate = 44100
+        _block = 441
+
+        def frames(self, seconds=None):
+            return iter(())
+
+        def rms(self, frame):
+            return 0.0
+
+    class FakeWake:
+        ok = True
+        error = ""
+        name = "yo_archie"
+
+        def score(self, frame):
+            return 0.0
+
+        def fired(self, frame):
+            return False
+
+    # Signature read from the class, not recalled: floor, peak, open, release,
+    # seconds, device. Guessing it wrong is the seventh time this session that
+    # reimplementing or misremembering something I already own produced a
+    # confident wrong answer.
+    cal = audio_mod.Calibrated(floor=16.0, peak=20.0, open=90.0, release=45.0,
+                               seconds=1.5, device="fake mic")
+    monkeypatch.setattr(audio_mod, "Microphone", lambda *a, **k: FakeMic())
+    monkeypatch.setattr(audio_mod, "WakeWord", lambda *a, **k: FakeWake())
+    monkeypatch.setattr(audio_mod, "calibrate", lambda *a, **k: cal)
+
+    # A real file, not a stubbed `.exists()`. The op checks for a file on disk and
+    # the point of the fixture is that the check runs against something real; a
+    # monkeypatched predicate would pass whether or not the check ever fired.
+    tmp = tempfile.TemporaryDirectory()
+    trained = Path(tmp.name) / "yo_archie.onnx"
+    trained.write_bytes(b"not really a model")
+    monkeypatch.setattr(Daemon, "_wake_model_path", lambda self: trained)
+    yield cal
+    tmp.cleanup()

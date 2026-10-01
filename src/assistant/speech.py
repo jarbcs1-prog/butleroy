@@ -321,3 +321,20 @@ def describe() -> dict[str, Any]:
         "loaded": False,
         "note": "voice is loaded on first use; nothing is resident until then",
     }
+
+def split_sentences(text: str) -> list[str]:
+    """Break prose into sentences worth rendering separately.
+
+    A regex, and deliberately not a real sentence splitter. The reasoning is
+    about failure modes: a proper splitter needs abbreviation rules, and the
+    failure of an abbreviation rule is to swallow the rest of a paragraph into
+    one clause. A regex that splits slightly too eagerly produces a small pause
+    in the wrong place, which is a cosmetic fault. It cannot drop half a sentence.
+
+    Kept here rather than duplicated in the daemon: two copies of this would be
+    two definitions of where a sentence ends, and they would drift.
+    """
+    import re
+
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", str(text).strip())]
+    return [p for p in parts if p]

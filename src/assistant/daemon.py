@@ -61,7 +61,7 @@ from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
 from . import fileops, sysinfo
-from . import audio, speech
+from . import audio, speech, voice_loop
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
 #: apart in exactly the way that produces a model nobody can load.
@@ -88,6 +88,40 @@ STATE = ROOT / "state"
 # can never raise the ceiling, no matter what it sends.
 PRESENT_CHANNEL = (CHANNEL_PC,)
 
+
+def _voice_stats(loop: Any) -> dict[str, int]:
+    """The loop's counters, as plain numbers.
+
+    Read off the object rather than stored, so there is one number and not a copy
+    that can disagree with it.
+    """
+    s = getattr(loop, "stats", None)
+    if s is None:
+        return {}
+    return {k: int(v) for k, v in vars(s).items() if isinstance(v, (int, float))}
+
+
+def _describe_result(tool: str, result: Any) -> str:
+    """Say what a tool did, in a sentence worth hearing.
+
+    Deliberately does not dump the result. A spoken answer is read aloud, and
+    `{'deleted': 1, 'bytes': 4021, 'recoverable_until': ...}` is not an answer,
+    it is a log line. Where a human-facing summary exists it is used; otherwise a
+    short factual statement of what was done.
+    """
+    if result is None:
+        return f"Done: {tool}."
+    if isinstance(result, str):
+        return result[:400]
+    if isinstance(result, dict):
+        for key in ("summary", "message", "answer", "text", "transcript"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value[:400]
+        if "error" in result:
+            return f"That did not work: {result['error']}"[:400]
+        return f"Done: {tool}."[:400]
+    return f"Done: {tool}."
 
 class DaemonError(RuntimeError):
     """An op failed in a way the caller is allowed to see."""
@@ -270,6 +304,13 @@ class Daemon:
         # daemon is in when that happens. `parent_alive` in the child is the
         # fallback for when this could not be created.
         self._brain_job: Any = None
+        # Voice. The loop is kept on the instance rather than as a module global
+        # because it owns a microphone and a wake word model, and two daemons in
+        # one process would then fight over the device - which is the same reason
+        # the named pipes collide. The thread is daemon=True so a stuck
+        # microphone cannot keep the process alive at shutdown.
+        self._voice_loop: Any = None
+        self._voice_thread: threading.Thread | None = None
         self._brain_last_used = 0.0
         self._brain_loaded = False
         self._sweeper: threading.Thread | None = None
@@ -1249,7 +1290,7 @@ class Daemon:
         # noticeably worse than a sequence of sentences.
         out = self.state / "voice" / time.strftime("%Y%m%d-%H%M%S")
         result = speech.synthesise(
-            _split_sentences(text), out, voice=args.get("voice")
+            speech.split_sentences(text), out, voice=args.get("voice")
         )
         if not result.get("ok"):
             raise DaemonError(str(result.get("error") or "speech failed"))
@@ -1262,7 +1303,99 @@ class Daemon:
 
     def _exec_voice_status(self, args: dict) -> Any:
         """What voice can do here, and what it would cost. Loads nothing."""
-        return speech.describe()
+        status = voice_loop.describe()
+        # The loop is running state, and a status that does not report running
+        # state makes a user ask "is it listening?" and get no answer.
+        status["loop"] = {
+            **status.get("loop", {}),
+            "running": self._voice_thread is not None and self._voice_thread.is_alive(),
+            "turns": self._voice_loop.stats.turns if self._voice_loop else 0,
+            "stats": _voice_stats(self._voice_loop) if self._voice_loop else {},
+            "wake_model_present": self._wake_model_path().exists(),
+        }
+        return status
+
+    def _wake_model_path(self) -> Path:
+        """Where the trained wake word is expected, and where it will be written.
+
+        One function so the question "is the wake word trained?" has one answer.
+        A second path would eventually be the one the trainer writes and the other
+        the one the loop reads, and the symptom would be a loop that reports no
+        wake word on a machine where one was just trained.
+        """
+        return ROOT / "models" / "wakeword" / "yo_archie.onnx"
+
+    def _voice_turn(self, text: str) -> str:
+        """One spoken request, through the same gate every other request uses.
+
+        A voice turn is not a privileged path. It proposes through `brain_turn`,
+        which returns a proposal, and the proposal goes back through `tool_call`
+        where the policy gate and any T3 confirmation apply. A microphone is not a
+        licence to skip the gate - it is a *new* reason to want the gate, since it
+        is the one channel where the user may not be watching.
+        """
+        result = self._brain_call("turn", prompt=text, channel=CHANNEL_VOICE,
+                                  actor="voice")
+        kind = str(result.get("kind") or "answer")
+        if kind != "tool":
+            return str(result.get("answer") or result.get("text") or "")
+        tool = str(result.get("tool") or "")
+        call_args = result.get("arguments") or {}
+        reply = self.op_tool_call({
+            "tool": tool, "args": call_args,
+            "channel": CHANNEL_VOICE, "actor": "voice",
+        })
+        if not isinstance(reply, dict):
+            return ""
+        if reply.get("error"):
+            return f"I could not do that: {reply['error']}"
+        return _describe_result(tool, reply.get("result"))
+
+    def op_voice_watch(self, args: dict) -> Any:
+        """Start listening for the wake word in the background.
+
+        Separate from the tools on purpose. `voice.listen` is a single
+        T3-approved utterance; this is the thing you leave running, and it needs
+        to be startable without a human clicking a dialog about a permission they
+        already gave when they turned voice on.
+        """
+        if self._voice_thread is not None and self._voice_thread.is_alive():
+            return {"started": False, "reason": "already listening",
+                    "turns": self._voice_loop.stats.turns}
+        if not self._wake_model_path().exists():
+            raise Refused(
+                f"no wake word at {self._wake_model_path()}. Train it first "
+                f"(train_wakeword.py), or use voice.listen without a wake word."
+            )
+        turns = args.get("turns")
+        loop = voice_loop.VoiceLoop(
+            self._voice_turn,
+            device=args.get("device"),
+            voice=str(args.get("voice") or speech.DEFAULT_VOICE),
+            seconds=float(args.get("seconds", 30)),
+            wake_name="yo_archie",
+        )
+        loop.open()
+        self._voice_loop = loop
+
+        def _run() -> None:
+            try:
+                loop.run(turns=int(turns) if turns else None,
+                         max_idle_s=float(args.get("max_idle_s") or 900.0))
+            except Exception as why:  # noqa: BLE001 - a dead thread is a report,
+                # not a crash, and the daemon must survive a microphone vanishing
+                self._audit(actor="daemon", channel=CHANNEL_VOICE,
+                            tool="voice.watch", decision="allow",
+                            reason=f"voice loop stopped: {type(why).__name__}: {why}")
+            finally:
+                self._voice_loop = None
+
+        thread = threading.Thread(target=_run, name="voice-loop", daemon=True)
+        self._voice_thread = thread
+        thread.start()
+        return {"started": True, "device": loop._mic.device_name,
+                "rate": loop._mic.rate, "wake": loop.wake_name,
+                "transcriber": loop._transcriber is not None}
 
     def _preview_voice_speak(self, args: dict) -> dict:
         text = str(args.get("text", "")).strip()
@@ -2270,21 +2403,6 @@ def _install_tables() -> None:
 
 
 _install_tables()
-
-
-def _split_sentences(text: str) -> list[str]:
-    """Split prose into sentences, keeping the punctuation with its sentence.
-
-    Deliberately not a full NLP sentence splitter. The job is to stop piper
-    rendering a paragraph as one long utterance with a flat intonation contour
-    at the end, and a regex on terminal punctuation does that. Anything trying to
-    handle abbreviations ("Dr. Smith", "e.g.") would add a rule whose failure
-    mode is dropping half a sentence, which is worse than a slightly odd pause.
-    """
-    import re
-
-    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
-    return parts or [text.strip()]
 
 
 def _check_tables() -> None:

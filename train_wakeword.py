@@ -91,7 +91,8 @@ FRAME = 1280
 FIRST_FRAME = 12400
 
 
-def frame_labels(n_frames: int, start: int, end: int, pad: int = 8000) -> np.ndarray:
+def frame_labels(n_frames: int, start: int, end: int, pad: int = 8000,
+                  positive: bool = True) -> np.ndarray:
     """Mark every frame that could contain any part of the phrase.
 
     Deliberately wider than openWakeWord's own `get_frame_labels`, which marks two
@@ -113,6 +114,8 @@ def frame_labels(n_frames: int, start: int, end: int, pad: int = 8000) -> np.nda
     labels = np.zeros(max(n_frames, 0), dtype=np.float32)
     if n_frames <= 0:
         return labels
+    if not positive:
+        return labels          # a negative is 0 for every frame it occupies
     lo = max(0, int((start - pad) / FRAME))
     hi = min(n_frames, int(np.ceil((end + pad) / FRAME)))
     labels[lo:max(hi, lo + 1)] = 1.0
@@ -267,13 +270,13 @@ def main() -> int:
         """
         gap = np.zeros(16000, dtype=np.float32)  # 1 s between utterances
         stream: list[np.ndarray] = []
-        regions: list[tuple[int, int]] = []
+        regions: list[tuple[int, int, bool]] = []
         at = 0
-        for audio, begin, finish in chunks:
+        for audio, begin, finish, positive in chunks:
             stream.append(gap)
             at += len(gap)
             stream.append(audio)
-            regions.append((at + begin, at + finish))
+            regions.append((at + begin, at + finish, positive))
             at += len(audio)
         joined = np.concatenate(stream)
 
@@ -290,8 +293,8 @@ def main() -> int:
         # the float is required - so the cast is not a tidiness fix, it is the
         # only order the two types can be combined in.
         mask = np.zeros(len(feats), dtype=bool)
-        for begin, finish in regions:
-            mask |= frame_labels(len(feats), begin, finish).astype(bool)
+        for begin, finish, positive in regions:
+            mask |= frame_labels(len(feats), begin, finish, positive=positive).astype(bool)
         return feats, mask.astype(np.float32)
 
     pos_chunks: list[tuple[np.ndarray, int, int]] = []
@@ -300,7 +303,8 @@ def main() -> int:
         for _ in range(4):  # four augmented copies per render
             lead = lead_in_silence(rng)
             body = vary(base, rng)
-            pos_chunks.append((np.concatenate([lead, body]), len(lead), len(lead) + len(body) - 1))
+            pos_chunks.append((np.concatenate([lead, body]), len(lead),
+                               len(lead) + len(body) - 1, True))
 
     neg_chunks: list[tuple[np.ndarray, int, int]] = []
     for wav in neg_wavs:
@@ -308,11 +312,15 @@ def main() -> int:
         for _ in range(6):
             lead = lead_in_silence(rng)
             body = vary(base, rng)
-            # The whole negative is labelled 1: openWakeWord's convention marks
-            # where speech occurs, and the model learns "not this" from it. A
-            # negative labelled 0 at its boundaries would teach the model that
-            # ordinary speech boundaries are silent.
-            neg_chunks.append((np.concatenate([lead, body]), len(lead), len(lead) + len(body) - 1))
+            # Every frame of a negative is 0 - silence and speech alike. See the
+            # note on `frame_labels`: `y == 0` means *not the wake phrase*, and
+            # that is the only thing the training loop reads as a negative. An
+            # earlier version of this file labelled these 1 on the reasoning that
+            # openWakeWord "marks where speech occurs", which is not what its
+            # training loop does, and it would have trained the model to fire on
+            # "yo" and "archie" and "okay archie".
+            neg_chunks.append((np.concatenate([lead, body]), len(lead),
+                               len(lead) + len(body) - 1, False))
     print(f"   {len(pos_chunks)} positive chunks, {len(neg_chunks)} negative chunks")
 
     order = rng.permutation(len(pos_chunks))
@@ -321,17 +329,33 @@ def main() -> int:
 
     print("4. extracting features (this is the slow part)")
     t0 = time.time()
-    train_feats, train_labels = frame_features([pos_chunks[i] for i in train_idx])
-    val_feats, val_labels = frame_features([pos_chunks[i] for i in val_idx])
-    neg_feats, neg_labels = frame_features(neg_chunks)
-    print(f"   train {train_feats.shape} pos_frames={(train_labels == 1).sum()}")
-    print(f"   val   {val_feats.shape} pos_frames={(val_labels == 1).sum()}")
-    print(f"   neg   {neg_feats.shape} pos_frames={(neg_labels == 1).sum()}")
+    # Negatives are concatenated into the *same* datasets as the positives.
+    # Passing them only as `false_positive_val_data` measures the false-fire rate
+    # and does nothing to the weights: `train_model` takes its negatives from the
+    # batch (`y == 0`), so a negative set that never enters a batch is audio that
+    # was listened to and never learned from.
+    train_feats, train_labels = frame_features(
+        [pos_chunks[i] for i in train_idx] + neg_chunks)
+    val_feats, val_labels = frame_features(
+        [pos_chunks[i] for i in val_idx] + neg_chunks[:40])
+    print(f"   train {train_feats.shape} "
+          f"pos={int((train_labels == 1).sum())} "
+          f"neg={int((train_labels == 0).sum())}")
+    print(f"   val   {val_feats.shape} "
+          f"pos={int((val_labels == 1).sum())} "
+          f"neg={int((val_labels == 0).sum())}")
     print(f"   {time.time() - t0:.0f}s")
 
-    if (train_labels == 1).sum() < 50:
-        print("RESULT: FAIL - too few positive frames to learn anything from.")
+    # Both classes must actually be present. A dataset that is 99% one label
+    # trains a model that is 99% that answer, and it does so quietly - which is
+    # exactly the failure this script already produced twice.
+    pos_n = int((train_labels == 1).sum())
+    neg_n = int((train_labels == 0).sum())
+    if pos_n < 50 or neg_n < 50:
+        print(f"RESULT: FAIL - the training set needs both classes: "
+              f"{pos_n} positive frames, {neg_n} negative frames.")
         return 1
+    print(f"   both classes present: {pos_n} positive / {neg_n} negative frames")
 
     print("5. training")
     import torch

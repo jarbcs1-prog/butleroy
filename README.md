@@ -1,13 +1,11 @@
 # Local AI Assistant
 
-A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative
-work that needs doing, and orchestrates software projects by delegating to a team of agents — with
-all reasoning and all memory on-device.
+A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative work that needs doing, and orchestrates software projects by delegating to a team of agents — with all reasoning and all memory on-device.
 
 ## Read in this order
 
 | File | What it is |
-|---|---|
+|------|------------|
 | **DECISIONS.md** | 21 numbered decisions with rationale and evidence. v1 is in git history. |
 | **ARCHITECTURE.md** | Four planes, the VRAM arbiter, authority tiers, memory design |
 | **PLAN.md** | Seven phases with measurable gates |
@@ -15,52 +13,34 @@ all reasoning and all memory on-device.
 
 ## The governing constraint
 
-> "As much as I'd like that my assistant would be as performant as possible, if it ends up taking
-> all my VRAM and DDRAM for itself, how am I going to get it to do anything that will also require
-> such resources?"
+> "As much as I'd like that my assistant would be as performant as possible, if it ends up taking all my VRAM and DDRAM for itself, how am I going to get it to do anything that will also require such resources?"
 
-This is encoded as an invariant, not a preference: **the assistant never takes resources it needs
-from you.** The daemon is always resident (~300 MB); only the model cycles and is killed after
-90 s idle, which is the only reliable way to return VRAM on Windows. A dedicated arbiter is the
-single authority on GPU memory and always preempts the assistant's own model before it can affect
-your workload.
+This is encoded as an invariant, not a preference: **the assistant never takes resources it needs from you.** The daemon is always resident (~300 MB); only the model cycles and is killed after 90s idle, which is the only reliable way to return VRAM on Windows. A dedicated arbiter is the single authority on GPU memory and always preempts the assistant's own model before it can affect your workload.
 
 ## Hardware (verified 2026-09-30)
 
-RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 3.11.9 ·
-CUDA 13.3 · `opencode` v2.0.19 · Obsidian at `E:\Obsidian_Vault`
+RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 3.11.9 · CUDA 13.3 · `opencode` v2.0.19 · Obsidian at `E:\Obsidian_Vault`
 
 ## What it will and will not do
 
-**Will:** know this machine by querying it · diagnose and maintain it locally · administer files,
-mail, Telegram and media · teach · orchestrate real software projects by delegation · reflect and
-improve against evidence.
+**Will:** know this machine by querying it · diagnose and maintain it locally · administer files, mail, Telegram and media · teach · orchestrate real software projects by delegation · reflect and improve against evidence.
 
-**Will not:** take over the machine · write its own code or policy · act on your behalf while
-you're asleep beyond reversible reads and writes · let Telegram authorize anything destructive.
+**Will not:** take over the machine · write its own code or policy · act on your behalf while you're asleep beyond reversible reads and writes · let Telegram authorize anything destructive.
 
 ## Hard boundaries
 
-- **No cloud reasoning.** All weights, prompts, inference and memory on-device. Telegram and IMAP
-  are transports, not reasoning. Cloud model providers are permitted in exactly one place — the
-  delegated-worker plane.
+- **No cloud reasoning.** All weights, prompts, inference and memory on-device. Telegram and IMAP are transports, not reasoning. Cloud model providers are permitted in exactly one place — the delegated-worker plane.
 - **No listening ports.** All inter-process transport is Windows named pipes.
-- **No coupling to any other project.** This repository shares no code, config, state or runtime
-  dependency with any project on `F:` or `E:`. External directories are reached only through an
-  explicit, user-approved workspace manifest.
-- **Safety is deterministic code**, never a model, and never a prompt instruction.
+- **No coupling to any other project.** This repository shares no code, config, state or runtime dependency with any project on `F:` or `E:`. External directories are reached only through an explicit, user-approved workspace manifest.
+- **Safety is deterministic code**, never a model and never a prompt instruction.
 
 ## Start here
 
 **Phase 0 — PASSED.** The foundation is real and measured, not assumed:
 
-- Built `llama-cpp-python` 0.3.35 from source. The prebuilt wheels ship a CPU backend compiled with
-  AVX-512, which this Ryzen 5 5600G cannot execute — they die with `STATUS_ILLEGAL_INSTRUCTION` on
-  the CPU path, so the fix is `GGML_NATIVE=OFF` and our own build (D25). 20 min at `-j3`.
-- `phase0_gate.py` exits **0**: llama.cpp reports **25/25 layers on GPU**, VRAM moves **+1154 MiB**,
-  peak GPU utilisation **21 %**, 223 tok/s generation.
+- Built `llama-cpp-python` 0.3.35 from source. The prebuilt wheels ship a CPU backend compiled with AVX-512, which this Ryzen 5 5600G cannot execute — they die with `STATUS_ILLEGAL_INSTRUCTION` on the CPU path, so the fix is `GGML_NATIVE=OFF` and our own build (D25). 20 min at `-j3`.
+- `phase0_gate.py` exits **0**: llama.cpp reports **25/25 layers on GPU**, VRAM moves **+1154 MiB**, peak GPU utilisation **21 %**, 223 tok/s generation.
 - llama.cpp 0.3.35 understands **Qwen3.5**, so D9's open architecture risk is closed.
 - 106 tests green inside the venv.
 
-**Next:** finish Phase 2's zero-dependency surface (Obsidian bridge, daemon wiring), then Phase 1 —
-the model bake-off, gated on the 4B being competent. See `PLAN.md` → "Immediate next action".
+**Next:** finish Phase 2's zero-dependency surface (Obsidian bridge, daemon wiring), then Phase 1 — the model bake-off, gated on the 4B being competent. See `PLAN.md` → "Immediate next action".

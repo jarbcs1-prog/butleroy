@@ -1069,3 +1069,93 @@ level below the process that was killed. The detector was right every time. The
 evidence that mattered was `orphans still running: 0`, not the printed line - a
 grandchild inheriting a killed parent's stdout pipe will lose the very line you
 are looking for.
+
+---
+
+## D47 - The deep tier does not earn its place, and that is the better outcome
+
+**The strong version of D46 is a Windows job object with `KILL_ON_JOB_CLOSE`, and
+it is armed - not the polling.** Polling needs a live process to poll, so it cannot
+cover `TerminateProcess`, a power loss, or a bluescreen. The job is enforced by the
+kernel: the child dies the instant the last handle to it is released. The daemon
+holds that handle; there is no other way for the child to be killed. Polling stays
+as the fallback for when the job cannot be created, and every failure to arm it is
+audited rather than swallowed (D44).
+
+**The flag was in the wrong field for a while, and nothing noticed.** It was written
+at byte offset `0x28`, which is `ActiveProcessLimit`; `LimitFlags` is at `0x10`.
+`SetInformationJobObject` accepted the structure and returned success, so the guard
+looked installed and armed nothing. It was found by asking a question the code had
+never been asked: *what flags are actually stored?* Byte offsets into a C structure
+are replaced by real `ctypes` declarations, and `job_limit_flags` exists so the
+answer is observable rather than assumed. A claim that cannot be read back is not a
+claim.
+
+The same class of error bit twice more, so it is named: a Win32 HANDLE does not fit
+in a 32-bit `int`, and ctypes returns one by default. The symptom is
+`ERROR_INVALID_HANDLE` from the very next call, which reads like "the API refused"
+rather than "the caller truncated it". Signatures are declared once, in one place,
+instead of at each call site.
+
+---
+
+## D48 - The deep tier does not earn its place, and that is the better outcome
+
+Measured, because D45 promised the decision would be a measurement. Same five
+questions, same workspace, same gate, both tiers:
+
+| | fast (4B) | deep (9B) |
+|---|---|---|
+| reached a human or the gate | **5/5** | **5/5** |
+| our VRAM | 5081 MiB | 6419 MiB |
+| total time for the five | 23.6 s | 29.6 s |
+| wrong tool chosen | 0 | 0 |
+
+And on the questions that should separate a small model from a large one -
+ambiguity, absence, a place it was never told about:
+
+| | fast | deep |
+|---|---|---|
+| honest answer | 2/4 | 2/4 |
+| invented a path | 2 | 2 |
+
+They fail *differently*, which is the more useful finding. The 4B gets extensions
+right but emitted a relative path that only worked because `_anchor_args` repaired
+it. The 9B emits absolute paths every time - no repair needed - but invented a
+`backup/` directory that does not exist, and named an archive without its `.zip`.
+Neither is better; they are wrong in different places.
+
+**So the 9B is not adopted.** It stays installed and reachable by name
+(`--tier deep`, `brain.turn(tier="deep")`) because it is a working, verified model
+and discarding six gigabytes of a correct download to make a point would be the
+theatrical choice. What does not happen is a second model on any path a request
+takes by default. D45 named this outcome in advance as preferable to a second model
+that is merely expensive, and that is what was found.
+
+**Two things the measurement corrected about the method itself**, both of which had
+produced wrong-looking results first:
+
+* A workspace under `tempfile.mkdtemp()` is
+  `C:/Users/PCPRIN~1/AppData/Local/Temp/tmpenxzqqxh/work`. The 9B failed two of
+  five by mangling it - `tmpe nxzqqxh` with a space inserted, `tmptmpenxzqqxh` with
+  the prefix repeated. The *structure* was correct both times. That is a
+  transcription limit, not a reasoning one, and the user's real workspaces are
+  short. Both tiers scored 5/5 once the root was pinned short. **A benchmark whose
+  fixture is harder than reality measures the fixture, not the model.**
+* The first run reported identical answers, identical timings and an identical
+  5081 MiB for both tiers. That should have been impossible: a 9B cannot occupy a
+  4B's footprint. The cause was `_load` calling `default_config()` with no
+  argument, so the tier was resolved, **printed**, and then ignored - the child
+  announced `tier=deep model=Qwen3.5-9B...` while holding the 4B. The load summary
+  now names the path it actually used, so a disagreement between the tier asked for
+  and the model loaded is visible in the first line anyone reads rather than
+  inferred from a VRAM reading three turns later.
+
+**What this says about the failures model size does not fix:** asked for a file that
+does not exist, both models called `file.read` on a best guess rather than saying
+so; asked about `F:/theseas/config.toml`, both went straight at it, ignoring the
+instruction to say rather than guess. The gate caught the second one, which is the
+correct place for it to be caught. But the prompt's instruction is being ignored by
+*both* sizes of model, so more parameters is not the lever. The gate is the
+enforcement and the prompt is only a courtesy - which is already true, and which
+pretending otherwise is what the prompt currently invites.

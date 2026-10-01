@@ -127,11 +127,45 @@ def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS,
             "",
             "When the user names a file without giving a path, it is under one "
             "of those roots - not in a folder you remember from elsewhere. Put "
-            "it under the root rather than reaching for somewhere familiar; a "
-            "path outside these is refused, and a refusal helps nobody. If you "
-            "genuinely cannot tell which root it belongs to, say so.",
+            "it under the root rather than reaching for somewhere familiar.",
             "",
         ]
+    lines += [
+        # This block is here because a rule the model cannot express is not a
+        # rule. The previous prompt said "if you cannot tell which root it
+        # belongs to, say so" - and both the 4B and the 9B ignored it, every
+        # time, for a question where they plainly could not tell. Measured: asked
+        # to read a file that did not exist, both produced `file.read` against a
+        # path they had invented; asked about `F:/theseas/config.toml`, which is
+        # outside every approved root, both went straight at it.
+        #
+        # The reason is not that the models are obstinate. It is that the prompt
+        # never said how to comply. The decision grammar admits exactly two
+        # outcomes - `answer`, or `tool:<name>` - and the old text described only
+        # the tool half. A model told to "say so" with no channel for saying so
+        # will pick the only option it has been shown, and "read the thing the
+        # user named" looks obligatory when the user names a thing.
+        #
+        # So: say plainly that both outcomes exist, name the vocabulary the
+        # grammar actually uses, and say that one of them is a legitimate answer
+        # rather than a failure to act.
+        "You have two ways to respond, and only two.",
+        "",
+        "1. Call a tool. Choose it and give its arguments. Use this whenever you "
+        "can actually do what was asked.",
+        "",
+        "2. Answer in plain words, with no tool. Use this to answer a question, to "
+        "ask the user something you need answered, or to say plainly that you do "
+        "not know something or cannot find it. Saying you do not know IS a "
+        "complete answer here. It is never the wrong choice, and you are not "
+        "expected to act on every request.",
+        "",
+        "Never invent a path, a file, a folder, or a value in order to make a "
+        "tool call. A wrong path that looks real is worse than saying you did not "
+        "find it. If you are unsure where something is, or whether it exists at "
+        "all, option 2 exists for exactly that.",
+        "",
+    ]
     lines += [
         "Tools available:",
     ]

@@ -1159,3 +1159,54 @@ correct place for it to be caught. But the prompt's instruction is being ignored
 *both* sizes of model, so more parameters is not the lever. The gate is the
 enforcement and the prompt is only a courtesy - which is already true, and which
 pretending otherwise is what the prompt currently invites.
+---
+
+## D49 - A rule the model cannot express is not a rule
+
+The prompt said "if you cannot tell which root it belongs to, say so". Both models
+ignored it, every time, on questions where they plainly could not tell: asked to
+read a file that did not exist, both produced a path they had invented; asked
+about F:/theseas/config.toml, which is outside every approved root, both went
+straight at it.
+
+The tempting reading is that the models are obstinate. It is not that. **The
+prompt never said how to comply.** The decision grammar admits exactly two
+outcomes - nswer, or 	ool:<name> - and the prompt described only the tool
+half. A model told to "say so" with no channel for saying so will use the only
+option it has been shown, and when a user says "read quarterly-report.docx",
+reaching for it looks obligatory.
+
+So the prompt now states both outcomes, names the vocabulary the grammar uses,
+and says that declining is a complete answer rather than a failure to act.
+
+**Measured, with the probe's own verdict corrected first** (see below): every
+proposal was either inside an approved root or a path the user explicitly gave.
+No remembered Desktop, no C:/Users/<someone>.
+
+Three things this cost that are worth more than the fix:
+
+* **The first measurement was void.** The probe registered its workspace by
+  writing a dict into the store's private dict. The store keys on ws.root and
+  expects a Workspace; nothing registered, oots() returned empty, and the
+  model was told "you may only act inside these approved roots" and shown none.
+  It reached for C:/Users/Administrator/Documents - which reads exactly like a
+  model ignoring its instructions, and was the probe lying about the world.
+  The probe now asserts the root is registered before asking anything. **A
+  measurement whose fixture is not what it claims is worse than no measurement,
+  because it produces a confident wrong answer.**
+* **The verdict function flagged the model's fidelity as fabrication.** It
+  string-matched quarterly and 	heseas in the proposed arguments - both of
+  which are the *user's own words*, copied verbatim. Copying what you were asked
+  is not inventing something. Fabrication is now defined as a folder nobody
+  mentioned, or a location outside every root that the user did not name.
+* **A path the user typed is not fabrication**, however the gate rules on it.
+  Attempting F:/theseas/config.toml when the user asked for exactly that is
+  correct behaviour; the gate refusing it is D10 working. Conflating the two
+  would have had me "fixing" correct behaviour.
+
+What was *not* fixed, and is a capability limit rather than a bug: asked to read
+a file nobody had located, the model guesses a **filename** under an approved
+root. That is a guess about whether the file exists, not a violation of the root
+rule, and it is answered honestly by a FileNotFoundError rather than by acting
+on the wrong file. Refusing to guess a filename at all would be worse assistance,
+so this is left as it is.

@@ -198,3 +198,75 @@ def test_the_daemon_can_read_the_served_prompt_without_a_model(served):
         finally:
             server.stop()
     assert ROOTS[0] in reply["prompt"]
+
+# -- the two outcomes, and the grammar's agreement with them ------------------
+#
+# The prompt tells the model it may answer in words instead of calling a tool, and
+# that this is a complete answer rather than a failure. That claim is only true
+# while the decision grammar still admits the word. If the grammar drops it, the
+# prompt is instructing the model to take an option it cannot take - which is what
+# D49 describes happening in reverse.
+
+
+def test_the_prompt_offers_answering_in_words_as_a_real_choice():
+    prompt = _brain(lambda: ROOTS).current_prompt()
+    assert "two ways to respond" in prompt
+    assert "complete answer" in prompt
+
+
+def test_the_prompt_does_not_tell_it_to_say_so_without_saying_how():
+    """The exact defect D49 fixes, asserted so the old wording cannot come back.
+
+    "Say so" with no channel for saying so is not an instruction; it is a hint that
+    the model cannot act on, and it measurably lost every time.
+    """
+    prompt = _brain(lambda: ROOTS).current_prompt()
+    assert "say so rather than guessing" not in prompt
+
+
+def test_the_prompt_forbids_inventing_a_path_to_make_a_call():
+    """A plausible wrong path is worse than an admission of not knowing."""
+    prompt = _brain(lambda: ROOTS).current_prompt()
+    assert "Never invent a path" in prompt
+
+
+def test_answering_in_words_is_not_described_as_a_failure():
+    """The wording has to make declining feel available, not like giving up."""
+    lowered = _brain(lambda: ROOTS).current_prompt().lower()
+    assert "never the wrong choice" in lowered
+    assert "not expected to act on every request" in lowered
+
+
+def test_the_grammar_still_admits_the_outcome_the_prompt_offers():
+    """The coupling. A prompt promising an option the grammar forbids is a lie
+    the model can only discover by trying, and it always tries the other one."""
+    from assistant.grammar import build_named_decision_grammar
+    from assistant.tools import ALL_TOOLS
+
+    gbnf = build_named_decision_grammar(ALL_TOOLS).gbnf
+    assert '"answer"' in gbnf, (
+        "the prompt offers a plain-word answer but the decision grammar no longer "
+        "admits one"
+    )
+
+
+def test_the_two_outcomes_the_prompt_offers_are_the_two_the_grammar_admits():
+    """Counted on both sides, because a third outcome is how they drift apart.
+
+    The grammar emits `answer` or `tool:<name>` - exactly two. The prompt must
+    therefore describe exactly two ways to respond, and must not imply a third
+    option the model cannot take. The prompt deliberately does not quote the
+    grammar tokens: `tool:<name>` is an implementation detail the model never
+    sees, and teaching it the syntax would tie the prompt to a grammar that is
+    free to change.
+    """
+    from assistant.grammar import build_named_decision_grammar
+    from assistant.tools import ALL_TOOLS
+
+    root = next(line for line in build_named_decision_grammar(
+        ALL_TOOLS).gbnf.splitlines() if line.startswith("root ::="))
+    alternatives = root.split("::=", 1)[1].count("|") + 1
+    assert alternatives == 2, f"the grammar now admits {alternatives} outcomes"
+
+    prompt = _brain(lambda: ROOTS).current_prompt()
+    assert "You have two ways to respond" in prompt

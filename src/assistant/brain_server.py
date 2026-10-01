@@ -36,6 +36,7 @@ from .tools import ALL_TOOLS
 
 from . import ipc
 from .arbiter import as_denial, format_denial
+from .policy import CHANNEL_SCHEDULED
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -364,6 +365,201 @@ def parent_alive(pid: int | None = None) -> bool:
         return code.value == STILL_ACTIVE
     finally:
         kernel32.CloseHandle(handle)
+
+
+class _BasicLimit(ctypes.Structure):
+    """`JOBOBJECT_BASIC_LIMIT_INFORMATION`, field by field.
+
+    Declared in full rather than written as bytes at an offset, because the byte
+    version is exactly the mistake this replaced. `LimitFlags` sits at 0x10; a
+    previous version of this file wrote at 0x28, which is `ActiveProcessLimit` -
+    so `SetInformationJobObject` returned success, kill-on-close was never armed,
+    and the guard looked installed while doing nothing at all.
+
+    A structure that cannot be read back is a structure that cannot be claimed, so
+    `job_limit_flags` exists to read this one back and the tests do exactly that.
+    """
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _ExtendedLimit(ctypes.Structure):
+    """`JOBOBJECT_EXTENDED_LIMIT_INFORMATION`."""
+    _fields_ = [
+        ("BasicLimitInformation", _BasicLimit),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+#: Win32 functions are declared once, with their signatures stated.
+#:
+#: Without this, `CreateJobObjectW` returns a C `int` by default, and on 64-bit
+#: Windows a HANDLE does not fit in 32 bits. The result is a truncated handle and
+#: the reassuring `ERROR_INVALID_HANDLE` from the very next call - which reads as
+#: "the API refused" rather than "the caller truncated it". Stating `c_void_p`
+#: here is the difference between asking a question and getting a wrong answer.
+_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_KERNEL32.CreateJobObjectW.restype = ctypes.c_void_p
+_KERNEL32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+_KERNEL32.SetInformationJobObject.restype = ctypes.c_int
+_KERNEL32.SetInformationJobObject.argtypes = (
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+)
+_KERNEL32.QueryInformationJobObject.restype = ctypes.c_int
+_KERNEL32.QueryInformationJobObject.argtypes = (
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+    ctypes.c_void_p,
+)
+_KERNEL32.AssignProcessToJobObject.restype = ctypes.c_int
+_KERNEL32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+_KERNEL32.OpenProcess.restype = ctypes.c_void_p
+_KERNEL32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+_KERNEL32.CloseHandle.restype = ctypes.c_int
+_KERNEL32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+
+def job_kill_on_close() -> Any:
+    """A Windows job that kills its members when the last handle closes.
+
+    `parent_alive` is polling: it notices the parent is gone within two seconds.
+    This is not polling. The kernel terminates the child the instant the last
+    handle to the job is released, including when the owning process is killed
+    without ever running a line of cleanup - a power loss, a `TerminateProcess`,
+    a bluescreen. That is the case polling cannot cover, because polling requires
+    a live process to do the polling.
+
+    So this is the strong version and `parent_alive` is the fallback. The job is
+    created here and assigned by the daemon, which holds the handle for as long as
+    it wants the child alive; there is no other way to be killed.
+
+    Raises `OSError` rather than returning something inert. A guard that quietly
+    does nothing is worse than no guard, because it would be relied on.
+    """
+    job = _KERNEL32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError("CreateJobObjectW failed; the child could not be protected")
+
+    info = _ExtendedLimit()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = _KERNEL32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(info), ctypes.sizeof(info),
+    )
+    if not ok:
+        _KERNEL32.CloseHandle(job)
+        raise OSError("SetInformationJobObject failed; kill-on-close not armed")
+    return job
+
+
+def job_limit_flags(job: Any) -> int:
+    """Read `LimitFlags` back out of the job.
+
+    Exists because `SetInformationJobObject` accepts a malformed structure
+    without complaining. Without a way to ask what was actually stored, "armed"
+    is a claim rather than an observation - and it was wrong once already.
+    """
+    info = _ExtendedLimit()
+    ok = _KERNEL32.QueryInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(info), ctypes.sizeof(info), None,
+    )
+    if not ok:
+        raise OSError("QueryInformationJobObject failed")
+    return int(info.BasicLimitInformation.LimitFlags)
+
+
+def job_assign(job: Any, pid: int) -> bool:
+    """Put an existing process into the job. Returns whether it worked.
+
+    Failing is reported, never raised: a child that is already running and *not*
+    in the job is still protected by `parent_alive`, so a refusal here degrades to
+    the weaker mechanism instead of taking the child's model away.
+    """
+    PROCESS_SET_QUOTA = 0x0100
+    PROCESS_TERMINATE = 0x0001
+    handle = _KERNEL32.OpenProcess(
+        PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, int(pid)
+    )
+    if not handle:
+        return False
+    try:
+        return bool(_KERNEL32.AssignProcessToJobObject(job, handle))
+    finally:
+        _KERNEL32.CloseHandle(handle)
+
+
+def job_close(job: Any) -> None:
+    """Release the handle. If members are still alive, this kills them.
+
+    Named for what it does rather than for the Win32 call it makes, because the
+    kill is the entire point: closing the job *is* the shutdown, and a reader who
+    has to know that to use it correctly has not been told anything useful.
+    """
+    if job:
+        _KERNEL32.CloseHandle(job)
+
+
+def arm_kill_on_close(daemon: Any, pid: int) -> Any:
+    """Put a just-started child into a job that dies with this daemon.
+
+    A module function taking the daemon rather than a method on it, because the
+    child must *not* import the daemon: that would be a circular import, and the
+    child is a separate process whose whole purpose is to be disposable.
+
+    Returns the handle, or None if the job could not be armed. None is a supported
+    outcome and not an error: the child still watches for its parent, so the
+    protection is thinner rather than absent. What is not supported is pretending
+    it worked, so every failure is audited (D44).
+    """
+    try:
+        job = job_kill_on_close()
+    except OSError as why:
+        daemon._audit(  # noqa: SLF001
+            actor="daemon",
+            channel=CHANNEL_SCHEDULED,
+            tool="brain.job",
+            decision="allow",
+            reason=f"kill-on-close unavailable ({why}); the child will poll for "
+                   f"its parent instead",
+        )
+        return None
+    if not job_assign(job, pid):
+        daemon._audit(  # noqa: SLF001
+            actor="daemon",
+            channel=CHANNEL_SCHEDULED,
+            tool="brain.job",
+            decision="allow",
+            reason=f"could not put pid={pid} in the job; the child will poll for "
+                   f"its parent instead",
+        )
+    return job
 
 
 def resolve_tier(tier: str, model: str | None = None,

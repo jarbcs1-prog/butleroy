@@ -64,7 +64,9 @@ from . import fileops, sysinfo
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
 #: apart in exactly the way that produces a model nobody can load.
+from . import brain_server
 from .brain_server import TIERS as BRAIN_TIERS
+from .brain_server import arm_kill_on_close as _arm_kill_on_close
 from .policy import (
     CHANNEL_PC,
     CHANNEL_SCHEDULED,
@@ -262,6 +264,11 @@ class Daemon:
         # next to the child rather than derived from it, so "the deep tier is
         # loaded" is a fact we can answer without loading a model to find out.
         self._brain_tier: str | None = None
+        # The Windows job the child lives in. Holding this handle is what keeps the
+        # child alive: drop it and the kernel kills the child, whatever state the
+        # daemon is in when that happens. `parent_alive` in the child is the
+        # fallback for when this could not be created.
+        self._brain_job: Any = None
         self._brain_last_used = 0.0
         self._brain_loaded = False
         self._sweeper: threading.Thread | None = None
@@ -1671,6 +1678,8 @@ class Daemon:
             self._brain_last_used = 0.0
             self._brain_tier = None
             self._brain_loaded = False
+            job = self._brain_job
+            self._brain_job = None
         if child is None or child.poll() is not None:
             return
         self._audit(
@@ -1689,6 +1698,11 @@ class Daemon:
             self.arbiter.release(self.BRAIN_HOLDER)
         except Exception:  # noqa: BLE001 - releasing must never block a stop
             pass
+        # Closing the job is the real kill. It comes first so the child does not
+        # depend on kill() succeeding - and it is unconditional, so the one path
+        # that used to leak (kill() raised, or the process was already gone
+        # between the poll and the kill) cannot leak any more.
+        brain_server.job_close(job)
         try:
             child.kill()
         except Exception:  # noqa: BLE001
@@ -1786,6 +1800,7 @@ class Daemon:
             )
             self._brain = child
             self._brain_tier = tier
+            self._brain_job = _arm_kill_on_close(self, child.pid)
             client = ipc.PipeClient(self.brain_pipe, authkey=self.authkey, timeout=120.0)
             self._brain_client = client
 

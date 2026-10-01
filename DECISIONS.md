@@ -1124,7 +1124,7 @@ are looking for.
 
 ---
 
-## D47 - The deep tier does not earn its place, and that is the better outcome
+## D47 - The kernel, not a poll, is what brings the VRAM back
 
 **The strong version of D46 is a Windows job object with `KILL_ON_JOB_CLOSE`, and
 it is armed - not the polling.** Polling needs a live process to poll, so it cannot
@@ -1262,3 +1262,99 @@ root. That is a guess about whether the file exists, not a violation of the root
 rule, and it is answered honestly by a FileNotFoundError rather than by acting
 on the wrong file. Refusing to guess a filename at all would be worse assistance,
 so this is left as it is.
+
+---
+
+## D51 - The assistant must not hear itself, and the fix is to stop listening
+
+While the assistant is speaking, frames arriving from the microphone are drained
+and **discarded, not scored**. No threshold reliably separates the owner's voice
+from a speaker pointed at the same microphone, so there is no threshold that gets
+this right; the answer is to not listen at all while talking.
+
+The tempting alternative is to distinguish by voice, timbre or gain. All of those
+work until the user has the window open, or a second speaker, or turns the system
+volume down, and then the assistant interrupts itself and starts talking over
+itself. A hard mute cannot fail in that way. The pattern came from
+`F:\openchamber-2.0.2`, and it is worth naming why it was adopted rather than
+copied: it is the one piece of that codebase that is simpler than the thing it
+replaces.
+
+Draining rather than blocking is the other half. A blocking read would stall the
+audio callback, and a stalled callback is a dropped buffer, which the driver
+reports as an overflow. Draining costs a loop iteration and loses nothing.
+
+---
+
+## D52 - A microphone is a third distinct reason to be T3
+
+`ToolSpec` now carries `audible`, alongside `destructive` and `external`. It was
+added rather than reusing an existing flag because the three are genuinely
+different questions, and conflating them would have quietly disarmed one of the
+guarantees:
+
+* `destructive` is what quarantine makes **recoverable** - the deleted file is a
+  move, and the previous version is kept.
+* `external` is what D40 constrains to **one host and one component** - no
+  inbound port, one outbound destination.
+* `audible` is neither, and it is still a case where being wrong is
+  **unrecoverable in a way the user cannot undo**. A microphone records a room. No
+  quarantine holds that back and no network rule governs it.
+
+Both the registry's import-time invariant check and `test_no_t3_tool_is_innocuous`
+previously rejected `voice.speak` and `voice.listen` as mis-declarations. **The
+tools were right and the rule was incomplete.** Forcing them to set `external`
+would have made the registry consistent by lying in it, and `external` carries a
+meaning that has nothing to do with a speaker. The invariant check now names
+*which* flag is missing rather than defaulting to printing the wrong one.
+
+---
+
+## D53 - Verify a convention by reading its consumer, never its description
+
+openWakeWord's label convention was backwards in a way that was invisible from
+every angle except the consumer. The script labelled every frame of every
+negative as *positive*, on a comment asserting that "openWakeWord's convention
+marks where speech occurs". What `train.py:464` actually does:
+
+```python
+neg_high_loss = predictions[(y == 0) & (predictions.squeeze() >= 0.001)]
+```
+
+`y == 0` does not mean **silence**. It means **not the wake phrase**. The label is
+the classification, not the presence of speech. So "yo", "archie", "okay
+archie", "hello archie" - every near miss, and the cases that most need to be
+rejected - were being trained as if they *were* the phrase.
+
+The comment defending the wrong reading was confident and specific, which is the
+argument for the rule rather than against it. **A description of a convention is
+evidence; the code that consumes it is proof.** Two further instances of the same
+shape followed in the same script: counting *samples consumed* and treating the
+number as *frames produced*, and validating on the first 40 negatives when those
+same 792 negatives were also in the training set. In all three the failure was a
+quantity derived from a different quantity than the one being counted, or a set
+that was not the set it claimed to be.
+
+---
+
+## D54 - A trained wake word is not measured until a mouth has tested it
+
+The trainer's own verdict - held-out positives, held-out negatives, a hit rate and
+a false-fire rate - is measured on audio it synthesised. That answers *"did the
+network learn anything"* and not *"will this work on this desk"*. Piper is
+cleaner, louder, and carries none of the room.
+
+The distribution that decides usefulness is one mouth in one room with one
+microphone, and there is exactly one sample of it here. So the real measurement is
+a probe the **user** runs, not a test, and it measures four things that fail
+separately: recall on the spoken phrase, false fires on room tone, false fires on
+**ordinary speech** (the hard case - silence is easy, conversation is not), and
+**latency measured from the first frame carrying energy** rather than from the
+start of recording, because the user pressed a key seconds before speaking and
+measuring from record-start reports silence as latency.
+
+Two failure directions need different advice, so the report gives different
+advice: *a wake word that misses you is an inconvenience; one that fires on your
+television trains you to ignore it.* The second is why `voice.watch` refuses
+rather than falling back to an always-open microphone, and why press-to-talk is
+named as the thing that already works.

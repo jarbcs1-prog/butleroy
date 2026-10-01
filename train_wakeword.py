@@ -31,6 +31,7 @@ from __future__ import annotations
 import shutil
 import sys
 import time
+import types
 from pathlib import Path
 
 import numpy as np
@@ -280,12 +281,36 @@ def main() -> int:
             at += len(audio)
         joined = np.concatenate(stream)
 
-        featurizer.feature_buffer_max_len = 4000000
-        consumed = featurizer(joined)
-        made = int(consumed) // FRAME
+        # Fed in one-second blocks, which is the only way this class works.
+        #
+        # `AudioFeatures` is a *streaming* front end with fixed-size history:
+        # `raw_data_buffer` is a `deque(maxlen=sr*10)` and `melspectrogram_buffer`
+        # clips to 970 rows. Each call computes embeddings only for frames it can
+        # still see in those buffers. Handed the whole stream at once, everything
+        # except the final ten seconds is gone before the first embedding is
+        # computed, so the inner loop runs its ~12,600 iterations with an
+        # insufficient window, `x.shape[1] == 76` fails, and nothing is appended.
+        #
+        # Measured, not reasoned about: that version produced 153 features for
+        # 1128 chunks. The streaming path is how it is *meant* to be driven, and
+        # `AudioProcessor` feeds it in small blocks for the same reason.
+        #
+        # 1280-sample remainders are carried across block boundaries internally
+        # (`raw_data_remainder`), so this introduces no seam - which is the same
+        # reason a resampler has to carry its last sample.
+        featurizer.feature_buffer_max_len = 4_000_000
+        before = featurizer.feature_buffer.shape[0]
+        block = 16000
+        for start in range(0, len(joined), block):
+            featurizer(joined[start:start + block])
+        # Counted off the buffer rather than derived from samples consumed. Those
+        # are different quantities, and reading the second as the first is what
+        # turned 153 real features into a claimed 12,600 - a training set ten
+        # times smaller than the label spans had been drawn against.
+        feats = featurizer.feature_buffer[before:]
+        made = feats.shape[0]
         if made <= 0:
             raise SystemExit("the featuriser produced no frames at all")
-        feats = featurizer.feature_buffer[-made:]
 
         # float32 because the Dataset stacks these into a tensor alongside the
         # features, which are float; the bitwise-or needs an integer view, so it is
@@ -327,6 +352,18 @@ def main() -> int:
     cut = int(len(order) * (1 - VAL_FRACTION))
     train_idx, val_idx = order[:cut], order[cut:]
 
+    # Negatives are split the same way, and the two halves are *disjoint*.
+    #
+    # This used to train on all 792 negatives and validate against `neg_chunks[:40]`
+    # - the first 40 of the same 792. So validation was measured on audio the model
+    # had already been fitted on, which flatters the false-fire rate rather than
+    # testing it, and the split also left the validation set almost entirely
+    # positive (40 negatives against a handful of held-out positives: 91%). A
+    # metric measured on the training set is not a weak metric, it is not one.
+    neg_order = rng.permutation(len(neg_chunks))
+    neg_cut = int(len(neg_order) * (1 - VAL_FRACTION))
+    train_neg, val_neg = neg_order[:neg_cut], neg_order[neg_cut:]
+
     print("4. extracting features (this is the slow part)")
     t0 = time.time()
     # Negatives are concatenated into the *same* datasets as the positives.
@@ -335,15 +372,19 @@ def main() -> int:
     # batch (`y == 0`), so a negative set that never enters a batch is audio that
     # was listened to and never learned from.
     train_feats, train_labels = frame_features(
-        [pos_chunks[i] for i in train_idx] + neg_chunks)
+        [pos_chunks[i] for i in train_idx] + [neg_chunks[i] for i in train_neg])
     val_feats, val_labels = frame_features(
-        [pos_chunks[i] for i in val_idx] + neg_chunks[:40])
+        [pos_chunks[i] for i in val_idx] + [neg_chunks[i] for i in val_neg])
+    # Held-out negatives, for the false-fire metric `auto_train` computes. Never
+    # seen in a batch and never fitted on, which is what makes the number a
+    # measurement rather than a recollection.
+    fp_audio = [neg_chunks[i][0] for i in val_neg]
     print(f"   train {train_feats.shape} "
           f"pos={int((train_labels == 1).sum())} "
           f"neg={int((train_labels == 0).sum())}")
     print(f"   val   {val_feats.shape} "
           f"pos={int((val_labels == 1).sum())} "
-          f"neg={int((val_labels == 0).sum())}")
+          f"neg={int((val_labels == 0).sum())}  (disjoint from train)")
     print(f"   {time.time() - t0:.0f}s")
 
     # Both classes must actually be present. A dataset that is 99% one label
@@ -359,6 +400,33 @@ def main() -> int:
 
     print("5. training")
     import torch
+
+    # `openwakeword.train` imports `openwakeword.data` at module level, and that
+    # module pulls audiomentations, librosa, numba, torch_audiomentations,
+    # speechbrain, mutagen and then `acoustics` - a chain of audio DSP packages
+    # installed purely to reach a training loop.
+    #
+    # None of the three names it provides is on this path: the positives are
+    # synthesised here, the augmentation is `vary()`, and the batches are already
+    # featurised in memory. So a stub is substituted - and it *raises* rather than
+    # returning a plausible empty result, because a stub that silently no-ops is
+    # how a script ends up training on nothing and reporting a healthy run. If
+    # anything ever does reach one of these, it fails loudly at the call.
+    _stub = types.ModuleType("openwakeword.data")
+
+    def _unused(name: str):
+        def _raise(*a, **k):
+            raise RuntimeError(
+                f"openwakeword.data.{name} is not available: this script "
+                f"substitutes a stub for it, so anything calling it is a bug in "
+                f"the script rather than a missing package."
+            )
+        return _raise
+
+    for _n in ("generate_adversarial_texts", "augment_clips", "mmap_batch_generator"):
+        setattr(_stub, _n, _unused(_n))
+    sys.modules.setdefault("openwakeword.data", _stub)
+
     from openwakeword.train import Model
 
     def dataset(feats, labels):
@@ -369,8 +437,10 @@ def main() -> int:
         return torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True, drop_last=True)
 
     model = Model(n_classes=1, input_shape=(16, 96), model_type="dnn")
-    # false_positive_val_data wants audio, not features
-    fp_audio = [c[0] for c in neg_chunks[:20]]
+    # `fp_audio` is the held-out negative set built above. It wants audio, not
+    # features, and the one on the next line used to be a slice of the *training*
+    # negatives - so the false-fire rate `auto_train` reports would have been
+    # measured against audio the model was already fitted on.
     model.auto_train(
         dataset(train_feats, train_labels),
         dataset(val_feats, val_labels),

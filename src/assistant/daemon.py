@@ -61,6 +61,7 @@ from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
 from . import fileops, sysinfo
+from . import audio, speech
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
 #: apart in exactly the way that produces a model nobody can load.
@@ -1149,6 +1150,149 @@ class Daemon:
             return raw
         return os.path.join(str(roots[0]), raw)
 
+    # -- voice ---------------------------------------------------------------
+    #
+    # T3 for both, and for a reason quarantine cannot cover. `file.delete` is
+    # T3 because it is destructive, and destructive is *recoverable*: the file
+    # moves to quarantine and the user can put it back. These are T3 because
+    # being wrong is unrecoverable in a way restoring a file is not. Once a
+    # microphone is open the assistant is transcribing, and once it speaks there
+    # is no undo. Neither is externally visible, so neither is `external` either.
+    #
+    # Nothing loads a model here. `voice.status` is the free one and the others
+    # pay on first use, which is recorded rather than hidden - a T3 confirmation
+    # dialog that silently costs a 34 s model load is a dialog the user learns
+    # to approve without reading.
+    def _voice_listen_once(self, device: Any, seconds: int) -> dict[str, Any]:
+        """Listen for one utterance, then transcribe it. The whole of `voice.listen`.
+
+        Calibration happens here, once per call, and its numbers are returned. That
+        is the point: the thresholds used are a measurement of this room, so a user
+        who cannot make it hear has something to read instead of "it just doesn't
+        work". `audio.segment` deliberately does not calibrate itself - doing so
+        would consume the first 1.5 s of every utterance and clip the opening.
+
+        The wav is deleted after transcription. Not tidiness: `voice.listen` is T3
+        precisely because a microphone that records without consent is the danger,
+        and leaving raw audio in the state directory after saying it would not be
+        would undermine the reason it is T3.
+        """
+        try:
+            mic = audio.Microphone(device if device else None)
+        except audio.NoInputDevice as why:
+            raise DaemonError(str(why)) from why
+
+        with mic:
+            cal = audio.calibrate(mic)
+            heard = audio.segment(
+                mic,
+                open_rms=cal.open,
+                release_rms=cal.release,
+                total_s=float(seconds),
+            )
+            opened = {"device": mic.describe()["device"], "rate": mic.describe()["sample_rate"],
+                      "calibration": cal.describe()}
+            if heard is None:
+                # Not an error. Nothing was said within the window, and a silent
+                # microphone produces an empty transcript, not a failure.
+                return {**opened, "heard": None, "text": "",
+                        "note": f"nothing above the open threshold in {seconds}s"}
+
+            # The directory is created here rather than relied upon from
+            # `Utterance.save`. This is the code that chose the path, so it is the
+            # code that should know whether the path is writable - and a
+            # FileNotFoundError from inside a save call reads as a broken save
+            # rather than as a directory that was never made.
+            voice_dir = self.state / "voice"
+            voice_dir.mkdir(parents=True, exist_ok=True)
+            wav = voice_dir / f"listen-{time.time():.3f}.wav"
+            try:
+                heard.save(wav)
+                model = self._transcriber()
+                text = model.transcribe(wav)
+            finally:
+                try:
+                    wav.unlink()
+                except OSError:
+                    pass
+
+        # `Transcriber.transcribe` reports failure by returning a bracketed string,
+        # which is the right choice inside a listener loop (an exception would end
+        # it) and the wrong choice at a boundary. Splitting it here means no caller
+        # has to recognise a magic prefix - and one already did, incorrectly,
+        # treating a perfectly good transcript as an error because it was a string.
+        failed = text.startswith("[transcription failed:")
+        return {
+            **opened,
+            "heard": heard.describe(),
+            "text": "" if failed else text,
+            "error": text if failed else "",
+            # Three outcomes, not two, and all three are reachable in normal use:
+            # nothing was said, something was said but not understood, and
+            # transcription itself broke. Collapsing the last two into `empty`
+            # would make a broken microphone indistinguishable from a quiet room.
+            "empty": (not text.strip()) or failed,
+        }
+
+    def _transcriber(self) -> Any:
+        """The Whisper model, loaded once and kept (D50: voice costs no VRAM)."""
+        if getattr(self, "_voice_model", None) is None:
+            self._voice_model = speech.Transcriber()
+        return self._voice_model
+
+    def _exec_voice_speak(self, args: dict) -> Any:
+        text = str(args.get("text", "")).strip()
+        if not text:
+            raise DaemonError("voice.speak needs non-empty text")
+        # Split on sentence boundaries so the synthesiser's per-sentence cost is
+        # paid on natural units. Piper renders a whole paragraph in one pass
+        # noticeably worse than a sequence of sentences.
+        out = self.state / "voice" / time.strftime("%Y%m%d-%H%M%S")
+        result = speech.synthesise(
+            _split_sentences(text), out, voice=args.get("voice")
+        )
+        if not result.get("ok"):
+            raise DaemonError(str(result.get("error") or "speech failed"))
+        return result
+
+    def _exec_voice_listen(self, args: dict) -> Any:
+        seconds = int(args.get("seconds") or 10)
+        device = args.get("device")
+        return self._voice_listen_once(device, seconds)
+
+    def _exec_voice_status(self, args: dict) -> Any:
+        """What voice can do here, and what it would cost. Loads nothing."""
+        return speech.describe()
+
+    def _preview_voice_speak(self, args: dict) -> dict:
+        text = str(args.get("text", "")).strip()
+        voice = str(args.get("voice") or speech.DEFAULT_VOICE)
+        words = len(text.split())
+        # ~2.6 words/second is measured piper output, not a rule of thumb: the
+        # point is that the user can see how long they will be listening.
+        return {
+            "action": "speak aloud through the speakers",
+            "text": text if len(text) <= 400 else text[:400] + " ...",
+            "characters": len(text),
+            "words": words,
+            "voice": voice,
+            "about_seconds": round(words / 2.6, 1),
+            "reversible": False,
+            "note": "this cannot be taken back - the sound is already in the room",
+        }
+
+    def _preview_voice_listen(self, args: dict) -> dict:
+        seconds = int(args.get("seconds") or 10)
+        device = args.get("device")
+        return {
+            "action": "open the microphone and transcribe one utterance",
+            "device": str(device) if device else "(the system default)",
+            "max_seconds": seconds,
+            "returns": "the words, as text - no audio is stored after transcription",
+            "reversible": False,
+            "note": "listening cannot be taken back once the microphone is open",
+        }
+
     # -- the remaining file tools --------------------------------------------
     #
     # Thin wrappers around `fileops`, which holds the logic. What the wrapper
@@ -2109,16 +2253,38 @@ def _install_tables() -> None:
         "file.create": Daemon._exec_file_create,
         "file.delete": Daemon._exec_file_delete,
         "file.restore": Daemon._exec_file_restore,
+        "voice.speak": Daemon._exec_voice_speak,
+        "voice.listen": Daemon._exec_voice_listen,
+        "voice.status": Daemon._exec_voice_status,
     }
     Daemon._PREVIEWS = {
         # Only destructive tools need a real preview, because only destructive
         # tools are the ones a human is asked to bless. A preview for a T0 read
         # would be theatre.
         "file.delete": Daemon._preview_file_delete,
+        # Audible tools get previews for the same reason destructive ones do:
+        # a T3 dialog with no payload is a dialog the user approves blind.
+        "voice.speak": Daemon._preview_voice_speak,
+        "voice.listen": Daemon._preview_voice_listen,
     }
 
 
 _install_tables()
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split prose into sentences, keeping the punctuation with its sentence.
+
+    Deliberately not a full NLP sentence splitter. The job is to stop piper
+    rendering a paragraph as one long utterance with a flat intonation contour
+    at the end, and a regex on terminal punctuation does that. Anything trying to
+    handle abbreviations ("Dr. Smith", "e.g.") would add a rule whose failure
+    mode is dropping half a sentence, which is worse than a slightly odd pause.
+    """
+    import re
+
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
+    return parts or [text.strip()]
 
 
 def _check_tables() -> None:
@@ -2152,18 +2318,25 @@ def _check_tables() -> None:
     # can never reach a confirmation, because op_tool_call resolves the executor
     # before the CONFIRM branch - so demanding a preview for it would be
     # demanding ceremony for a code path that cannot execute.
-    destructive_without_preview = {
+    # T3 tools that a human must bless, whatever the reason they are T3. The
+    # rule is about the dialog, not about the flag: D32 requires the resolved
+    # payload, and a dialog reading only "approve voice.listen?" is a dialog
+    # with nothing to approve *on*. That was true for destructive tools and it
+    # is just as true for audible ones, so the check asks about the tier rather
+    # than about the reason - two reasons, one requirement.
+    unblessable = {
         spec.name
         for spec in ALL_TOOLS
-        if spec.destructive
+        if spec.tier == Tier.IRREVERSIBLE
+        and (spec.destructive or spec.audible or spec.external)
         and spec.name in Daemon._EXECUTORS
         and spec.name not in Daemon._PREVIEWS
     }
-    if destructive_without_preview:
+    if unblessable:
         raise RuntimeError(
-            "executable destructive tools with no preview builder: "
-            f"{sorted(destructive_without_preview)} - D32 requires the "
-            "confirmation dialog to show the resolved payload, not just the tool name"
+            "executable T3 tools with no preview builder: "
+            f"{sorted(unblessable)} - D32 requires the confirmation dialog to show "
+            f"the resolved payload, not just the tool name"
         )
     dupes = {spec.name for spec in ALL_TOOLS}
     if len(dupes) != len(ALL_TOOLS):

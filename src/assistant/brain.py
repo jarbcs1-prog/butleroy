@@ -60,7 +60,8 @@ from .tools import ALL_TOOLS
 MAX_TIER_FOR_TOOLS = "T3"
 
 
-def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS) -> str:
+def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS,
+                          roots: Sequence[str] = ()) -> str:
     """The prompt a brain turn runs under.
 
     This is not decoration. Measured on this machine with the 4B fast tier:
@@ -103,6 +104,25 @@ def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS) -> str:
         "If the request is ordinary conversation, teaching or explanation, and no "
         "tool is called for, answer in plain prose instead.",
         "",
+    ]
+    if roots:
+        # Without this the model cannot form a usable call at all. Measured with
+        # it absent: asked to read a file it produced a *relative* path, which
+        # resolves against the daemon's working directory rather than the
+        # workspace, and asked to archive a folder it produced
+        # `C:/Users/YourUsername/Documents` - a placeholder straight out of
+        # training data. The gate refused every one of them, which is the system
+        # working exactly as designed, but a refusal is not assistance.
+        lines += [
+            "You may only act inside these approved roots, and you must use "
+            "absolute paths - a bare file name is refused because it means "
+            "something different to every process:",
+            *(f"  {r}" for r in roots),
+            "Anywhere else is refused. If the request is about a path you were "
+            "not given, say so rather than guessing at one.",
+            "",
+        ]
+    lines += [
         "Tools available:",
     ]
     for tool in tools:
@@ -335,9 +355,16 @@ class Brain:
         llm_factory: Callable[[BrainConfig], Any] | None = None,
         system_prompt: str = "",
         tools: Sequence[Any] = ALL_TOOLS,
+        roots: Callable[[], Sequence[str]] | None = None,
     ):
         self.config = config
         self.system_prompt = system_prompt
+        # Approved roots, re-read every turn rather than captured at load. They
+        # can be granted or revoked while the model is resident, and a prompt
+        # that still advertises a revoked root is an assistant inviting itself
+        # to be refused - or, worse, describing somewhere it no longer belongs.
+        self._roots = roots
+        self._prompt_cache: tuple[str, ...] | None = None
         self.tools = tools
         self._acquire = lease
         self._lease: Any = None
@@ -493,10 +520,28 @@ class Brain:
         }
 
     # -------------------------------------------------------------------- prompts
+    def current_prompt(self) -> str:
+        """The system prompt, rebuilt when the approved roots change.
+
+        A static prompt would name a workspace that has since been revoked. The
+        gate would refuse anyway - but a prompt advertising somewhere the user
+        took away is an assistant describing itself inaccurately, which is the
+        failure this project keeps paying for in other places.
+        """
+        if self._roots is None:
+            return self.system_prompt
+        roots = tuple(self._roots() or ())
+        if roots == self._prompt_cache:
+            return self.system_prompt
+        self._prompt_cache = roots
+        self.system_prompt = default_system_prompt(self.tools, roots)
+        return self.system_prompt
+
     def _messages(self, prompt: str) -> list[dict[str, str]]:
         msgs = []
-        if self.system_prompt:
-            msgs.append({"role": "system", "content": self.system_prompt})
+        system = self.current_prompt()
+        if system:
+            msgs.append({"role": "system", "content": system})
         msgs.append({"role": "user", "content": prompt})
         return msgs
 

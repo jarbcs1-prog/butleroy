@@ -60,7 +60,7 @@ from .arbiter import Denial, Priority, VramArbiter, VramUnavailable, format_deni
 from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
-from . import sysinfo
+from . import fileops, sysinfo
 from .policy import (
     CHANNEL_PC,
     CHANNEL_SCHEDULED,
@@ -1069,6 +1069,51 @@ class Daemon:
     def _exec_system_diagnose(self, args: dict) -> Any:
         return sysinfo.diagnose(check_event_log=bool(args.get("event_log", True)))
 
+    # -- the remaining file tools ----------------------------------------------
+    #
+    # Thin wrappers around `fileops`, which holds the logic. What the wrapper
+    # adds is the one thing `fileops` cannot reach: `self.quarantine`, so that an
+    # overwrite is kept by the same mechanism that makes a delete reversible
+    # (D33). Everything else is a rename of one line.
+    #
+    # Every one of these is bounded by `fileops` on files scanned, bytes read,
+    # entries copied, matches returned or bytes archived. An unbounded operation
+    # on a user's own machine is a denial of service against the user.
+
+    def _exec_file_metadata(self, args: dict) -> Any:
+        return fileops.metadata(str(args["path"]))
+
+    def _exec_file_preview(self, args: dict) -> Any:
+        return fileops.preview(str(args["path"]),
+                               int(args.get("max_bytes", fileops.PREVIEW_MAX_BYTES)))
+
+    def _exec_file_search(self, args: dict) -> Any:
+        return fileops.search(str(args["path"]), str(args["query"]),
+                              int(args.get("max_bytes", fileops.SEARCH_MAX_BYTES)))
+
+    def _exec_file_edit(self, args: dict) -> Any:
+        return fileops.edit(str(args["path"]), str(args.get("content", "")),
+                            backup_dir=self.quarantine)
+
+    def _exec_file_copy(self, args: dict) -> Any:
+        return fileops.copy(str(args["path"]), str(args["destination"]))
+
+    def _exec_file_move(self, args: dict) -> Any:
+        return fileops.move(str(args["path"]), str(args["destination"]))
+
+    def _exec_file_archive(self, args: dict) -> Any:
+        return fileops.archive(str(args["path"]), str(args["destination"]))
+
+    def _exec_file_bulk_rename(self, args: dict) -> Any:
+        # Defaults to a dry run *here*, at the executor, rather than only in the
+        # registry description - so a caller that omits the argument gets the safe
+        # behaviour rather than whatever the schema happened to say.
+        dry = args.get("dry_run")
+        return fileops.bulk_rename(
+            str(args["path"]), str(args["pattern"]), str(args.get("replacement", "")),
+            dry_run=True if dry is None else bool(dry),
+        )
+
     def _exec_file_list(self, args: dict) -> Any:
         target = Path(args["path"])
         if not target.is_dir():
@@ -1293,6 +1338,17 @@ class Daemon:
         except NotPermitted as exc:
             raise Refused(str(exc)) from exc
         return ws
+
+    def op_workspace_roots(self, args: dict) -> Any:
+        """The approved roots, as data.
+
+        Separate from `workspace_list`, which is formatted for a person to read.
+        A caller that has to parse a human-readable string to learn where it may
+        work is a caller one wording change away from silently believing the
+        wrong thing - and the brain child needs this every turn, to tell the
+        model where it is allowed to act.
+        """
+        return {"roots": [str(r) for r in self.manifests.roots()]}
 
     def op_workspace_covers(self, args: dict) -> Any:
         return self.manifests.covers(str(args["path"]))
@@ -1909,6 +1965,14 @@ def _install_tables() -> None:
         "system.event_log": Daemon._exec_system_event_log,
         "system.diagnose": Daemon._exec_system_diagnose,
         "file.list": Daemon._exec_file_list,
+        "file.metadata": Daemon._exec_file_metadata,
+        "file.preview": Daemon._exec_file_preview,
+        "file.search": Daemon._exec_file_search,
+        "file.edit": Daemon._exec_file_edit,
+        "file.copy": Daemon._exec_file_copy,
+        "file.move": Daemon._exec_file_move,
+        "file.archive": Daemon._exec_file_archive,
+        "file.bulk_rename": Daemon._exec_file_bulk_rename,
         "file.read": Daemon._exec_file_read,
         "file.create": Daemon._exec_file_create,
         "file.delete": Daemon._exec_file_delete,

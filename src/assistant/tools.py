@@ -71,7 +71,12 @@ FILE_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("file.preview", Tier.READ, "Render a document/image to text", parameters=dict(_PATH)),
     ToolSpec("file.create", Tier.REVERSIBLE_WRITE, "Create a new file",
              parameters={"path": {"type": "str"}, "content": {"type": "str"}}),
-    ToolSpec("file.edit", Tier.REVERSIBLE_WRITE, "Edit a file under version control",
+    # T1 is only honest for this because the executor keeps the previous version:
+    # overwriting a file that is not in a git repository is otherwise
+    # irreversible, and describing it as "under version control" made an
+    # irreversible act look like a reversible one on most of this machine.
+    ToolSpec("file.edit", Tier.REVERSIBLE_WRITE,
+             "Replace a file's contents; the previous version is kept",
              parameters={"path": {"type": "str"}, "content": {"type": "str"}}),
     ToolSpec("file.write_notes", Tier.REVERSIBLE_WRITE, "Write to the Obsidian Assistant/ folder",
              parameters={"subdir": {"type": "str"}, "title": {"type": "str"},
@@ -84,7 +89,8 @@ FILE_TOOLS: tuple[ToolSpec, ...] = (
              parameters={"path": {"type": "str"}, "destination": {"type": "str"}}),
     ToolSpec("file.bulk_rename", Tier.CONSEQUENTIAL, "Rename many files at once",
              parameters={"path": {"type": "str"}, "pattern": {"type": "str"},
-                         "replacement": {"type": "str"}}),
+                         "replacement": {"type": "str"},
+                         "dry_run": {"type": "bool", "required": False}}),
     ToolSpec("file.delete", Tier.IRREVERSIBLE, "Delete files", destructive=True,
              parameters=dict(_PATH)),
     ToolSpec("file.empty_recycle_bin", Tier.IRREVERSIBLE, "Empty the recycle bin", destructive=True,

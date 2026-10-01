@@ -29,7 +29,9 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
+
+from .tools import ALL_TOOLS
 
 from . import ipc
 from .arbiter import as_denial, format_denial
@@ -86,6 +88,12 @@ class LeaseClient:
                  need_bytes: int, priority: str = "FAST_TIER",
                  timeout: float = LEASE_TIMEOUT_S):
         self._client = client
+        # Public, because this child also needs to ask the daemon other
+        # questions - currently "which workspaces am I allowed to act in?".
+        # Keeping it private meant the roots reader raised AttributeError on
+        # every call, silently answered "no approved roots", and the model was
+        # left guessing paths with nothing in its prompt to correct it by.
+        self.client = client
         self.holder = holder
         self.need_bytes = need_bytes
         self.priority = priority
@@ -174,6 +182,46 @@ def _handler_factory(brain_box: dict[str, Any], lease: LeaseClient):
     return handle
 
 
+def _roots_reader(lease: LeaseClient) -> Callable[[], tuple[str, ...]]:
+    """Ask the daemon which roots are approved, every turn.
+
+    From the child, not from a copy passed in at spawn: the daemon is the only
+    thing that knows the current set, and a child given a list at startup would
+    keep advertising a workspace the user has since revoked.
+
+    A failure answers with no roots rather than with a stale list. That means the
+    prompt says nothing is approved, and every call is refused - which is the
+    right way round: too little information produces refusals, too much produces
+    access.
+    """
+    state: dict[str, Any] = {"cache": None, "at": 0.0}
+    TTL = 5.0
+
+    def read() -> tuple[str, ...]:
+        now = time.monotonic()
+        if state["cache"] is not None and now - state["at"] < TTL:
+            return state["cache"]
+        try:
+            # The daemon's envelope, unwrapped by hand. `PipeClient.call`
+            # returns whatever the handler returned, and the handler is
+            # `Daemon.handle`, which answers `{"ok": ..., "result": ...}` - so
+            # unlike a failing call this one does not raise, it comes back
+            # wrapped. Assuming otherwise silently yielded no roots, and the
+            # model was left inventing paths with nothing in its prompt to
+            # correct it by.
+            envelope = lease.client.call("workspace_roots") or {}
+            payload = envelope.get("result", envelope)
+            roots = tuple(sorted(str(r) for r in (payload.get("roots") or [])
+                                 if r))
+        except Exception:
+            roots = ()
+        state["cache"] = roots
+        state["at"] = now
+        return roots
+
+    return read
+
+
 def _load(brain_box: dict[str, Any], lease: LeaseClient) -> dict:
     existing = brain_box.get("brain")
     if existing is not None:
@@ -192,7 +240,16 @@ def _load(brain_box: dict[str, Any], lease: LeaseClient) -> dict:
         # "answer" while never having been introduced to a tool, and then
         # narrates the call instead of making it -- D34's failure mode, reached
         # by a different road.
-        brain = Brain(cfg, lease=lease, system_prompt=default_system_prompt())
+        #
+        # It also has to name the approved roots. Measured without that: asked to
+        # read a file it produced a *relative* path, and asked to archive a folder
+        # it produced `C:/Users/YourUsername/Documents` -- a placeholder from
+        # training data. The gate refused both, which is correct, but a refusal is
+        # not assistance.
+        roots = _roots_reader(lease)
+        brain = Brain(cfg, lease=lease,
+                      system_prompt=default_system_prompt(ALL_TOOLS, roots()),
+                      roots=roots)
         status = brain.load()
     except BrainError as exc:
         return {"loaded": False, "error": f"{type(exc).__name__}: {exc}"}

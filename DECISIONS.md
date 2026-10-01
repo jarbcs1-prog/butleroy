@@ -988,6 +988,58 @@ Two implementation notes that are load-bearing rather than incidental:
 
 ---
 
+## D50 - The GPU promotion path for speech is not built, because it is not needed
+
+D18 planned it: `faster-whisper` on CPU by default, promoted to GPU while
+listening. The plan is withdrawn.
+
+Measured on this machine, `small.en`, CPU, int8, transcribing three sentences that
+piper synthesised so the ground truth is exactly what was spoken:
+
+    audio 5.41s -> wall 4.16s     real-time factor 1.30     WER 0.000
+    0.27 GiB resident, 1.3 s to load warm
+
+A real-time factor of 1.30 means the transcript is ready **before the user has
+finished speaking**. Against a 7.0 GiB ceiling that is the trade this project
+wanted and did not have to make: zero VRAM instead of several gigabytes, and not
+measurably slower to a person.
+
+**A planned feature whose premise no longer holds is a liability with a test suite
+attached.** Building the promotion path because it was written down would have
+meant an `onnxruntime-gpu` install competing with `llama-cpp-python` for the
+card, a second set of failure modes, and code whose only justification was a
+measurement now contradicting it. None of that is free.
+
+What D18 got right is kept: **voice costs no VRAM at all.** The whole of the
+voice path - wake word, transcription, synthesis - is CPU. VRAM belongs to the
+brain, and only to the brain.
+
+**Ground truth comes from our own text-to-speech.** Piper renders a sentence we
+chose, whisper transcribes it, and the words we started from are the answer key.
+A benchmark transcribed on someone else's machine, or a latency figure with no
+input to time, answers a different question than the one being asked.
+
+Two implementation facts worth keeping:
+
+* **Cold load is the cost, not inference.** The 34-150 s figures for the first run
+  of each whisper model were downloads, but even warm the first load is over a
+  second - enough to make the assistant feel broken rather than slow. So the model
+  is built when voice is enabled and kept. 0.27 GiB is a price worth paying up
+  front; a two second stall on the first spoken request is not.
+* **Voice nesting inside the piper repo is not uniform.** `lessac` keeps the file
+  directly in `medium/`, others nest it under the voice name. The first version
+  assumed a uniform layout, got a confident 404, and the tempting "fix" of trying
+  several layouts is how you silently download the 500 MB voice instead of the
+  63 MB one. The path is stated per voice and an unknown name is refused.
+
+Also fixed along the way, and worth recording because both were silent:
+`GetCurrentProcess` lives in kernel32, not psapi (loud - an `AttributeError` at
+import), and the same missing-signature bug that had made a memory probe report
+`0.00 GiB` for a loaded model applies here. **A measurement that reports an
+identical number across cases that obviously differ is broken, not small.**
+
+---
+
 ## D45 - Two tiers means one tier at a time, and the swap is the interesting part
 
 The deep tier is 5.96 GiB of file. The fast tier occupies 4.92 GiB. A 12 GiB card

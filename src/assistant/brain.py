@@ -45,7 +45,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
-from .grammar import Grammar, GrammarError, build_decision_grammar, build_tool_grammar
+from .grammar import (
+    Grammar,
+    GrammarError,
+    build_named_decision_grammar,
+    build_tool_call_grammar,
+    build_tool_grammar,
+)
 from .tools import ALL_TOOLS
 
 # The tier ceiling a brain turn may be *reasoned about*. It is a reminder in
@@ -166,11 +172,16 @@ class Decision:
     which is the point. If the model somehow returns something else we treat it as
     "answer", because guessing "tool" and executing nothing is worse than
     answering when it should have acted.
+
+    `tool` is the name pass 1 settled on, and it is what makes pass 2 exact. Left
+    empty only if pass 1 failed to name one, in which case pass 2 falls back to
+    the flat grammar and `parse_action` validates the result instead.
     """
 
     kind: str
     raw: str
     latency_s: float
+    tool: str = ""
 
     @property
     def is_tool(self) -> bool:
@@ -210,13 +221,35 @@ class Action:
         return out
 
 
-def parse_action(content: str) -> tuple[str | None, dict[str, Any], str | None]:
-    """Parse the JSON body a grammar-constrained call arrives in.
+def parse_action(
+    content: str, *, tools: Sequence[Any] | None = None
+) -> tuple[str | None, dict[str, Any], str | None]:
+    """Parse and VALIDATE the JSON body a grammar-constrained call arrives in.
 
     D34 recorded the detail that matters here: under grammar constraint the call
     arrives in `content`, NOT in llama-cpp's `tool_calls` field. Anything written
     against native `tool_calls` sees nothing at all and concludes the model
     failed. This function is the only place that knows the shape.
+
+    The validation is not decoration, and it was added because a claim made
+    about it turned out to be false. The grammar's `args` rule is a flat
+    alternation of every tool's argument shape (a forward CFG cannot match the
+    name `toolname` just emitted), so the model is free to pair any tool with any
+    shape. Measured: asked to run a health check, it answered
+
+        {"tool": "system.diagnose",
+         "arguments": {"content": "...", "path": ""}}
+
+    which is the `file.create` shape. Nothing complained, the executor ignored
+    both keys, and the call "succeeded" while doing something other than what the
+    model said. A silently wrong call is worse than a refused one.
+
+    So the registry is the authority, which is the check the grammar could never
+    be. An unknown tool, an argument the tool does not take, a missing required
+    one, or a value of the wrong type is an error here - reported, not executed.
+
+    `tools=None` skips validation, which is only for a caller that has no
+    registry at all. The default is the live one.
     """
     text = (content or "").strip()
     if not text:
@@ -240,9 +273,49 @@ def parse_action(content: str) -> tuple[str | None, dict[str, Any], str | None]:
         return None, {}, "no 'tool' field"
     raw_args = body.get("arguments", body.get("parameters"))
     if raw_args is None:
-        return tool, {}, None
+        raw_args = {}
     if not isinstance(raw_args, dict):
         return tool, {}, "'arguments' is not an object"
+
+    if tools is None:
+        return tool, raw_args, None
+
+    spec = next((t for t in tools if getattr(t, "name", None) == tool), None)
+    if spec is None:
+        return None, {}, (
+            f"{tool!r} is not a registered tool, so it will not be run. "
+            "It is either invented or misspelled."
+        )
+    schema = getattr(spec, "parameters", None)
+    if schema is None:
+        # Undescribed: excluded from the grammar precisely because nobody knows
+        # its arguments. Running it would mean guessing.
+        return None, {}, (
+            f"{tool} has no described arguments, so no call can be checked "
+            "against it; it is not callable yet"
+        )
+
+    unknown = sorted(set(raw_args) - set(schema))
+    if unknown:
+        known = ", ".join(sorted(schema)) or "none"
+        return None, {}, (
+            f"{tool} does not take {', '.join(unknown)}. It takes: {known}. "
+            "The model paired this tool with another tool's argument shape."
+        )
+    missing = sorted(
+        k for k, v in schema.items() if v.get("required", True) and k not in raw_args
+    )
+    if missing:
+        return None, {}, f"{tool} is missing required argument(s): {', '.join(missing)}"
+
+    for key, value in raw_args.items():
+        want = str(schema[key].get("type", "str")).lower()
+        if want in ("int", "integer") and not isinstance(value, int):
+            return None, {}, f"{tool}.{key} must be a whole number, got {type(value).__name__}"
+        if want in ("str", "string") and not isinstance(value, str):
+            return None, {}, f"{tool}.{key} must be text, got {type(value).__name__}"
+        if want in ("bool", "boolean") and not isinstance(value, bool):
+            return None, {}, f"{tool}.{key} must be true or false"
     return tool, raw_args, None
 
 
@@ -272,6 +345,9 @@ class Brain:
         self._llm_factory = llm_factory or _make_llama
         self._grammar: Any = None
         self._decision_grammar: Any = None
+        # Compiled per-tool grammars, keyed by name. Built on demand and reused,
+        # because a turn is a thing the user is waiting on.
+        self._per_tool: dict[str, Any] = {}
         self._tool_grammar: Grammar | None = None
         self.loaded_at: float | None = None
         self.last_used: float | None = None
@@ -359,7 +435,13 @@ class Brain:
         return LlamaGrammar.from_string(gbnf, verbose=False)
 
     def _decision_gbnf(self) -> str:
-        return build_decision_grammar().gbnf
+        """Pass 1 decides the tool AND names it, so pass 2 has one shape to pick.
+
+        The flat tool-call grammar accepts every argument shape at once, which
+        measured as the model pairing `system.diagnose` with the `file.create`
+        arguments. Naming the tool first is what lets pass 2 be exact.
+        """
+        return build_named_decision_grammar(self.tools).gbnf
 
     def status(self) -> dict[str, Any]:
         return {
@@ -387,6 +469,7 @@ class Brain:
         self._llm = None
         self._grammar = None
         self._decision_grammar = None
+        self._per_tool = {}
         self._tool_grammar = None
         self._lease = None
         self.loaded_at = None
@@ -437,11 +520,17 @@ class Brain:
         """
         if self._llm is None:
             raise BrainNotLoaded("no model loaded - call load() first")
-        raw, latency = self._generate(prompt, self._decision_grammar, max_tokens=8)
-        token = (raw or "").strip().strip('"').lower()
-        kind = "tool" if token.startswith("tool") else "answer"
+        raw, latency = self._generate(prompt, self._decision_grammar, max_tokens=48)
+        token = (raw or "").strip().strip('"').strip()
+        kind = "tool" if token.lower().startswith("tool") else "answer"
+        name = ""
+        if kind == "tool":
+            # "tool:<name>" - the name pass 2 will be constrained to.
+            name = token.partition(":")[2].strip().strip('"').strip()
         self.last_used = time.time()
-        return Decision(kind=kind, raw=raw or "", latency_s=latency)
+        decision = Decision(kind=kind, raw=raw or "", latency_s=latency)
+        decision.tool = name
+        return decision
 
     def act(self, prompt: str, decision: Decision) -> Action:
         """Pass 2. Either a constrained tool call, or prose."""
@@ -449,8 +538,26 @@ class Brain:
             raise BrainNotLoaded("no model loaded - call load() first")
         t0 = time.time()
         if decision.is_tool:
-            raw, _ = self._generate(prompt, self._grammar, self.config.max_tokens)
-            tool, args, err = parse_action(raw)
+            grammar = self._grammar
+            name = getattr(decision, "tool", "")
+            if name:
+                # Exactly this tool's shape, so the model cannot pair the name
+                # with another tool's arguments. Falls back to the flat grammar
+                # only if pass 1 named nothing.
+                compiled = self._per_tool.get(name)
+                if compiled is None:
+                    try:
+                        compiled = self._make(
+                            build_tool_call_grammar(name, self.tools).gbnf
+                        )
+                    except GrammarError:
+                        compiled = self._grammar
+                    # Cached: compiling a grammar is not free, and a turn is a
+                    # thing the user is waiting on.
+                    self._per_tool[name] = compiled
+                grammar = compiled
+            raw, _ = self._generate(prompt, grammar, self.config.max_tokens)
+            tool, args, err = parse_action(raw, tools=self.tools)
             self.last_used = time.time()
             self.turns_served += 1
             return Action(

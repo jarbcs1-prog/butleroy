@@ -378,13 +378,41 @@ the tool surface is deliberately still missing while the *depth* of the one real
 1. **Telegram bridge** — token already in `state/telegram.json`, allowlist `[199251286]`. Long-poll
    only, no inbound port, `telegram.send` stays T3. This is the last piece of the "24/7, reachable by
    voice / PC / Telegram" requirement.
-2. **Executors for the rest of the registered tools**, in the order the user will actually feel the
-   absence: `system.*` first (a knowledge-of-the-system assistant needs to read the machine), then the
-   file tools beyond the five that exist.
+2. **The file tools beyond the five that exist** — copy, move, archive, edit,
+   search, bulk_rename. The `system.*` tools are done; the file surface is the
+   next thing the user will feel the absence of when the assistant is asked to
+   *do* something rather than *report*.
 3. **Candidates 2 and 3** — the 9B deep tier and the Gemma-4 E4B wildcard. The 9B must evict the fast
    tier; the arbiter already implements that (D22).
 4. **Phase 5 voice** — `openWakeWord` / Silero for the offline wake word (D7), `faster-whisper` in CPU
    RAM promoted to GPU only while listening (D18), Piper for output.
+
+### The machine can now be read (D40–D44)
+
+Eight `system.*` executors, all T0 reads, all delegating to `assistant.sysinfo`:
+`system.info`, `processes`, `gpu_state`, `disk_usage`, `package_list`,
+`service_status`, `event_log`, `diagnose`. Measured end to end — question in plain
+English, model picks the tool and its arguments, gate authorises, real data back:
+
+```
+Q: how much VRAM am I using right now     -> NVIDIA GeForce RTX 3060: 6.26 GiB used of 12.0, 34.0% util, 57.0 C
+Q: check whether this machine is healthy  -> verdict=ok complete=True checked=[memory, disk, gpu, event_log]
+Q: is my disk almost full                 -> C: 255.6 GiB free of 930.4 (72.5% used) ... E: 34.1 GiB free
+Q: how long has the machine been up       -> AMD Ryzen 5 5600G, 6 cores, up 18h, load 3.1%, RAM 38% used
+audit chain verifies: True
+brain.load=allow, brain.turn:system.gpu_state=allow, system.gpu_state=allow, ...
+```
+
+Getting there found four more instances of D43 — generator output that is legal
+in the generator's own language and unusable by its consumer — including a
+`bool` emitted as bare `true` (a rule reference, which segfaults the sampler), a
+leading comma on all-optional tools, and an unbounded integer that let the model
+spend a whole token budget on a 500-digit `limit`. The two that mattered most were
+structural: `parse_action` did **not** validate arguments despite a comment
+saying it did, and the flat `args` alternation let the model pair `system.diagnose`
+with the `file.create` arguments. Fixed by validating against the registry, and by
+settling the tool name in pass 1 so pass 2 has exactly one shape in scope (D42).
+2 of 5 questions produced a call before; 5 of 5 after.
 
 **One measurement task discharged, one still owed.** D28 is **satisfied** for speed: the user shut
 down `Wan2GP`, the machine was verified quiet first (load 4–10 %, the lingering Wan2GP python process

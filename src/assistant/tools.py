@@ -36,10 +36,14 @@ SYSTEM_TOOLS: tuple[ToolSpec, ...] = (
              parameters={"name": {"type": "str", "required": False}}),
     ToolSpec("system.disk_usage", Tier.READ, "Free space per volume", parameters={}),
     ToolSpec("system.event_log", Tier.READ, "Recent Windows event log entries",
-             parameters={"hours": {"type": "int", "required": False}}),
+             parameters={"hours": {"type": "int", "required": False},
+                         "limit": {"type": "int", "required": False}}),
     ToolSpec("system.gpu_state", Tier.READ, "nvidia-smi VRAM/utilisation", parameters={}),
-    ToolSpec("system.package_list", Tier.READ, "Installed software inventory", parameters={}),
-    ToolSpec("system.diagnose", Tier.READ, "Rule-based health diagnosis", parameters={}),
+    ToolSpec("system.package_list", Tier.READ, "Installed software inventory",
+             parameters={"query": {"type": "str", "required": False},
+                         "limit": {"type": "int", "required": False}}),
+    ToolSpec("system.diagnose", Tier.READ, "Rule-based health diagnosis",
+             parameters={"event_log": {"type": "bool", "required": False}}),
 )
 
 # --------------------------------------------------------------------------

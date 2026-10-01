@@ -60,6 +60,7 @@ from .arbiter import Denial, Priority, VramArbiter, VramUnavailable, format_deni
 from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
+from . import sysinfo
 from .policy import (
     CHANNEL_PC,
     CHANNEL_SCHEDULED,
@@ -1029,6 +1030,45 @@ class Daemon:
     # Every other tool stays in the registry, gated, and unimplemented, so the
     # gap is visible in `status` rather than discovered at the moment someone
     # needed it.
+    # -- the system probes -------------------------------------------------
+    #
+    # Every one of these is a T0 read and every one is delegated to
+    # `sysinfo`, which is a module of its own because eight probes is too much
+    # for this file and because they are worth testing without a Daemon.
+    #
+    # They are thin on purpose. The measurement, the parsing and the honest
+    # error handling all live in `sysinfo`; a wrapper that added logic here
+    # would be a second place for it to be wrong. What the wrapper does add is
+    # the one thing `sysinfo` cannot: an exception becomes a refusal rather than
+    # a traceback, because a probe that raises is a failed tool call and a probe
+    # that lies is a failed assistant.
+
+    def _exec_system_info(self, args: dict) -> Any:
+        return sysinfo.system_info()
+
+    def _exec_system_processes(self, args: dict) -> Any:
+        return sysinfo.processes(int(args.get("limit", 25)))
+
+    def _exec_system_gpu_state(self, args: dict) -> Any:
+        return sysinfo.gpu_state()
+
+    def _exec_system_disk_usage(self, args: dict) -> Any:
+        return sysinfo.disk_usage()
+
+    def _exec_system_package_list(self, args: dict) -> Any:
+        return sysinfo.package_list(str(args.get("query", "")),
+                                    int(args.get("limit", 200)))
+
+    def _exec_system_service_status(self, args: dict) -> Any:
+        return sysinfo.service_status(str(args.get("name", "")))
+
+    def _exec_system_event_log(self, args: dict) -> Any:
+        return sysinfo.event_log(int(args.get("hours", 24)),
+                                 int(args.get("limit", 40)))
+
+    def _exec_system_diagnose(self, args: dict) -> Any:
+        return sysinfo.diagnose(check_event_log=bool(args.get("event_log", True)))
+
     def _exec_file_list(self, args: dict) -> Any:
         target = Path(args["path"])
         if not target.is_dir():
@@ -1860,6 +1900,14 @@ def _install_tables() -> None:
             ops[name[3:]] = getattr(Daemon, name)
     Daemon._OPS = ops
     Daemon._EXECUTORS = {
+        "system.info": Daemon._exec_system_info,
+        "system.processes": Daemon._exec_system_processes,
+        "system.gpu_state": Daemon._exec_system_gpu_state,
+        "system.disk_usage": Daemon._exec_system_disk_usage,
+        "system.package_list": Daemon._exec_system_package_list,
+        "system.service_status": Daemon._exec_system_service_status,
+        "system.event_log": Daemon._exec_system_event_log,
+        "system.diagnose": Daemon._exec_system_diagnose,
         "file.list": Daemon._exec_file_list,
         "file.read": Daemon._exec_file_read,
         "file.create": Daemon._exec_file_create,

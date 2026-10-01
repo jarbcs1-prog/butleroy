@@ -20,6 +20,7 @@ shape of the text, which is what actually went wrong both times.
 """
 
 import json
+import re
 
 import pytest
 
@@ -204,6 +205,15 @@ def _walk(text: str, i: int, classes: dict[str, str],
             out.append(unescape_gbnf(literal))
             i = j + 1
             continue
+        if ch == "|":
+            # An alternation: take the first branch and stop. The renderer
+            # produces one legal document, it does not enumerate the language,
+            # so skipping the rest is correct rather than convenient - and
+            # without this a `( ... | ... )` rule renders as both branches
+            # concatenated, which is not valid JSON and would make every
+            # boolean-argument tool untestable.
+            end = text.find(")", i)
+            return "".join(out), len(text) if end == -1 else end
         if ch == "?" and in_group:
             # The group is written `( ... )?`, so the `?` is what closes it.
             # Anything past it belongs to the enclosing rule and must not be
@@ -248,8 +258,15 @@ def test_a_generated_call_is_valid_json_once_the_grammars_quotes_are_removed():
     )
     rule = [ln for ln in g.gbnf.splitlines() if ln.startswith("args-t-mixed ::=")][0]
     body = rule.split("::=", 1)[1]
-    # Per-type stand-ins: a string arrives quoted, a number bare.
-    classes = {'[^"\\\\]': "C:/x", "[0-9]": "200"}
+    # Stand-ins keyed on the class *without* its quantifier, taken from the
+    # registry rather than written out here. Hardcoding the spelling meant this
+    # test broke - loudly, which is better than silently - every time the string
+    # class was tightened to forbid control characters.
+    # The str rule is `quote class quote`, so the class is the middle third.
+    classes = {
+        G._TYPE_RULES["str"].split(" ")[1].rstrip("*?+"): "C:/x",
+        "[0-9]": "200",
+    }
     parsed = json.loads(_render(body, classes))
     assert parsed == {"path": "C:/x", "max_bytes": 200}, _render(body, classes)
 
@@ -259,6 +276,121 @@ def test_a_generated_call_is_valid_json_once_the_grammars_quotes_are_removed():
     bare = G.build_tool_grammar([spec("t.bare", {})])
     bare_rule = [ln for ln in bare.gbnf.splitlines() if ln.startswith("args-")][0]
     assert json.loads(_render(bare_rule.split("::=", 1)[1], classes)) == {}
+
+
+def test_a_boolean_argument_is_quoted_and_renders_as_valid_json():
+    """Caught a real crash, on the first tool with a boolean in it.
+
+    In GBNF a bare `true` is a *rule reference*, not a literal. The grammar
+    emitted `(true|false)`, llama.cpp printed `Undefined rule identifier 'true'`
+    to stderr, returned a perfectly good object anyway, and the child process
+    died with an access violation the first time it sampled a tool call.
+
+    It survived review because the first grammar module carried a `_NON_RULES`
+    exemption listing `true` and `false` - a check weakened to agree with the
+    broken output. So this asserts both halves: the literals are quoted, and the
+    rendered text is a JSON document.
+    """
+    g = G.build_tool_grammar([spec("t.flag", {"on": {"type": "bool"}})])
+    assert '("true"|"false")' in g.gbnf, "boolean literals must be quoted"
+    assert "(true|false)" not in g.gbnf, "bare true/false are rule references"
+
+    rule = [ln for ln in g.gbnf.splitlines() if ln.startswith("args-t-flag ::=")][0]
+    rendered = _render(rule.split("::=", 1)[1], {'[^"\\\\]': "x", "[0-9]": "1"})
+    assert json.loads(rendered) == {"on": True}, rendered
+
+
+def test_no_bare_identifier_in_the_generated_grammar_except_rule_names():
+    """The general form of the boolean bug.
+
+    Every bare word in a rule body must either be a rule this grammar defines or
+    the `ws` reference. Anything else is a reference to nothing, and llama.cpp
+    reports it to stderr and then segfaults at the first sampled token - so the
+    check has to be on the text, and it must not have an exemption list.
+    """
+    g = G.build_tool_grammar(ALL_TOOLS)
+    defined = set(re.findall(r"^([a-zA-Z][a-zA-Z0-9-]*) ::=", g.gbnf, re.M))
+    for line in g.gbnf.splitlines():
+        body = line.split("#", 1)[0]
+        if "::=" not in body:
+            continue
+        body = body.split("::=", 1)[1]
+        # strip string literals, then character classes, before reading words
+        stripped = re.sub(r'"(?:[^"\\]|\\.)*"', " ", body)
+        stripped = re.sub(r"\[[^\]]*\]", " ", stripped)
+        for word in re.findall(r"[a-zA-Z_][a-zA-Z0-9_-]*", stripped):
+            assert word in defined, (
+                f"line {line!r} references {word!r}, which no rule defines. "
+                "In GBNF a bare word is a rule reference; a literal needs quotes."
+            )
+
+
+def test_every_tool_in_the_registry_renders_as_valid_json():
+    """The check that was missing, and its absence is why a bug lived for a day.
+
+    Every earlier render test built one hand-picked tool - one with a required
+    argument. This walks the whole live registry, so a shape nobody thought to
+    test is tested anyway.
+
+    It immediately caught a tool whose arguments are ALL optional: the generated
+    optional group led with a comma, so taking it emitted
+
+        {"tool": "system.processes", "arguments": { ,"limit": 100}}
+
+    Five of the twenty-three tools were affected, and the grammar looked
+    perfectly correct.
+    """
+    g = G.build_tool_grammar(ALL_TOOLS)
+    classes = {
+        G._TYPE_RULES["str"].split(" ")[1].rstrip("*?+"): "C:/x",
+        "[0-9]": "9",
+    }
+    for tool in g.tools:
+        rule = [
+            ln for ln in g.gbnf.splitlines()
+            if ln.startswith(G._rule_name("args", tool) + " ::=")
+        ]
+        assert rule, f"no argument rule for {tool}"
+        rendered = _render(rule[0].split("::=", 1)[1], classes)
+        try:
+            parsed = json.loads(rendered)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"{tool} renders as invalid JSON: {rendered!r} ({exc})"
+            )
+        assert isinstance(parsed, dict), tool
+
+
+def test_an_all_optional_tool_emits_no_leading_comma():
+    """The specific regression, named so it is greppable.
+
+    A tool with only optional arguments must render as `{}` or `{"k": v}` - never
+    as `{ ,"k": v}`.
+    """
+    g = G.build_tool_grammar([spec("t.opt", {"limit": {"type": "int",
+                                                      "required": False}})])
+    classes = {"[0-9]": "9"}
+    rule = [ln for ln in g.gbnf.splitlines() if ln.startswith("args-t-opt ::=")][0]
+    rendered = _render(rule.split("::=", 1)[1], classes)
+    assert not rendered.startswith("{ ,"), rendered
+    assert json.loads(rendered) in ({}, {"limit": 9}), rendered
+
+
+def test_an_integer_argument_is_bounded():
+    """A number that cannot end is a field that can eat the whole turn.
+
+    Asked how much RAM was in use, the model emitted a five-hundred-digit
+    `limit`, spent the entire token budget on zeros, stopped mid-number, and
+    produced a document that would not parse. `[0-9]+` permits that; a bound
+    does not.
+    """
+    g = G.build_tool_grammar([spec("t.n", {"limit": {"type": "int"}})])
+    assert "[0-9]{1,10}" in g.gbnf, "integers must be length-bounded"
+    assert "[0-9]+" not in g.gbnf, "an unbounded number can never terminate"
+
+    rule = [ln for ln in g.gbnf.splitlines() if ln.startswith("args-t-n ::=")][0]
+    rendered = _render(rule.split("::=", 1)[1], {"[0-9]": "1"})
+    assert json.loads(rendered)["limit"] == 1
 
 
 def test_a_provably_argumentless_tool_is_included_and_is_not_a_gap():

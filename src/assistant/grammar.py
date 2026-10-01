@@ -70,8 +70,18 @@ _TYPE_RULES = {
     # then the argument key, then the value - and each was only found by running
     # the emitted text through json.loads, which is why the check has to be that
     # and not "does the grammar look right".
-    "str": r'"\"" [^"\\]* "\""',
-    "string": r'"\"" [^"\\]* "\""',
+    # The class excludes control characters as well as the quote and backslash.
+    # A raw newline inside a JSON string is not legal JSON, and excluding it is
+    # not cosmetic: the model produced one, `json.loads` raised "Invalid control
+    # character", and a perfectly good tool call was thrown away. Asking for
+    # "what is eating my RAM" produced a multi-line answer as an argument.
+    #
+    # It is the fourth instance of the same shape - something the grammar permits
+    # that the *consumer* cannot accept - and the reason every one of these is
+    # now caught by feeding the emitted text to json.loads rather than by
+    # inspecting the grammar.
+    "str": r'"\"" [^"\\\x00-\x1f]* "\""',
+    "string": r'"\"" [^"\\\x00-\x1f]* "\""',
     # The minus is QUOTED and it must stay that way. A bare `-` makes
     # llama.cpp's sampler die with an access violation, and it dies at *sample*
     # time, long after LlamaGrammar.from_string returned a perfectly good
@@ -81,10 +91,34 @@ _TYPE_RULES = {
     #
     # A number is NOT quoted, unlike a string - which is why this one is left
     # emitting bare digits and the two above do not.
-    "int": r'"-"? [0-9]+',
-    "integer": r'"-"? [0-9]+',
-    "bool": r"(true|false)",
-    "boolean": r"(true|false)",
+    #
+    # Bounded to ten digits, and the bound is load-bearing. `+` is unbounded, so
+    # asked how much RAM is in use the model emitted a five-hundred-digit number
+    # for `limit`, filled the whole token budget with zeros, ran out mid-number
+    # and produced a JSON document that would not parse. Every integer in this
+    # registry is a limit or a count; ten digits is more than any of them needs
+    # and stops one field from eating the turn.
+    "int": r'"-"? [0-9]{1,10}',
+    "integer": r'"-"? [0-9]{1,10}',
+    # `true` and `false` must be QUOTED. Bare, they are rule *references*, and a
+    # grammar containing one fails at parse time with "Undefined rule identifier
+    # 'true'" - printed to stderr while `LlamaGrammar.from_string` returns a
+    # perfectly good object, and the child dies with an access violation the
+    # first time it samples a tool call that has a boolean in it.
+    #
+    # The reason this survived review is the reason D38 exists. The first
+    # grammar module carried a `_NON_RULES = {"true", "false", ...}` exemption
+    # for exactly this shape, with a comment calling them "terminals that appear
+    # inside character classes". That was a check weakened to agree with the
+    # broken output: the check could not fail, because it had been told the bug
+    # was intended. The exemption is deleted rather than updated, because a
+    # list of names this module promises not to check is a list of bugs it will
+    # never report.
+    #
+    # It was found only because `system.diagnose` was the first registered tool
+    # with a boolean argument, and it was found at the first real tool call.
+    "bool": r'("true"|"false")',
+    "boolean": r'("true"|"false")',
 }
 
 # Characters that are NEVER structural in the GBNF this generator emits, and so
@@ -213,10 +247,6 @@ def _assert_no_bare_metacharacters(gbnf: str) -> None:
             )
 
 _JSON_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
-
-# Terminals that appear inside character classes and therefore look like rules to
-# a naive scanner. Excluded from the "undefined rule" check below.
-_NON_RULES = {"str", "int", "bool", "true", "false", "ws"}
 
 
 class GrammarError(ValueError):
@@ -382,10 +412,10 @@ def _args_rule(name: str, params: dict[str, dict[str, Any]]) -> str:
     required = sorted(k for k, v in params.items() if v["required"])
     optional = sorted(k for k, v in params.items() if not v["required"])
 
-    # The separator is a BARE comma. The closing quote of the previous value is
-    # already emitted by the value rule itself - `str` ends in its own `"\""` -
-    # so a separator that also supplied one produced `""` between arguments and
-    # the object stopped parsing at the first one.
+    # The separator is a BARE comma, and it SEPARATES - it never leads. The
+    # closing quote of the previous value is already emitted by the value rule
+    # itself (`str` ends in its own `"\""`), so a separator that also supplied one
+    # produced `""` between arguments.
     parts = []
     for i, key in enumerate(required):
         lead = "" if i == 0 else _gbnf_literal(",") + " "
@@ -394,12 +424,26 @@ def _args_rule(name: str, params: dict[str, dict[str, Any]]) -> str:
         )
     body = " ".join(parts)
 
+    # The optional tail. Each optional argument is its own independent group, so
+    # they may appear in any combination and in any order - which is correct,
+    # since JSON does not care about key order and the parser checks names.
+    #
+    # The comma leads a group ONLY when something precedes it: a required
+    # argument, or an earlier optional. A tool whose arguments are all optional
+    # has nothing in front, and emitting a leading comma produced
+    #
+    #     {"tool": "system.processes", "arguments": { ,"limit": 100}}
+    #
+    # on the real model. Five of the twenty-three tools were affected, and every
+    # shape assertion passed, because every one of them built a tool that
+    # happened to have a required argument.
     tail = ""
-    for key in reversed(optional):
-        tail = (
-            f' ( ws {_gbnf_literal(",")} ws {_json_quoted_literal(key)} ws ":"'
-            f' ws {_value_rule(params[key])})?'
-        )
+    for index, key in enumerate(optional):
+        entry = f'{_json_quoted_literal(key)} ws ":" ws {_value_rule(params[key])}'
+        if index == 0 and not required:
+            tail += f' ( ws {entry})?'
+        else:
+            tail += f' ( ws {_gbnf_literal(",")} ws {entry})?'
 
     # When every argument is optional there is no required part, so emitting the
     # separator unconditionally would leave `"{" ws  ( ... )? "}"` with a dangling
@@ -539,6 +583,76 @@ DECISION_GBNF = (
     "# pass 1 of the two-pass turn: the decision itself\n"
     'root ::= "tool" | "answer"'
 )
+
+
+def build_named_decision_grammar(tools: Sequence[Any]) -> Grammar:
+    """Pass 1, deciding the tool AND naming it in one go.
+
+    The original two-word grammar forced a *decision* but left the *name* to the
+    second pass, which is why the second pass had to accept every tool's shape at
+    once. Settling both here means pass 2 has exactly one tool in scope.
+
+    Output is either the bare word `answer`, or `tool:<name>`:
+
+        root ::= "answer" | "tool:" ws toolname
+        toolname ::= "\\"system.info\\"" | "\\"file.read\\"" | ...
+
+    One extra token of constraint, no extra pass - the decision and the name are
+    the same choice.
+    """
+    names = sorted(
+        t.name for t in tools if getattr(t, "parameters", None) is not None
+    )
+    if not names:
+        raise GrammarError(
+            "no tool has described arguments, so there is nothing to decide "
+            "between; describe some in tools.py"
+        )
+    lines = [
+        "# pass 1: the decision, and the name of the tool it is a decision about",
+        'root ::= "answer" | "tool:" ws toolname',
+        "toolname ::= " + " | ".join(_json_quoted_literal(n) for n in names),
+        r"ws ::= [ \t\n]?",
+    ]
+    gbnf = "\n".join(lines)
+    _assert_no_bare_metacharacters(gbnf)
+    _assert_single_line_alternations(gbnf)
+    _validate(gbnf, names, ["toolname", "ws"])
+    return Grammar(gbnf=gbnf, tools=tuple(names), gaps=(), n_rules=len(lines))
+
+
+def build_tool_call_grammar(tool: str, tools: Sequence[Any]) -> Grammar:
+    """A call grammar for ONE named tool, so its shape cannot be another's.
+
+    This is the coupling the flat `args` alternation gives up, recovered.
+
+    GBNF is a forward CFG, so `args ::= "file.list" args-file-list` cannot mean
+    "the file.list that toolname just produced" - it means "emit the text
+    file.list", which the model then does, producing JSON that is not JSON. The
+    consequence was measured: asked to run a health check the model answered
+
+        {"tool": "system.diagnose",
+         "arguments": {"content": "...", "path": ""}}
+
+    - the file.create shape - and before `parse_action` learned to validate, the
+    call silently "succeeded".
+
+    So the name is settled in an earlier pass, and by the time the arguments are
+    generated there is exactly one tool in scope. The model cannot choose a shape
+    that belongs to something else, because nothing else is in the grammar.
+    """
+    spec = next((t for t in tools if getattr(t, "name", None) == tool), None)
+    if spec is None:
+        raise GrammarError(f"{tool!r} is not a registered tool")
+    if getattr(spec, "parameters", None) is None:
+        raise GrammarError(
+            f"{tool} has no described arguments, so no call can be generated "
+            "for it; describe it in tools.py or do not offer it"
+        )
+    g = build_tool_grammar([spec])
+    if g.tools != (tool,):
+        raise GrammarError(f"expected only {tool} in the grammar, got {g.tools}")
+    return g
 
 
 def build_decision_grammar() -> Grammar:

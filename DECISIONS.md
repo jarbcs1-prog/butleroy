@@ -831,4 +831,157 @@ The queued-dialog rule needed care. Marking a confirmation as *seen* the moment 
 poll loop would not raise it twice — meant a second queued request was recorded, refused a dialog
 because one was up, and then skipped by every later poll. A pending destructive action with no way to
 reach it. The state kept is now `_answered`, and the poll offers the oldest unanswered request
-whenever no dialog is open.
+whenever no dialog is open.---
+
+## Part VIII — The assistant can finally read the machine
+
+### D40 — Nothing listens; exactly one component makes outbound calls, to one host
+
+D3 said "no TCP anywhere", and that remains exactly true of how our components
+talk to each other: named pipes, never sockets. Telegram changed the shape of the
+world, because talking to a bot API needs an outbound HTTPS request, and a rule
+that has quietly stopped being true is worse than no rule.
+
+So the rule is narrowed and stated precisely rather than left to be discovered as
+an exception later. Three parts:
+
+* **Nothing listens.** No component binds a port. Ever.
+* **Exactly one component makes outbound calls** — `assistant.telegram` — and it
+  does so to one hardcoded host, `api.telegram.org`. `_api()` builds the URL from
+  that constant, so a URL assembled from a message can never send the token
+  somewhere else.
+* **The default TLS context is not replaced.** A context that skipped certificate
+  or hostname verification would put the bot token on the wire to anything that
+  answered, and the token is the whole of the access control.
+
+This is D3's intent — minimise the surface an outside party can reach — restated
+so that a future reader can check whether it still holds.
+
+### D41 — A Telegram message may ask; it may never authorise, and it may never claim presence
+
+Both follow from the user's own account of how they will actually use it:
+
+> "the bigger odds are that usually i wouldn't be around the pc if i'm grabbing a
+> coffee or something, not because i'd be sleeping"
+
+That is a different situation from sleeping, and it produces two different rules.
+
+**It never authorises.** A T3 arriving by Telegram becomes a *queued*
+confirmation. The message says so, names the confirmation id, and `/approve`
+exists and refuses. It exists deliberately: a command that was never implemented
+is indistinguishable from one that was removed, and the user is entitled to know
+this one was considered and declined. The refusal is audited.
+
+**It never claims presence.** The bridge does not call `session.set_attended` at
+all — not even to mark the session attended when the user is plainly talking to
+it. The commonest reason to be away is ten minutes with a phone in your pocket,
+and the machine is unattended throughout. Treating that message as presence would
+unlock T2 and T3 on a machine nobody is watching, which is exactly the failure
+D30 exists to prevent. T0 and T1 run from the coffee shop; T2 and T3 queue.
+
+The allowlist is *silent* — a stranger gets no reply at all, because a polite
+refusal confirms the bot exists and echoes back that the chat id was recognised.
+An empty allowlist is refused at construction, because it would authorise nobody
+correctly and everybody if the check were ever bypassed.
+
+### D42 — The tool name is settled before the arguments are generated
+
+This one was found the hard way, and it is the most consequential correction in
+the project so far.
+
+The grammar's `args` rule had been flattened into a plain alternation over every
+tool's argument shape, because GBNF is a forward CFG and cannot match the name
+`toolname` just emitted. The reasoning at the time was that `parse_action` would
+catch a mismatch against the registry's real schema.
+
+**It did not.** `parse_action` parsed JSON and returned whatever came out. The
+claim existed in a comment; the code behind it did not. Measured on the real 4B,
+asked to check the machine's health:
+
+    {"tool": "system.diagnose",
+     "arguments": {"content": "...", "path": ""}}
+
+The `file.create` shape, attached to `system.diagnose`. Nothing complained. The
+executor ignored both keys. The call reported **success** while doing something
+other than what the model said — which is the failure D31 exists to prevent, and
+which is worse than an error because an error is visible.
+
+Two fixes, and the second is the better one:
+
+1. **`parse_action` now validates** against the registry: unknown tool, undescribed
+   tool, an argument the tool does not take, a missing required one, a value of
+   the wrong type. Each is a returned error naming what the tool *does* take, so
+   the model has something to act on next time.
+
+2. **The name is decided in pass 1, so pass 2 has exactly one tool in scope.**
+   `build_named_decision_grammar` admits either the bare word `answer` or
+   `tool:<name>`, and `build_tool_call_grammar(name, tools)` then generates a
+   grammar containing only that tool's shape. The model cannot pair a name with
+   another tool's arguments, because nothing else is in the grammar. This costs
+   no extra pass — the decision and the name are the same choice — and one extra
+   token of constraint.
+
+Effect, measured: 2 of 5 system questions produced a call before this, 5 of 5
+after. The two that failed did so with the *right tool name* and another tool's
+arguments, which is precisely what fix 2 removes.
+
+### D43 — A generated artefact is tested on what it will become, not on how it looks
+
+D38 said this for the grammar generator. Four more instances turned up in one
+session, and they have a common shape worth naming on its own:
+
+> **The generator emitted something legal in its own language that the consumer
+> cannot accept.** Each compiled. Each passed every assertion about the
+> generator's output *shape*. Each produced a document that would not parse.
+
+| What | Emitted | Why it fails |
+|---|---|---|
+| `bool` as `(true\|false)` | bare `true` | in GBNF a bare word is a **rule reference**; `from_string` printed "Undefined rule identifier 'true'" to stderr, returned a good object, and the child segfaulted at the first sample |
+| string class `[^"\\]*` | permits raw newlines | a newline inside a JSON string is illegal, and the model produced one |
+| optional tail `( ws "," ws key )` | leading comma | correct only when a required argument precedes it; on an all-optional tool it emitted `{ ,"limit": 100}` |
+| `[0-9]+` | unbounded | asked about RAM, the model emitted a 500-digit `limit`, spent the token budget on zeros and stopped mid-number |
+
+The `bool` one survived review for a specific reason worth recording: the first
+grammar module carried a `_NON_RULES = {"true", "false", ...}` exemption listing
+them, with a comment calling them "terminals that appear inside character
+classes". **That was a check weakened to agree with the broken output** — the
+check could not fail, because it had been told the bug was intended. The
+exemption is deleted rather than corrected, because a list of names a module
+promises not to check is a list of bugs it will never report.
+
+The optional-comma one survived because every render test built a tool that
+happened to have a *required* argument. The fix for that class of gap is
+`test_every_tool_in_the_registry_renders_as_valid_json`, which walks all 23 and
+asks only whether the rendered text parses. Adding it immediately found a second
+bug (the missing required-to-optional comma) that no hand-written test would have
+covered.
+
+The general rule: **a test that exercises one hand-picked instance is a test of
+that instance.** Where a generator emits one artefact per registry entry, the
+test must walk the registry.
+
+### D44 — The machine's own answers are measurements, and a probe that fails says so
+
+`assistant.sysinfo` reads the machine. The rule is D36 applied to measurements:
+**a probe that fails returns an error, never an empty result.** `{"error":
+"nvidia-smi not found"}` and `{"vram": null}` look identical to a caller, and only
+one means "check something else".
+
+`system.diagnose` is the same rule applied to conclusions. It returns `checked`,
+`unchecked`, and `complete`, because a health check that quietly checks four of
+six things and reports "all clear" is worse than no health check — it gets
+believed. A finding is only ever raised by a probe that actually returned data.
+
+Two implementation notes that are load-bearing rather than incidental:
+
+* **`nvidia-smi` is never mocked away in the tests.** Every probe here answers a
+  question about the hardware it is standing on, and a mocked `nvidia-smi` proves
+  only that the mock returns what the mock returns. The failures that matter — a
+  column that moved, a locale, a field that is `[N/A]` — cannot be faked into
+  existence. `tasklist`'s `"8 K"` / `"3,648 K"` column is the worked example: the
+  probe had never worked, and reading the real output is the only thing that
+  found it.
+* **`Win32_Product` is not used** for the package inventory, though it would
+  enumerate installed programs. It is a repair operation that reconfigures every
+  MSI package it finds — minutes on this machine, and it can break things. The
+  uninstall registry keys are what Windows itself uses.

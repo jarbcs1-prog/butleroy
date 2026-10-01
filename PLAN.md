@@ -230,13 +230,30 @@ prompts and executes nothing until confirmed at the PC; an unattended session ex
    daemon's `session.set_attended` may only ever be *narrowed* by a remote channel, and only
    `CHANNEL_PC` may assert it.
 
-**What is not done, and why the gate is not closed:** the **prompt overlay is not built** — the tray's
-"Open prompt" item says so plainly rather than faking it, because a menu item that appears to work
-and shows stale information is worse than one that admits the feature does not exist. The
-**Telegram bridge is not built**. Only **3 of ~58 registered tools have executors**, by design: the
-gap is visible in `status` rather than hidden behind a stub that returns success. So the vertical
-slice — hotkey → prompt → streamed answer → execute, with no terminal visible — is still outstanding,
-and it is the real Phase 2 gate.
+**What is not done, and why the gate is not closed:** the **Telegram bridge is not built**. Only **5
+of ~58 registered tools have executors**, by design: the gap is visible in `status` rather than hidden
+behind a stub that returns success.
+
+**The vertical slice is now closed** (commit `1dec25d` + `overlay.py`). Measured end to end through a
+real daemon, a real child process and the real 4B:
+
+| Step | Result |
+|---|---|
+| hotkey → prompt → streamed answer | live |
+| grammar-constrained decision | `kind: tool`, 2.7 s |
+| the call itself | `tool: file.list`, `arguments: {'path': 'C:/Users/Public/Documents'}` |
+| T3 confirmation dialog | built in tkinter, `confirm.approve` wired |
+| VRAM after the turn | +4.96 GiB, under the D1 ceiling |
+| VRAM after the 90 s idle TTL | returned to the 1.23 GiB baseline exactly |
+| audit chain | verifies; lease, proposal and idle stop all recorded |
+
+What this exposed is worth more than the slice itself, and is recorded as **D38**: three separate
+instances of one grammar bug, none of which any shape assertion caught. In GBNF the quotes around a
+literal are *syntax* — the model never emits them — so `toolname ::= "file.list"` produces `file.list`
+with no JSON quotes, and `json.loads` stops at character 9. The same bug hit the argument keys and then
+the string values. Each compiled cleanly, each passed every "does the grammar look right" assertion, and
+each produced text that would not parse. The check that holds is running the *emitted* text through
+`json.loads` in the tests.
 
 **Bugs found in my own code along the way**, recorded because each was invisible until tested
 against the real thing rather than a mock:
@@ -350,22 +367,24 @@ daemon wiring that ties the policy gate, the arbiter, the audit log and the mani
 Then download candidate 1 (`HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` Q8_0, 4.17 GB) and
 measure it on a quiet machine.
 
-Current state: **Phase 0 passed. Phase 1 candidate 1 (fast tier) passed. Phase 2 substantially
-built** — 259 tests green, tray/hotkey/presence/T3-confirmation/quarantine all done. Still open: the
-**prompt overlay** and the **Telegram bridge**, and only 5 of ~58 registered tools have executors, so
-the Phase 2 vertical slice is not yet closed.
+Current state: **Phase 0 passed. Phase 1 candidate 1 (fast tier) passed. Phase 2 complete and the
+vertical slice closed** — 351 tests green. Tray, hotkey, presence, T3 confirmation, quarantine, the
+grammar-first brain as a disposable leased child process, and the tkinter overlay are all done. Still
+open: the **Telegram bridge**, and only 5 of ~58 registered tools have executors, so the *breadth* of
+the tool surface is deliberately still missing while the *depth* of the one real path is complete.
 
 **Next, in order:**
 
-1. **The brain adapter** — a child process that loads the 4B, generates a GBNF grammar **from the live
-   tool registry**, and serves one turn over `PIPE_BRAIN_REQ`. This is the first thing that needs the
-   model, and it is what makes the vertical slice closeable. D34 constrains the shape; D3 makes it a
-   disposable child with a 90 s TTL; the arbiter grants it a lease *before* it loads.
-2. **The overlay** in tkinter — frameless, always-on-top, no focus theft, with the T3 dialog wired to
-   `confirm.approve` (D32). `render_delta()` gets its first real input here.
-3. **Telegram bridge** — token already in `state/telegram.json`, allowlist `[199251286]`. Long-poll
-   only, no inbound port, `telegram.send` stays T3 (D13: a remote channel may request but never
-   authorise).
+1. **Telegram bridge** — token already in `state/telegram.json`, allowlist `[199251286]`. Long-poll
+   only, no inbound port, `telegram.send` stays T3. This is the last piece of the "24/7, reachable by
+   voice / PC / Telegram" requirement.
+2. **Executors for the rest of the registered tools**, in the order the user will actually feel the
+   absence: `system.*` first (a knowledge-of-the-system assistant needs to read the machine), then the
+   file tools beyond the five that exist.
+3. **Candidates 2 and 3** — the 9B deep tier and the Gemma-4 E4B wildcard. The 9B must evict the fast
+   tier; the arbiter already implements that (D22).
+4. **Phase 5 voice** — `openWakeWord` / Silero for the offline wake word (D7), `faster-whisper` in CPU
+   RAM promoted to GPU only while listening (D18), Piper for output.
 
 **One measurement task discharged, one still owed.** D28 is **satisfied** for speed: the user shut
 down `Wan2GP`, the machine was verified quiet first (load 4–10 %, the lingering Wan2GP python process

@@ -372,12 +372,38 @@ def test_status_line_reflects_attended_state():
     assert "attended" in Tray(StubDaemon())._status()
 
 
-def test_the_open_prompt_item_admits_the_overlay_is_not_built():
-    """It must not fake success. A menu item that lies is undebuggable."""
+def test_the_open_prompt_item_opens_the_overlay(monkeypatch):
+    """It must not fake success. A menu item that lies is undebuggable.
+
+    This used to assert the menu item admitted the overlay was unbuilt, which was
+    the correct contract when there was nothing to open. It now asserts the new
+    one, and keeps the original point: if the window cannot open, the user is
+    told, rather than the click appearing to work.
+    """
     t = Tray(StubDaemon())
+    opened = []
+    monkeypatch.setattr(t, "_overlay", type(
+        "FakeOverlay", (), {"show": lambda self: opened.append(True),
+                            "destroy": lambda self: None})())
     t._open_prompt()
-    assert "Phase 3" in t._notice
-    assert "not built yet" in t._notice.lower() or "not built" in t._notice.lower()
+    assert opened == [True]
+
+
+def test_a_failing_overlay_is_reported_not_swallowed(monkeypatch):
+    """A tray that cannot open a window must still say why.
+
+    Same rule as before, restated for the new code path: a menu item that
+    silently does nothing is worse than one that admits it failed, because the
+    user cannot debug a silence.
+    """
+    t = Tray(StubDaemon())
+    monkeypatch.setattr(
+        t, "_overlay",
+        type("BrokenOverlay", (), {"show": lambda self: (_ for _ in ()).throw(
+            RuntimeError("no display"))})(),
+    )
+    t._open_prompt()
+    assert "no display" in t._notice
 
 
 def test_quit_stops_the_icon_then_asks_the_daemon():

@@ -737,3 +737,98 @@ into its output row. The moment the machine went quiet that label became false, 
 reads exactly like a true one. `phase1_measure.py` now samples the CPU load itself and prints
 `VALID` or `CONTENDED (cpu N%)` accordingly; if the load cannot be measured it assumes the worst,
 because an unknown is not a quiet machine.
+---
+
+## Part VII — What it took to make the brain emit valid JSON
+
+### D38 — A generated grammar is tested on its output, not on its shape
+
+Three bugs, one cause, found only by looking at what the model actually emitted.
+
+In GBNF, the quotes around a literal are **syntax**. They delimit the literal and the model never
+produces them. So a rule written as
+
+    toolname ::= "file.list"
+
+makes the model emit `file.list` — which is not valid JSON, because a JSON string needs its own quotes
+in the output text. The first live tool call came back as
+
+    {"tool":
+    file.list,
+    "arguments": ...
+
+`"tool":` was correctly quoted because `root` spells it `"\"tool\":"`, and the tool name was bare
+because `toolname` did not. `json.loads` stopped at character 9 and the call was discarded at the last
+step, having been forced successfully at every step before it.
+
+The fix is `_json_quoted_literal`: JSON-escape the content, add the JSON quotes, then GBNF-escape the
+whole thing so the quotes survive as content.
+
+The same bug then appeared twice more, in argument keys and then in string values. The value case is
+the subtle one. Writing it as the single literal `"[^"\\]*"` is **wrong**, and looks right: inside
+double quotes a GBNF character class is just characters, so that rule matches the seven-character
+string `[^"\\]*` and nothing else. A JSON string value takes three fragments:
+
+    "\"" [^"\\]* "\""
+
+And once the value carries its own closing quote, the separator between arguments must become a **bare**
+comma, because a `"\",\""` separator emits `""` between the two.
+
+Two things are worth recording beyond the fixes.
+
+**The `args` dispatcher was never a constraint at all.** It read
+
+    args ::= "file.list" args-file-list | "file.read" args-file-read
+
+on the reasoning that `args` immediately follows `toolname`, so it could re-read the name. GBNF is a
+forward CFG. It cannot look back at what a previous rule emitted, so the second occurrence is not a
+match against the first — it is more text the model must produce:
+
+    {"tool": "file.list", "arguments": "file.list"{"path": "C:/x"}}
+
+Not JSON. And since the two occurrences were never required to be equal, it constrained nothing at
+all while reading like the strictest part of the grammar. It is now a flat alternation of the argument
+shapes, which means the grammar no longer ties a shape to the named tool. That is the right trade: a
+mismatch is caught by `parse_action` against the registry's real schema, which is a *stronger* check
+than the grammar was, because it sees the tool that was actually named rather than only what the
+grammar would have permitted. A constraint that reads like a guarantee and is not one is worse than a
+weaker constraint that is honest about itself.
+
+**Every one of these compiled, and every one passed every shape assertion.** The question "does the
+grammar look right?" was asked three times and was the wrong question three times. What holds is
+running the *emitted* text through `json.loads` in the tests — reducing each generated rule to the text
+the sampler will produce and parsing the result. That renderer was itself wrong three times (it
+substituted whole value rules instead of the class inside them; used one stand-in for every class, so a
+path landed where a number belonged; emitted optional literals unconditionally, so `-` prefixed an
+optional argument), and each of those produced a test failure that looked like a product bug. That is
+in its docstring, because a helper that finds three phantom bugs and a generator that contains three
+real ones should both be readable.
+
+This is D36 again, one level up. D36 said a constraint mechanism must be *proved active* before it is
+relied on. D38 says the same about the thing the constraint produces: a generated artefact must be
+tested on the output it will become, because a generator and its output are two different things, and
+only one of them is what a user will see.
+
+### D39 — A timeout on a confirmation must expire into a denial
+
+The overlay's T3 dialog counts down from 60 seconds. At zero it denies.
+
+This is not a UI preference. A dialog that expires into *approval* is a footgun: the user walked away,
+the countdown ran out, and an irreversible action happened on their behalf while the audit log recorded
+them as having consented. One that expires into a denial costs the user a moment of attention and
+nothing else, which is not a real cost.
+
+Two consequences, both implemented and both tested:
+
+* **No timer at all while the session is unattended.** A countdown the user cannot see is worse than
+  no countdown, because it looks like the same thing.
+* **The denial is loud.** An expiry posts a visible message naming the tool, so a timeout can cost work
+  but can never pass silently. The rest of D32's rules hold unchanged: one dialog at a time (a second
+  T3 queues rather than stacking), the resolved path shown beside the model's string when they differ,
+  globs enumerated rather than shown as a pattern, and no permanent grant.
+
+The queued-dialog rule needed care. Marking a confirmation as *seen* the moment it was offered — so the
+poll loop would not raise it twice — meant a second queued request was recorded, refused a dialog
+because one was up, and then skipped by every later poll. A pending destructive action with no way to
+reach it. The state kept is now `_answered`, and the poll offers the oldest unanswered request
+whenever no dialog is open.

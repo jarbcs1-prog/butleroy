@@ -129,6 +129,9 @@ class Hotkey:
         self.registered = False
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
+        # How many WM_HOTKEY messages the pump has actually dispatched. `trigger`
+        # waits for this to move, because posting a message is not delivering it.
+        self._seen = 0
         self._error: Exception | None = None
 
     def trigger(self) -> bool:
@@ -148,9 +151,32 @@ class Hotkey:
         """
         if self._thread is None or not self._thread.is_alive():
             return False
-        return bool(
-            user32.PostThreadMessageW(self._thread.ident, WM_HOTKEY, self.hotkey_id, 0)
+        target = self._seen
+        ident = self._thread.ident
+        if not ident:
+            return False
+        # Explicit marshalling. Without argtypes, ctypes guesses, and the failure
+        # mode is not an exception: GetMessageW on the pump thread simply never
+        # sees the message, so the hotkey silently does nothing.
+        posted = user32.PostThreadMessageW(
+            ctypes.c_ulong(ident),
+            ctypes.c_uint(WM_HOTKEY),
+            ctypes.c_ulong(self.hotkey_id),
+            ctypes.c_ulong(0),
         )
+        if not posted:
+            return False
+        # Wait for the pump to actually consume it. Posting is not delivery: the
+        # message can be accepted by a queue that never gets read, and "posted"
+        # is not a claim the caller is entitled to make. The counter is
+        # incremented on the pump thread inside the same branch that runs the
+        # callback, so this cannot report success for a message that was dropped.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if self._seen >= target + 1:
+                return True
+            time.sleep(0.005)
+        return False
 
     def start(self, timeout: float = 5.0) -> "Hotkey":
         # Register from this thread. The registration is per-thread on Windows, which
@@ -184,6 +210,7 @@ class Hotkey:
                     break
                 if (got > 0 and msg.message == WM_HOTKEY
                         and msg.wParam == self.hotkey_id):
+                    self._seen += 1
                     # A failure inside the callback must not take the pump down. This
                     # thread is the only thing that can report the hotkey, so if it
                     # dies the assistant silently becomes unsummonable - the exact
@@ -347,6 +374,11 @@ class Tray:
         # than refusing to start.
         self.hotkey = hotkey
         self.icon = None
+        # The prompt window, created on first use rather than at construction.
+        # D31 again: it is a client of the daemon like everything else here, and
+        # it never gets to approve a confirmation - that is the overlay's job and
+        # only the overlay's.
+        self._overlay = None
         self._notice: str | None = None
         self._color: tuple | None = None
         self._lock = threading.Lock()
@@ -424,16 +456,22 @@ class Tray:
             ipc.note(f"tray notify failed: {type(exc).__name__}: {exc}")
 
     def _open_prompt(self, icon=None, item=None) -> None:
-        """The real prompt is the Phase 3 overlay, which does not exist yet.
+        """Raise the prompt window.
 
-        This says so rather than doing something else. A menu item that appears to
-        work and quietly shows stale information is worse than one that admits the
-        feature is not built - the user cannot debug a lie.
+        Built lazily, on first use, because importing tkinter and constructing a
+        Tk root on a machine with no interactive session costs seconds and then
+        throws them away - and this tray is supposed to be able to run headless.
         """
-        self.notify(
-            "The prompt window is not built yet - that is Phase 3. "
-            f"The hotkey {HOTKEY_LABEL} is live and marks you attended."
-        )
+        try:
+            if self._overlay is None:
+                from . import overlay as overlay_mod
+
+                self._overlay = overlay_mod.Overlay(self.call, title=self.title)
+            self._overlay.show()
+        except Exception as exc:
+            # A tray that cannot open a window still has to say so, rather than
+            # the menu item appearing to work and doing nothing.
+            self.notify(f"The prompt window could not open: {exc}")
 
     def build(self):
         import pystray

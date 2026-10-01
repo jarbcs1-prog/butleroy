@@ -257,7 +257,16 @@ def _load(brain_box: dict[str, Any], lease: LeaseClient) -> dict:
 
     from .brain import Brain, BrainError, default_system_prompt
 
-    cfg = default_config()
+    # The tier's model, not the default one.
+    #
+    # This was `default_config()` with no argument, which silently ignored the tier:
+    # `serve` resolved `deep` to the 9B path, printed it, and then handed the load
+    # a brain configured with `DEFAULT_MODEL`. The child announced
+    # `tier=deep model=Qwen3.5-9B...` while holding the 4B, and the tier
+    # comparison measured the same model twice - identical arguments, identical
+    # 27s, identical 5081 MiB. A print statement that names the wrong thing is
+    # worse than none: it is the one line anyone would trust.
+    cfg = default_config(model=brain_box.get("model"))
     if not cfg.exists():
         return {"loaded": False, "error": f"model not found: {cfg.model_path}"}
     try:
@@ -282,7 +291,12 @@ def _load(brain_box: dict[str, Any], lease: LeaseClient) -> dict:
     except BrainError as exc:
         return {"loaded": False, "error": f"{type(exc).__name__}: {exc}"}
     brain_box["brain"] = brain
-    return dict(status, already_loaded=False)
+    # The loaded path comes from the config, not from the tier that was asked for.
+    # If those ever disagree again, the discrepancy is visible in the first thing
+    # anyone looks at after a load rather than in a VRAM measurement three turns
+    # later.
+    return dict(status, already_loaded=False, tier=brain_box.get("tier"),
+                model=cfg.model_path)
 
 
 def _turn(brain_box: dict[str, Any], lease: LeaseClient, args: dict) -> dict:
@@ -608,7 +622,13 @@ def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ
     model, need_bytes = resolve_tier(tier, model, need_bytes)
     lease = LeaseClient(to_daemon, need_bytes=need_bytes)
 
-    box: dict[str, Any] = {"stop": False}
+    box: dict[str, Any] = {
+        "stop": False,
+        # Carried on the box rather than passed to _load so that the load cannot
+        # reach for a model by any other route than the tier that named it.
+        "model": model,
+        "tier": tier,
+    }
     server = ipc.PipeServer(pipe, _handler_factory(box, lease), authkey=authkey)
 
     print(f"[brain] pid={os.getpid()} serving on {pipe}", flush=True)

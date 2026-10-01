@@ -11,11 +11,32 @@ loading precisely so it can be checked cheaply.
 """
 
 import pathlib
+import sys
 import tempfile
 
 import pytest
 
 from assistant import brain_server
+from pathlib import Path
+
+from assistant.brain import BrainConfig
+
+
+class _NoLease:
+    """Refuses every lease. Nothing in this file may take gigabytes."""
+
+    def acquire(self, *a, **k):
+        raise AssertionError("this test must not acquire a lease")
+
+    def renew(self, *a, **k):
+        raise AssertionError("this test must not renew a lease")
+
+    def release(self, *a, **k):
+        return False
+
+    @property
+    def available(self) -> int:
+        return 0
 from assistant import daemon as daemon_module
 from assistant.daemon import Daemon, Refused
 from assistant.brain_server import TIERS, resolve_tier
@@ -199,3 +220,88 @@ def test_the_daemon_refuses_an_unknown_tier_without_starting_anything(desk):
 def test_status_reports_which_tier_is_held(desk):
     """'Is the deep tier loaded' must be answerable without loading anything."""
     assert desk.op_brain_status({})["tier"] == "fast"
+
+# -- the model the tier actually loads ----------------------------------------
+
+
+class _StubBrain:
+    """Records the config it was handed; loads nothing."""
+
+    def __init__(self, cfg, **kw):
+        self.cfg = cfg
+        self.kw = kw
+
+    def load(self):
+        return {"loaded": True, "model_path": self.cfg.model_path}
+
+    def status(self):
+        return {"loaded": True, "model_path": self.cfg.model_path}
+
+
+@pytest.fixture
+def stub_brain(monkeypatch):
+    """Replace the real `Brain` and the real config with recording stubs.
+
+    `_load` imports `Brain` from inside the function body, so the patch has to be
+    on the module that import reads - not on `brain_server`. Both tiers' files now
+    exist on disk, so a load that is really attempted would put six gigabytes in
+    the test suite; this keeps the decision under test and nothing else.
+    """
+    import assistant.brain as brain_mod
+
+    monkeypatch.setattr(brain_mod, "Brain", _StubBrain)
+    monkeypatch.setattr(
+        brain_server, "default_config",
+        lambda model=None, **kw: BrainConfig(
+            model_path=str(model) if model else str(brain_server.DEFAULT_MODEL),
+            n_gpu_layers=0,
+        ),
+    )
+    monkeypatch.setattr(brain_server, "_roots_reader",
+                        lambda lease: (lambda: ("G:/x",)))
+    yield
+
+
+def _load(box_model, tier):
+    box = {"stop": False, "model": box_model, "tier": tier}
+    return brain_server._load(box, _NoLease())  # noqa: SLF001
+
+
+def test_the_deep_tier_loads_the_deep_model(stub_brain):
+    """The bug this test exists for.
+
+    `_load` called `default_config()` with no argument. `serve` had already
+    resolved the tier to the 9B path and printed it, so the child announced
+    `tier=deep model=Qwen3.5-9B...` while holding the 4B. The tier comparison
+    then measured the same model twice and reported identical arguments,
+    identical timings and an identical 5081 MiB - which is what gave it away,
+    and which nothing in the code would have.
+    """
+    report = _load(str(TIERS["deep"]["model"]), "deep")
+    assert report["model"] == str(TIERS["deep"]["model"])
+    assert report["model_path"] == str(TIERS["deep"]["model"])
+
+
+def test_the_fast_tier_loads_the_fast_model(stub_brain):
+    report = _load(str(TIERS["fast"]["model"]), "fast")
+    assert report["model"] == str(TIERS["fast"]["model"])
+
+
+def test_the_summary_names_the_tier_and_the_path_separately(stub_brain):
+    """If the asked-for tier and the loaded model can ever disagree, the
+    disagreement has to be in the first thing anyone reads after a load - not
+    inferred three turns later from a VRAM reading.
+    """
+    report = _load(str(TIERS["deep"]["model"]), "deep")
+    assert report["tier"] == "deep"
+    assert Path(report["model"]).name.startswith("Qwen3.5-9B")
+
+
+def test_a_box_with_no_model_falls_back_to_the_default(stub_brain):
+    """No model on the box is a real state - a box built before the tier existed.
+
+    It must not produce `None` as a path, and it must say which file it used.
+    """
+    report = _load(None, "fast")
+    assert report["model"] == str(brain_server.DEFAULT_MODEL)
+

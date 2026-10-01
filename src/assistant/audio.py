@@ -599,6 +599,62 @@ def _trim(frame: Any, rate: int, threshold: float) -> tuple[Any, float]:
 # --------------------------------------------------------------------- wake word
 
 
+#: The phrase the assistant answers to.
+#:
+#: openWakeWord ships six pretrained classifiers - alexa, hey mycroft, hey jarvis,
+#: hey rhasspy, current weather, timers - downloaded by `download_models()`, not
+#: trained. "hey jarvis" is the one chosen: two ordinary words plus a proper noun,
+#: which is the same *shape* as a personal name and exercises the identical code
+#: path, at about 20 KB with zero VRAM (D50). It is openWakeWord's model rather
+#: than one of ours, and it answers to someone else's name - which is the trade
+#: for a wake word that has been measured by someone else on a 5.5-hour corpus
+#: of dinner-party noise instead of by us on nothing.
+#:
+#: The alternative was training "yo archie" here. That was attempted and failed to
+#: learn - see DECISIONS D55 for the six count-and-unit errors behind it, and the
+#: last measurement: every input, the phrase and ordinary speech alike, scored
+#: 0.061. A model that cannot tell the wake phrase from the build failing again
+#: is worse than one that answers to a different name.
+WAKE_WORD = "hey_jarvis"
+
+
+def wake_models_available() -> list[str]:
+    """Which pretrained wake words are on disk right now.
+
+    Reported rather than assumed. `download_models()` puts them in the installed
+    package, not in this project, so "is the wake word downloaded?" is a question
+    about somebody else's directory and the only honest answer is to look.
+    """
+    try:
+        import openwakeword
+    except Exception:  # noqa: BLE001 - absent is an answer, not a crash
+        return []
+    folder = Path(openwakeword.__file__).parent / "resources" / "models"
+    if not folder.is_dir():
+        return []
+    return sorted(p.name[: -len(".onnx")] for p in folder.glob("*.onnx")
+                  if not p.name.startswith(("melspectrogram", "embedding", "silero")))
+
+
+def wake_model_path(name: str = WAKE_WORD) -> Path | None:
+    """The file openWakeWord will actually load for `name`, or None.
+
+    Found by globbing rather than by constructing a filename. The release assets
+    carry a version suffix (`hey_jarvis_v0.1.onnx`) and the suffix is exactly the
+    part a hand-written name would get wrong - the same trap as the piper voice
+    layout, where `{name}/{name}.onnx` 404s and a confident guess downloads the
+    wrong file. Searching answers "what is there"; constructing answers "what did
+    I expect to be there".
+    """
+    try:
+        import openwakeword
+    except Exception:  # noqa: BLE001
+        return None
+    folder = Path(openwakeword.__file__).parent / "resources" / "models"
+    hits = sorted(folder.glob(f"{name}*.onnx"))
+    return hits[0] if hits else None
+
+
 @dataclass
 class WakeWord:
     """A local wake-word detector, or an honest report that we cannot have one.
@@ -615,7 +671,7 @@ class WakeWord:
     exists so it can find out.
     """
 
-    name: str = "hey_localized"
+    name: str = WAKE_WORD
     threshold: float = 0.5
     ok: bool = False
     error: str = ""
@@ -637,18 +693,49 @@ class WakeWord:
             self.error = f"{type(why).__name__}: {why}"
             self._model = None
 
+    def _score_chunk(self, chunk: Any) -> float:
+        """One 80 ms prediction for our own phrase.
+
+        `Model.predict` returns a dict of every loaded model to its score, not
+        an array - it was written for several wake words at once, and this class
+        loads exactly one. Indexing by `self.name` is the correct read; taking
+        a max over the dict would be answering "did any phrase fire" to a caller
+        that asked about one phrase in particular.
+        """
+        out = self._model.predict(chunk)
+        if isinstance(out, tuple):
+            out = out[0]
+        if self.name in out:
+            return float(out[self.name])
+        if len(out) == 1:
+            return float(next(iter(out.values())))
+        return max((float(v) for v in out.values()), default=0.0)
+
     def score(self, frame: Any) -> float:
         """Highest wake-word score in one frame, or 0.0 if we have no model."""
         if not self.ok:
             return 0.0
         import numpy as np
 
+        # The model eats int16 - that is what the microphone yields, and what
+        # every production caller passes. A float frame in [-1, 1] is the
+        # standard PCM normalization of the same signal, so it is scaled rather
+        # than refused; anything else float is passed through untouched, because
+        # guessing at an unknown scale would be inventing amplitude.
+        #
+        # This guard exists because the alternative is silence with no error:
+        # float audio scores ~0.0001 on every window including the phrase
+        # itself, which reads exactly like "the model does not fire" when the
+        # truth is "the model was fed a whisper". That misreading cost a full
+        # probe run before the int16/float comparison found it.
+        data = np.asarray(frame)
+        if data.dtype.kind == "f" and data.size and float(np.abs(data).max()) <= 1.5:
+            data = (data * 32768.0).astype(np.int16)
         # openwakeword wants 1280 samples of 16 kHz (80 ms) and will raise on
         # anything else. Padding a short frame is correct: audio does not stop
         # existing at a block boundary, and a fixed-size model has to be fed
         # something.
         want = 1280
-        data = frame
         if len(data) < want:
             data = np.pad(data, (0, want - len(data)))
         elif len(data) > want:
@@ -656,9 +743,9 @@ class WakeWord:
             # spanning a block boundary is still seen.
             best = 0.0
             for start in range(0, len(data) - want + 1, want):
-                best = max(best, float(np.max(self._model.predict(data[start:start + want]))))
+                best = max(best, self._score_chunk(data[start:start + want]))
             return best
-        return float(np.max(self._model.predict(data)))
+        return self._score_chunk(data)
 
     def fired(self, frame: Any) -> bool:
         return self.score(frame) >= self.threshold
@@ -687,4 +774,11 @@ def describe() -> dict[str, Any]:
     except Exception as why:  # noqa: BLE001
         out["default_input"] = None
         out["default_error"] = str(why)
+    # The wake word, resolved by looking rather than by assuming. `describe()` is
+    # the one call a user can make to find out whether voice will work at all, so
+    # it reports the phrase it answers to and the file behind it - not merely that
+    # some model is somewhere.
+    out["wake_word"] = WAKE_WORD
+    out["wake_model"] = str(wake_model_path() or "")
+    out["wake_models_available"] = wake_models_available()
     return out

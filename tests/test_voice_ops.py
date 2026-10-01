@@ -416,10 +416,10 @@ def test_watch_is_refused_without_a_trained_wake_word(desk):
     string match. Falling back would mean the assistant transcribing every room
     sound, which is the opposite of what turning it on asked for.
     """
-    desk._wake_model_path = lambda: Path("G:/nowhere/yo_archie.onnx")
+    desk._wake_model_path = lambda: None
     with pytest.raises(Refused) as caught:
         desk.op_voice_watch({})
-    assert "yo_archie" in str(caught.value)
+    assert audio.WAKE_WORD in str(caught.value)
 
 
 def test_watch_reports_the_second_time_that_it_is_already_listening(desk):
@@ -498,7 +498,7 @@ def loop_ready(monkeypatch):
     class FakeWake:
         ok = True
         error = ""
-        name = "yo_archie"
+        name = audio_mod.WAKE_WORD
 
         def score(self, frame):
             return 0.0
@@ -520,7 +520,7 @@ def loop_ready(monkeypatch):
     # the point of the fixture is that the check runs against something real; a
     # monkeypatched predicate would pass whether or not the check ever fired.
     tmp = tempfile.TemporaryDirectory()
-    trained = Path(tmp.name) / "yo_archie.onnx"
+    trained = Path(tmp.name) / "hey_jarvis_v0.1.onnx"
     trained.write_bytes(b"not really a model")
     monkeypatch.setattr(Daemon, "_wake_model_path", lambda self: trained)
     yield cal

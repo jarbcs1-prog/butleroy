@@ -317,7 +317,7 @@ measurement, and it is not a code measurement.
 | TTS | `speech.py` | done — piper, 3 voices, measured **2.6 words/sec** |
 | STT | `speech.py` | done — faster-whisper `small.en` CPU/int8, **RTF 1.30, WER 0.000, 0.27 GiB** |
 | Capture & endpointing | `audio.py` | done — native-rate open then resample, hysteresis band, **measured** calibration |
-| Wake word | `audio.py` + `train_wakeword.py` | trained on synthesised audio; **never tested on a mouth** (D55) |
+| Wake word | `audio.py` (`WAKE_WORD = "hey_jarvis"`) | pretrained, downloaded; 6/6 recall on synthesis, 11/11 ordinary speech at 0.000, weak on "hey + name" shapes (D56); **never tested on a mouth** (D54) |
 | The loop | `voice_loop.py` | done — wake → segment → transcribe → brain → speak, one turn at a time (D51) |
 | Registry | `tools.py` / `policy.py` | done — `voice.speak` / `voice.listen` (T3, `audible`) / `voice.status` (T0) |
 | Daemon | `daemon.py` | done — executors, previews, and `voice.watch` on its own thread |
@@ -338,14 +338,15 @@ Three plan lines are now wrong, and being wrong is worth recording:
   English configurations from OmniVoice's voice design), which is also exactly what a
   synthetic wake-word corpus is starved on.
 
-**The one measurement left, and why it is the one that matters.** The trainer's verdict
-is measured on audio it synthesised. That answers "did the network learn" and not "will
-this work on this desk" — a synthesised voice is cleaner, louder and carries none of the
-room. `probe_wakeword_real.py` measures the four things that fail separately: recall,
-false fires on room tone, false fires on **ordinary speech** (the hard one — silence is
-easy, conversation is not), and latency from the first frame carrying energy rather than
-from record-start. PASS is ≥70% recall, ≤1.0 s median latency, zero room-tone fires, ≤1
-speech fire.
+**The one measurement left, and why it is the one that matters.** The custom
+trainer's verdict was measured on audio it synthesised - and the model never
+learned at all, which is why the wake word is now pretrained rather than trained
+(D56). The pretrained numbers above are also on synthesis: piper is cleaner,
+louder and carries none of the room. `probe_wakeword_real.py` measures the four
+things that fail separately: recall, false fires on room tone, false fires on
+**ordinary speech** (the hard one — silence is easy, conversation is not), and
+latency from the first frame carrying energy rather than from record-start. PASS
+is ≥70% recall, ≤1.0 s median latency, zero room-tone fires, ≤1 speech fire.
 
 > A wake word that misses you is an inconvenience; one that fires on your television
 > trains you to ignore it. The second is why `voice.watch` **refuses** when no wake word

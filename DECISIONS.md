@@ -1405,3 +1405,58 @@ Two corollaries, both paid for:
 
 Recording this because the instinct was to check the numbers harder each time,
 and each check would have passed.
+
+---
+
+## D56 - Answer to someone else's name, and hear the difference first
+
+The custom "yo archie" model is abandoned. Its last measurement: every input, the
+phrase and ordinary speech alike, scoring 0.061 - a constant predictor after 8000
+steps, most likely trained into predicting negative by the inherited
+`val_set_hrs = 11.3` doubling against a two-minute corpus. Retraining correctly
+was priced at ~25 minutes and offered; the choice was openWakeWord's pretrained
+"hey jarvis" instead - downloaded, not trained, ~20 KB, zero VRAM, measured by
+upstream rather than by us.
+
+That trade has a name and a cost, both stated plainly. The name it answers to is
+not the user's phrase, and "hey jarvis" while the assistant is called Archie
+everywhere else is a standing oddity, not a settled answer. The cost is
+dependence on someone else's measurement: upstream's <0.5 false-accepts/hour on
+dinner-party noise, not our room, our microphone, our mouth. Per D54 the mouth
+test is still owed and nothing here replaces it.
+
+What was measured here, on piper synthesis through the real `WakeWord.score`:
+
+* 6/6 positives fire, min 0.973, median 0.998.
+* 11/11 ordinary sentences score exactly 0.000 - including "yo archie".
+* 3/14 near-misses fire: "hey javascript" (0.993), "hey jarvisian" (0.999),
+  "hey alexa what is the weather" (0.958). All three share the carrier "hey"
+  and the two-word-plus-name shape. No threshold separates the adversarial set:
+  min(pos) 0.973 against max(neg) 0.994.
+
+Three implementation lessons, each paid for in the same session:
+
+* **`Model.predict` returns a dict, not an array.** The first `score` called
+  `np.max` on it and raised TypeError on every frame - a wake word that could
+  never fire, surfacing as "no detection" rather than the crash it was. Read the
+  module; the docstring says `Returns: dict`.
+* **Float audio in [-1, 1] scores ~0.0001 on every window including the phrase.**
+  The probe fed normalized float while production feeds int16, and measured a
+  scaling rather than a wake word: all zeros, both classes, identical to three
+  decimals - the same confident nothing the custom model produced for real.
+  `score` now scales float to int16 with the convention stated, and the probe
+  feeds what the microphone yields. A scaling with no error signal is a trap;
+  this one cost a full probe run.
+* **`synthesise` wrote piper's 22050 Hz while its docstring promised 16 kHz.**
+  Whisper resamples internally so the round trip stayed green; the wake-word
+  probe, reading raw samples, measured a resampling. It resamples on the way
+  out now, once, so the file is what the docstring says. A function that is not
+  what its docstring says is the same lie as a file that is not what its header
+  says - whisper's forgiveness is what let it stand.
+
+Open items, in order: the mouth test (recall on the user's voice, room-tone and
+ordinary-speech false fires, latency from the first frame carrying energy); then
+the threshold choice, which the adversarial numbers above inform but do not
+settle; then `voice.watch` end to end. `models/wakeword/yo_archie.*` remain on
+disk as evidence, not as anything the daemon loads - no `src` file references
+the old phrase.

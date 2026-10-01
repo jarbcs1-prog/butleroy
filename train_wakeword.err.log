@@ -1,0 +1,40 @@
+Training:   0%|          | 0/8000 [00:00<?, ?it/s]Training:   0%|          | 21/8000 [00:00<00:38, 208.32it/s]Training:   1%|          | 42/8000 [00:00<00:38, 207.22it/s]Training:   1%|          | 64/8000 [00:00<00:37, 210.82it/s]Training:   1%|1         | 86/8000 [00:00<00:37, 212.63it/s]Training:   1%|1         | 108/8000 [00:00<00:38, 206.48it/s]Training:   2%|1         | 129/8000 [00:00<00:38, 206.28it/s]Training:   2%|1         | 137/8000 [00:00<00:38, 206.08it/s]
+Training:   0%|          | 0/800.0 [00:00<?, ?it/s]Training:   3%|2         | 22/800.0 [00:00<00:03, 219.49it/s]Training:   6%|5         | 44/800.0 [00:00<00:05, 140.61it/s]Training:   8%|8         | 65/800.0 [00:00<00:04, 164.74it/s]Training:  11%|#         | 86/800.0 [00:00<00:05, 127.62it/s]Training:  14%|#3        | 109/800.0 [00:00<00:04, 152.26it/s]Training:  16%|#6        | 128/800.0 [00:00<00:05, 126.56it/s]Training:  17%|#7        | 137/800.0 [00:00<00:04, 140.84it/s]
+Training:   0%|          | 0/800.0 [00:00<?, ?it/s]Training:   3%|2         | 23/800.0 [00:00<00:03, 225.41it/s]Training:   6%|5         | 46/800.0 [00:00<00:05, 147.69it/s]Training:   8%|8         | 68/800.0 [00:00<00:04, 169.54it/s]Training:  11%|#         | 87/800.0 [00:00<00:05, 136.20it/s]Training:  14%|#3        | 110/800.0 [00:00<00:04, 160.70it/s]Training:  16%|#6        | 128/800.0 [00:00<00:04, 137.20it/s]Training:  17%|#7        | 137/800.0 [00:00<00:04, 150.59it/s]
+G:\localaized\.venv\Lib\site-packages\openwakeword\train.py:149: UserWarning: Exporting a model while it is in training mode. Please ensure that this is intended, as it may lead to different behavior during inference. Calling model.eval() before export is recommended.
+  torch.onnx.export(self.model.to("cpu"), torch.rand(self.input_shape)[None, ], output_path,
+W1001 23:05:26.581000 5824 .venv\Lib\site-packages\torch\onnx\_internal\exporter\_registration.py:107] torchvision is not installed. Skipping torchvision::nms
+W1001 23:05:26.581000 5824 .venv\Lib\site-packages\torch\onnx\_internal\exporter\_registration.py:107] torchvision is not installed. Skipping torchvision::roi_align
+W1001 23:05:26.583000 5824 .venv\Lib\site-packages\torch\onnx\_internal\exporter\_registration.py:107] torchvision is not installed. Skipping torchvision::roi_pool
+W1001 23:05:26.583000 5824 .venv\Lib\site-packages\torch\onnx\_internal\exporter\_registration.py:107] torchvision is not installed. Skipping torchvision::deform_conv2d
+Traceback (most recent call last):
+  File "G:\localaized\train_wakeword.py", line 587, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "G:\localaized\train_wakeword.py", line 544, in main
+    model.export_to_onnx(str(out), class_mapping="")
+  File "G:\localaized\.venv\Lib\site-packages\openwakeword\train.py", line 149, in export_to_onnx
+    torch.onnx.export(self.model.to("cpu"), torch.rand(self.input_shape)[None, ], output_path,
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\__init__.py", line 294, in export
+    return _compat.export_compat(
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\_internal\exporter\_compat.py", line 161, in export_compat
+    onnx_program = _core.export(
+                   ^^^^^^^^^^^^^
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\_internal\exporter\_flags.py", line 27, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\_internal\exporter\_core.py", line 1421, in export
+    result = strategy(model, args, kwargs, dynamic_shapes=dynamic_shapes)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\_internal\exporter\_capture_strategies.py", line 148, in __call__
+    self._success(model)
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\_internal\exporter\_capture_strategies.py", line 274, in _success
+    self._verbose_print(
+  File "G:\localaized\.venv\Lib\site-packages\torch\onnx\_internal\exporter\_capture_strategies.py", line 31, in <lambda>
+    return lambda *args, **kwargs: print("[torch.onnx]", *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\PC Principal\AppData\Roaming\uv\python\cpython-3.11-windows-x86_64-none\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 84: character maps to <undefined>

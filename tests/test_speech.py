@@ -101,6 +101,26 @@ def test_capture_format_is_what_whisper_wants():
     assert speech.SAMPLE_WIDTH == 2
 
 
+def test_synthesise_writes_the_rate_it_promises(tmp_path):
+    """The docstring says 16 kHz mono. Piper renders 22050 Hz.
+
+    For a stretch the code wrote piper's native rate into the header while the
+    docstring claimed 16 kHz - and whisper resamples internally, so the round
+    trip stayed green and nobody noticed. The probe that feeds raw samples to
+    the wake word noticed: it measured a resampling rather than a wake word.
+    A file that is not what its header is not the only lie; a function that is
+    not what its docstring says is the same one.
+    """
+    import wave
+
+    made = speech.synthesise(["hey jarvis"], tmp_path)
+    assert made, "piper produced no audio"
+    with wave.open(str(made[0][1]), "rb") as fh:
+        assert fh.getframerate() == speech.SAMPLE_RATE == 16000
+        assert fh.getnchannels() == 1
+        assert fh.getsampwidth() == speech.SAMPLE_WIDTH
+
+
 # --- the memory probe ---------------------------------------------------------
 
 

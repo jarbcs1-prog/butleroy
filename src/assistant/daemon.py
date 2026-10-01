@@ -1311,19 +1311,25 @@ class Daemon:
             "running": self._voice_thread is not None and self._voice_thread.is_alive(),
             "turns": self._voice_loop.stats.turns if self._voice_loop else 0,
             "stats": _voice_stats(self._voice_loop) if self._voice_loop else {},
-            "wake_model_present": self._wake_model_path().exists(),
+            "wake_model_present": self._wake_model_path() is not None,
         }
         return status
 
-    def _wake_model_path(self) -> Path:
-        """Where the trained wake word is expected, and where it will be written.
+    def _wake_model_path(self) -> Path | None:
+        """The wake-word file this daemon will actually load, or None.
 
-        One function so the question "is the wake word trained?" has one answer.
-        A second path would eventually be the one the trainer writes and the other
-        the one the loop reads, and the symptom would be a loop that reports no
-        wake word on a machine where one was just trained.
+        One function so the question "is there a wake word?" has one answer. A
+        second path would eventually be the one the loader reads and the other the
+        one the check looks at, and the symptom would be a loop that reports no
+        wake word on a machine where one is installed.
+
+        It resolves through the audio module, because audio.WakeWord is what loads
+        the model, and a check that reasoned about a different file than the loader
+        does would be a check of a hope. Returns None rather than a Path that does
+        not exist, so a missing wake word cannot be told from one nobody looked
+        for - the two look identical and mean opposite things.
         """
-        return ROOT / "models" / "wakeword" / "yo_archie.onnx"
+        return audio.wake_model_path(audio.WAKE_WORD)
 
     def _voice_turn(self, text: str) -> str:
         """One spoken request, through the same gate every other request uses.
@@ -1362,10 +1368,11 @@ class Daemon:
         if self._voice_thread is not None and self._voice_thread.is_alive():
             return {"started": False, "reason": "already listening",
                     "turns": self._voice_loop.stats.turns}
-        if not self._wake_model_path().exists():
+        if self._wake_model_path() is None:
             raise Refused(
-                f"no wake word at {self._wake_model_path()}. Train it first "
-                f"(train_wakeword.py), or use voice.listen without a wake word."
+                f"no wake word named {audio.WAKE_WORD!r} is installed. Run "
+                f"openwakeword.utils.download_models(), or use voice.listen "
+                f"without one - available: {audio.wake_models_available()}"
             )
         turns = args.get("turns")
         loop = voice_loop.VoiceLoop(
@@ -1373,7 +1380,7 @@ class Daemon:
             device=args.get("device"),
             voice=str(args.get("voice") or speech.DEFAULT_VOICE),
             seconds=float(args.get("seconds", 30)),
-            wake_name="yo_archie",
+            wake_name=audio.WAKE_WORD,
         )
         loop.open()
         self._voice_loop = loop

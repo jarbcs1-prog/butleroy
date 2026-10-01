@@ -242,6 +242,23 @@ def synthesise(sentences: Sequence[str], out_dir: str | os.PathLike,
             continue
         audio = b"".join(bytes(c.audio_int16_bytes) for c in chunks)
         rate = chunks[0].sample_rate or SAMPLE_RATE
+        if rate != SAMPLE_RATE:
+            # Piper renders at its own native rate (22050 Hz for the voices
+            # here), while everything downstream - whisper, the wake word, the
+            # segmenter - consumes 16 kHz. Writing the native rate into the
+            # header would be honest but useless: whisper resamples internally
+            # so transcription stayed correct, while anything reading raw
+            # samples at face value (a wake-word window, a probe asserting the
+            # fixture is what it claims) would measure a resampling rather
+            # than what it came for. Resample here, once, so the file is what
+            # the docstring above says it is.
+            import numpy as np
+
+            raw = np.frombuffer(audio, dtype=np.int16)
+            n_out = max(1, int(len(raw) * SAMPLE_RATE / rate))
+            idx = np.linspace(0, len(raw) - 1, n_out).astype(np.int64)
+            audio = raw[idx].tobytes()
+            rate = SAMPLE_RATE
         target = out_dir / f"tts_{i:02d}.wav"
         with wave.open(str(target), "wb") as fh:
             fh.setnchannels(1)

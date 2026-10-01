@@ -82,7 +82,7 @@ class VoiceLoop:
         device: str | int | None = None,
         voice: str = speech.DEFAULT_VOICE,
         seconds: float = 30.0,
-        wake_name: str = "yo_archie",
+        wake_name: str = audio_mod.WAKE_WORD,
         out_dir: str | Path | None = None,
         speak: bool = True,
         mic: Any = None,
@@ -356,7 +356,7 @@ def describe() -> dict[str, Any]:
     out = dict(audio_mod.describe())
     out["loop"] = {
         "default_voice": speech.DEFAULT_VOICE,
-        "wake_word": "yo_archie",
+        "wake_word": audio_mod.WAKE_WORD,
         "muted_while_speaking": True,
         "cost": "no VRAM (D50); whisper ~0.27 GiB RAM, held while voice is on",
     }

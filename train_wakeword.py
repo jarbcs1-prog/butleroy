@@ -429,7 +429,13 @@ def main() -> int:
     # Held-out negatives, for the false-fire metric `auto_train` computes. Never
     # seen in a batch and never fitted on, which is what makes the number a
     # measurement rather than a recollection.
-    fp_audio = [neg_chunks[i][0] for i in val_neg]
+    #
+    # Featurised, and as its own loader rather than borrowed from `val_feats`.
+    # `train_model` iterates this and calls `data[0].to(self.device)`, so it is a
+    # DataLoader of the same windows the network consumes - handing it raw audio
+    # dies with `'numpy.float32' object has no attribute 'to'`, which is a fine
+    # error but a confusing one, since the parameter's *name* says audio.
+    fp_feats, fp_labels = frame_features([neg_chunks[i] for i in val_neg])
     print(f"   train {train_feats.shape} "
           f"pos={int((train_labels == 1).sum())} "
           f"neg={int((train_labels == 0).sum())}")
@@ -488,18 +494,51 @@ def main() -> int:
         return torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True, drop_last=True)
 
     model = Model(n_classes=1, input_shape=(16, 96), model_type="dnn")
-    # `fp_audio` is the held-out negative set built above. It wants audio, not
-    # features, and the one on the next line used to be a slice of the *training*
-    # negatives - so the false-fire rate `auto_train` reports would have been
-    # measured against audio the model was already fitted on.
+    # `fp_feats` is the held-out negative set, featurised. The one on the next
+    # line used to be a slice of the *training* negatives - so the false-fire
+    # rate `auto_train` reports would have been measured against audio the model
+    # was already fitted on.
+    #
+    # One inherited assumption is knowingly left in place. `auto_train` divides its
+    # false-positive count by `val_set_hrs = 11.3`, hardcoded, and that is the length
+    # of *upstream's* false-positive corpus. Ours is a couple of minutes, so the
+    # per-hour figure is too large by two orders of magnitude. The only thing it
+    # feeds is `if self.best_val_fp > target: double the negative weight`, so the
+    # error makes us weigh negatives more heavily - conservative in the right
+    # direction for a wake word, and not worth patching a vendored file to correct.
+    # The number that matters is measured in step 7, on held-out audio, with its
+    # denominator printed.
     model.auto_train(
         dataset(train_feats, train_labels),
         dataset(val_feats, val_labels),
-        fp_audio,
+        dataset(fp_feats, fp_labels),
         steps=8000,
         max_negative_weight=500,
         target_fp_per_hour=0.2,
     )
+
+    # Persist the weights BEFORE exporting, not after.
+    #
+    # Run 6 trained all 8000 steps and then died at `export_to_onnx` because
+    # torch 2.14's ONNX exporter imports `onnxscript`, which was not installed.
+    # The network was fine. The export was not. And because the only artefact
+    # was the `.onnx`, eleven minutes of training went with it - along with the
+    # 138 seconds of featurisation, which is deterministic and would have had to
+    # be repeated verbatim to get the same tensors back.
+    #
+    # A checkpoint is not a nicety. It is the difference between a downstream
+    # failure costing a minute and costing a quarter of an hour, and it is four
+    # lines. This is the same lesson as the class-count guard that caught the
+    # featurisation bug: the thing you add for one failure is the thing that
+    # saves you from the next one, and the fix is almost never in the place the
+    # failure pointed at.
+    ckpt = MODEL_DIR / "yo_archie.trained.pt"
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    import torch
+    torch.save({"model": model.model.state_dict(),
+                "classes": list(model.classes.keys()) if hasattr(model, "classes") else [],
+                "threshold": float(getattr(model, "threshold", 0.5))}, ckpt)
+    print(f"6a. checkpointed {ckpt} ({ckpt.stat().st_size:,} bytes) before exporting")
 
     out = MODEL_DIR / "yo_archie.onnx"
     model.export_to_onnx(str(out), class_mapping="")

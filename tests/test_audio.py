@@ -287,6 +287,69 @@ def test_the_wake_word_is_told_not_to_use_the_gpu():
     assert '\"onnx\"' in src or "'onnx'" in src
 
 
+# ------------------------------------------------- wake-word answer extraction
+
+
+def test_the_default_wake_word_is_the_chosen_pretrained_phrase():
+    """The assistant answers to "hey jarvis", not to a model nobody trained.
+
+    The previous default named a phrase with no file behind it, so voice.watch
+    refused on every machine including this one. The default must be a phrase
+    that resolves to a file, which is asserted rather than assumed.
+    """
+    assert audio.WAKE_WORD == "hey_jarvis"
+    assert audio.WakeWord().name == "hey_jarvis"
+
+
+def test_score_reads_the_models_answer_for_our_phrase():
+    """`Model.predict` returns a dict of every model to its score, not an array.
+
+    The first version of `score` called `np.max` on that dict and raised
+    TypeError on every frame - which meant the wake word could never fire, and
+    the failure would have surfaced as "no detection" rather than as the crash
+    it was. A fake model returning a dict exercises the indexing without
+    loading 1.2 MB.
+    """
+    from types import SimpleNamespace
+
+    w = audio.WakeWord(name="definitely_not_a_real_model")
+    assert not w.ok
+    w.ok = True
+    w.name = "hey_jarvis"
+    w._model = SimpleNamespace(
+        predict=lambda chunk: {"hey_jarvis": 0.83, "alexa": 0.01})
+    frame = np.zeros(1280, dtype=np.int16)
+    assert w.score(frame) == 0.83
+    assert w.fired(frame) is True
+
+
+def test_score_treats_normalized_float_as_the_same_signal():
+    """Float audio in [-1, 1] is the same signal as int16, not a whisper.
+
+    The probe fed normalized float and measured ~0.0001 on every window
+    including the phrase itself - which reads exactly like "the model does not
+    fire" when the truth is "the model was fed silence". A scaling convention
+    with no error signal is a trap, so the conversion is asserted here on a
+    synthetic signal rather than trusted to a comment.
+    """
+    from types import SimpleNamespace
+
+    loud = (0.9 * np.sin(2 * np.pi * 440 *
+                         np.arange(1280) / 16000) * 32767).astype(np.int16)
+    for frame in (loud, loud.astype(np.float32) / 32768.0):
+        w = audio.WakeWord(name="definitely_not_a_real_model")
+        assert not w.ok
+        w.ok = True
+        w.name = "hey_jarvis"
+        seen = {}
+        def predict(chunk, _seen=seen):
+            _seen.setdefault("dtype", str(chunk.dtype))
+            return {"hey_jarvis": 0.5}
+        w._model = SimpleNamespace(predict=predict)
+        assert w.score(frame) == 0.5
+        assert seen["dtype"] == "int16", seen
+
+
 # -------------------------------------------------------------------- describe
 
 

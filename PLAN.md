@@ -307,15 +307,56 @@ completes with an intact audit chain. **First time this touches real project cod
 
 ---
 
-## Phase 5 — Voice
+## Phase 5 — Voice · **built; the gate is not yet closed**
 
-- `openWakeWord` or Silero VAD — **not `pvporcupine`**, it needs a cloud key (D7).
-- `faster-whisper` / CTranslate2 — **CPU by default**, promoted to GPU only while listening (D18).
-- `piper` for TTS — ONNX, CPU, tiny.
-- Whisper→brain→piper round trip with the model TTL respected mid-turn.
+Every component exists and the text side is measured. What is missing is the last
+measurement, and it is not a code measurement.
 
-**Gate:** wake word → transcription → response → speech, end to end, with no VRAM overshoot past
-the D1 ceiling and no window stealing focus mid-sentence.
+| Component | File | State |
+|---|---|---|
+| TTS | `speech.py` | done — piper, 3 voices, measured **2.6 words/sec** |
+| STT | `speech.py` | done — faster-whisper `small.en` CPU/int8, **RTF 1.30, WER 0.000, 0.27 GiB** |
+| Capture & endpointing | `audio.py` | done — native-rate open then resample, hysteresis band, **measured** calibration |
+| Wake word | `audio.py` + `train_wakeword.py` | trained on synthesised audio; **never tested on a mouth** (D54) |
+| The loop | `voice_loop.py` | done — wake → segment → transcribe → brain → speak, one turn at a time (D51) |
+| Registry | `tools.py` / `policy.py` | done — `voice.speak` / `voice.listen` (T3, `audible`) / `voice.status` (T0) |
+| Daemon | `daemon.py` | done — executors, previews, and `voice.watch` on its own thread |
+
+Three plan lines are now wrong, and being wrong is worth recording:
+
+* **D18's "promoted to GPU while listening" is withdrawn, not built (D50).** The measurement
+  contradicted it: CPU whisper is real-time and costs 0.27 GiB of RAM out of 16. An
+  `onnxruntime-gpu` install competing with `llama-cpp-python` for the card is not worth
+  1.3× on something already faster than the user speaks. **Voice costs no VRAM at all.**
+* **`openWakeWord` was chosen over Silero VAD**, but Silero ships *inside* openWakeWord
+  (`silero_vad.onnx`), so the endpointing upgrade from `F:\axiom-voice-agent` is available
+  without their checkout. Worth revisiting: it discriminates better than RMS and is
+  gain-invariant. Not adopted because as written it is worse — it discards onset frames
+  (the initial consonant) and has no minimum-utterance guard.
+* **`piper` is not tiny enough to be uninteresting** and the voice is fixed-timbre: 3
+  voices. `F:\voicestudio` showed the axis that matters is *speaker* diversity (~9,600
+  English configurations from OmniVoice's voice design), which is also exactly what a
+  synthetic wake-word corpus is starved on.
+
+**The one measurement left, and why it is the one that matters.** The trainer's verdict
+is measured on audio it synthesised. That answers "did the network learn" and not "will
+this work on this desk" — a synthesised voice is cleaner, louder and carries none of the
+room. `probe_wakeword_real.py` measures the four things that fail separately: recall,
+false fires on room tone, false fires on **ordinary speech** (the hard one — silence is
+easy, conversation is not), and latency from the first frame carrying energy rather than
+from record-start. PASS is ≥70% recall, ≤1.0 s median latency, zero room-tone fires, ≤1
+speech fire.
+
+> A wake word that misses you is an inconvenience; one that fires on your television
+> trains you to ignore it. The second is why `voice.watch` **refuses** when no wake word
+> is trained rather than falling back to an always-open microphone.
+
+**Hardware note that cost a session.** Every input on this machine read peak ≤54 of 32767
+— the noise floor of a quiet room. It was the **USB port**, not the code: after the user
+moved it, `Microphone (3- Usb Audio Device` reads peak 20154 and the round trip returned
+`'as we test if it works like that.'` Ask a device for its own rate; four of the nine here
+fail a 16 kHz request outright with `Invalid sample rate`, which reads exactly like
+broken hardware.
 
 ---
 

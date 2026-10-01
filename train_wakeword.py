@@ -91,6 +91,11 @@ POSITIVE_FRAMES = [
 FRAME = 1280
 FIRST_FRAME = 12400
 
+#: Frames per prediction. Not 1: `get_features` stacks sixteen 80 ms frames into
+#: one 1536-column row, so a *label* covers sixteen frames and the feature array
+#: and the label array must be the same length.
+WINDOW = 16
+
 
 def frame_labels(n_frames: int, start: int, end: int, pad: int = 8000,
                   positive: bool = True) -> np.ndarray:
@@ -307,20 +312,66 @@ def main() -> int:
         # are different quantities, and reading the second as the first is what
         # turned 153 real features into a claimed 12,600 - a training set ten
         # times smaller than the label spans had been drawn against.
-        feats = featurizer.feature_buffer[before:]
-        made = feats.shape[0]
+        raw = featurizer.feature_buffer[before:]
+        made = raw.shape[0]
         if made <= 0:
             raise SystemExit("the featuriser produced no frames at all")
+        if made <= WINDOW:
+            raise SystemExit(
+                f"the featuriser produced {made} frames, which is fewer than the "
+                f"{WINDOW}-frame window a prediction covers; there is nothing to "
+                f"learn from a single prediction"
+            )
+
+        # A prediction is not one frame. `get_features` (utils.py) hands the
+        # network sixteen consecutive 96-dim embeddings flattened into one row -
+        # (1, 16*96) = (1, 1536) - because that is 1.28 s of context, and a wake
+        # word cannot be identified from 80 ms of audio.
+        #
+        # Passing `feature_buffer` rows straight through produced (n, 96), which
+        # has a plausible shape, a plausible count, and a plausible label array,
+        # and only failed at the first forward pass:
+        #   `mat1 and mat2 shapes cannot be multiplied (256x96 and 1536x128)`
+        #
+        # Three separate numbers all being individually reasonable is what made
+        # this survive three runs. The count was right, the labels were right, and
+        # the unit being counted was not the unit the model consumes.
+        feats = np.lib.stride_tricks.sliding_window_view(
+            raw, WINDOW, axis=0
+            # `.transpose(0, 2, 1)` is not optional. With `axis=0` the window
+            # function returns (n_windows, dim, WINDOW) - feature-major - so a
+            # straight reshape interleaves the 96 dimensions of all sixteen frames
+            # instead of laying the frames end to end. The result has the right
+            # shape, the right count, and the right labels, and the network would
+            # have learned from a row whose columns are in an order it has no
+            # name for. Same failure mode as the 96-column bug: everything about
+            # the shape is fine and the content is wrong.
+        ).transpose(0, 2, 1).reshape(len(raw) - WINDOW + 1, WINDOW * raw.shape[1])
 
         # float32 because the Dataset stacks these into a tensor alongside the
-        # features, which are float; the bitwise-or needs an integer view, so it is
+        # labels, which are float; the bitwise-or needs an integer view, so it is
         # cast rather than accumulated in place. `|=` on a float array raises, and
         # the float is required - so the cast is not a tidiness fix, it is the
         # only order the two types can be combined in.
-        mask = np.zeros(len(feats), dtype=bool)
+        per_frame = np.zeros(made, dtype=bool)
         for begin, finish, positive in regions:
-            mask |= frame_labels(len(feats), begin, finish, positive=positive).astype(bool)
-        return feats, mask.astype(np.float32)
+            per_frame |= frame_labels(made, begin, finish, positive=positive).astype(bool)
+
+        # A window is positive if *any* frame in it is, not if its last frame is.
+        # The network is being asked "does this 1.28 s contain the phrase", and a
+        # window that begins just before the phrase and ends just after it is a
+        # positive example whose final frame happens to be negative. Taking the
+        # maximum is the honest reading of the window's contents.
+        #
+        # This also absorbs the `pad` in `frame_labels`: the padding is 8000
+        # samples, about 6 frames, and the window is 16 - so a window that reaches
+        # into the padded region is already positive without any offset fudging
+        # here. The pad needed re-checking against the *window* length once the
+        # window existed; it did, and no correction was required.
+        mask = np.lib.stride_tricks.sliding_window_view(
+            per_frame, WINDOW
+        ).max(axis=-1)
+        return feats.astype(np.float32), mask.astype(np.float32)
 
     pos_chunks: list[tuple[np.ndarray, int, int]] = []
     for wav in pos_wavs:

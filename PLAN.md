@@ -317,7 +317,7 @@ measurement, and it is not a code measurement.
 | TTS | `speech.py` | done — piper, 3 voices, measured **2.6 words/sec** |
 | STT | `speech.py` | done — faster-whisper `small.en` CPU/int8, **RTF 1.30, WER 0.000, 0.27 GiB** |
 | Capture & endpointing | `audio.py` | done — native-rate open then resample, hysteresis band, **measured** calibration |
-| Wake word | `audio.py` + `train_wakeword.py` | trained on synthesised audio; **never tested on a mouth** (D54) |
+| Wake word | `audio.py` + `train_wakeword.py` | trained on synthesised audio; **never tested on a mouth** (D55) |
 | The loop | `voice_loop.py` | done — wake → segment → transcribe → brain → speak, one turn at a time (D51) |
 | Registry | `tools.py` / `policy.py` | done — `voice.speak` / `voice.listen` (T3, `audible`) / `voice.status` (T0) |
 | Daemon | `daemon.py` | done — executors, previews, and `voice.watch` on its own thread |

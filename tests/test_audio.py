@@ -7,15 +7,19 @@ become a request, is a 48 kHz block stored at the right length. Those are
 properties of the logic and they are checkable exactly, in a millisecond, with a
 signal whose peak and length are known to the digit.
 
-What cannot be tested this way is whether a microphone works. That was measured
-directly instead, and the honest answer was no device on the machine carried any
-energy above the noise floor. A test suite that pretended otherwise would be
-testing a stub.
+What cannot be tested this way is whether a microphone works. That is measured
+directly instead, by `probe_roundtrip.py`, and the answer was yes - but only after
+the device was moved to a different USB port. Before that every input on the
+machine was digitally silent, which looked exactly like broken hardware and was
+not: the drivers were healthy and simply had nothing arriving. A test suite that
+pretended either outcome would be testing a stub.
 """
 
 import math
 
 import numpy as np
+import sys
+
 import pytest
 
 from assistant import audio
@@ -406,3 +410,71 @@ def test_a_measured_threshold_still_captures_speech_above_it():
     )
     assert utt is not None
     assert utt.seconds > 0.5
+
+
+# --- the rate a device is asked for ------------------------------------------
+#
+# Found by running the round trip against the real microphone: every
+# index-addressed open of a 48 kHz device failed with "Invalid sample rate",
+# because `Microphone(device=5)` had 44100 hardcoded for the case where a caller
+# passed an index. The name-based and default paths looked the rate up correctly,
+# so the bug only appeared on the one path a caller would naturally write.
+
+def test_an_index_addressed_device_is_opened_at_its_own_rate(monkeypatch):
+    """Hardcoding a rate for the index path is the bug, not the fix."""
+    import assistant.audio as A
+
+    seen = {}
+
+    class FakeStream:
+        def start(self):
+            seen["started"] = True
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeSd:
+        class InputStream:
+            def __init__(self, **kw):
+                seen["samplerate"] = kw.get("samplerate")
+                seen["device"] = kw.get("device")
+                self._s = FakeStream()
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+    monkeypatch.setattr(A, "list_inputs", lambda: [
+        {"index": 3, "name": "A 48k device", "channels": 1, "rate": 48000},
+        {"index": 4, "name": "A 44k device", "channels": 1, "rate": 44100},
+    ])
+    monkeypatch.setitem(sys.modules, "sounddevice", FakeSd)
+    sys.modules["sounddevice"].InputStream = FakeSd.InputStream
+
+    for index, expected in ((3, 48000), (4, 44100)):
+        with A.Microphone(device=index):
+            assert seen["samplerate"] == expected, (
+                f"index {index} was opened at {seen['samplerate']} Hz, "
+                f"which is the fault this test exists for"
+            )
+
+
+def test_an_index_that_does_not_exist_is_refused_by_name(monkeypatch):
+    """Silently substituting a different microphone would be worse than a refusal:
+    the user would be talking into one device and recorded on another."""
+    import assistant.audio as A
+
+    monkeypatch.setattr(A, "list_inputs", lambda: [
+        {"index": 1, "name": "Real Mic", "channels": 1, "rate": 44100},
+    ])
+    with pytest.raises(A.NoInputDevice) as caught:
+        A.Microphone(device=7)
+    assert "7" in str(caught.value)

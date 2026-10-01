@@ -179,8 +179,19 @@ class Microphone:
         if device is None:
             chosen = default_input()
         elif isinstance(device, int):
-            chosen = {"index": device, "name": f"device {device}",
-                      "channels": 1, "rate": 44100}
+            # The rate must come from the device, and looking it up is the whole
+            # point of passing an index. Hardcoding 44100 here - which this did -
+            # makes a 48000 Hz device fail to open with "Invalid sample rate",
+            # which reads as broken hardware and is nothing of the kind. Measured:
+            # every index-addressed open on a 48 kHz device failed at 44100 Hz,
+            # and only because of this line.
+            matches = [d for d in list_inputs() if d["index"] == device]
+            if not matches:
+                known = ", ".join(str(d["index"]) for d in list_inputs()) or "(none)"
+                raise NoInputDevice(
+                    f"no input at index {device}. Available indices: {known}"
+                )
+            chosen = matches[0]
         else:
             matches = [d for d in list_inputs() if d["name"] == device]
             if not matches:

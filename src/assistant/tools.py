@@ -169,6 +169,29 @@ REFLECTION_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("reflect.report", Tier.READ, "Report reflection and capability state"),
 )
 
+# Voice. Speaking and listening are both outward-facing in a way the other tools
+# are not: `voice.speak` puts sound into a room where other people are, and
+# `voice.listen` opens a microphone. Both are T3.
+#
+# `voice.listen` is T3 for a reason that is worth stating, because it is the only
+# tool whose danger is not to the machine: a microphone that records without the
+# person in front of it hearing so is a recording device they did not consent to.
+# It is not destructive and not external, so the two automatic checks below would
+# let it through at a lower tier without this being stated.
+VOICE_TOOLS: tuple[ToolSpec, ...] = (
+    ToolSpec("voice.speak", Tier.IRREVERSIBLE,
+             "Say text out loud through the speakers", audible=True,
+             parameters={"text": {"type": "str"}}),
+    ToolSpec("voice.listen", Tier.IRREVERSIBLE,
+             "Listen through the microphone for one utterance and transcribe it",
+             audible=True,
+             parameters={"seconds": {"type": "int", "required": False},
+                         "device": {"type": "str", "required": False}}),
+    ToolSpec("voice.status", Tier.READ,
+             "Report what voice can do here, and what it costs",
+             parameters={}),
+)
+
 ALL_TOOLS: tuple[ToolSpec, ...] = (
     SYSTEM_TOOLS
     + FILE_TOOLS
@@ -177,6 +200,7 @@ ALL_TOOLS: tuple[ToolSpec, ...] = (
     + TEACHING_TOOLS
     + DELEGATION_TOOLS
     + REFLECTION_TOOLS
+    + VOICE_TOOLS
 )
 
 # Sanity check at import time rather than in a test: a tool accidentally
@@ -190,21 +214,23 @@ for _spec in ALL_TOOLS:
 # This is the invariant that stops a future edit from quietly demoting
 # `email.send` to T1.
 for _spec in ALL_TOOLS:
-    if _spec.destructive or _spec.external:
+    if _spec.destructive or _spec.external or _spec.audible:
         if _spec.tier is not Tier.IRREVERSIBLE:
+            flagged = ("destructive" if _spec.destructive
+                       else "external" if _spec.external else "audible")
             raise ValueError(
-                f"tool {_spec.name} is flagged "
-                f"{'destructive' if _spec.destructive else 'external'} "
+                f"tool {_spec.name} is flagged {flagged} "
                 f"but is declared {_spec.tier}; it must be T3"
             )
 
 # Conversely, a T3 tool that is neither destructive nor external is almost
 # certainly a mis-declaration.
 for _spec in ALL_TOOLS:
-    if _spec.tier is Tier.IRREVERSIBLE and not (_spec.destructive or _spec.external):
+    if _spec.tier is Tier.IRREVERSIBLE and not (
+            _spec.destructive or _spec.external or _spec.audible):
         raise ValueError(
-            f"tool {_spec.name} is declared T3 but is neither destructive nor "
-            f"external; check the declaration"
+            f"tool {_spec.name} is declared T3 but is neither destructive, "
+            f"external nor audible; check the declaration"
         )
 
 

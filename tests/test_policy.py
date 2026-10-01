@@ -188,10 +188,45 @@ class TestRegistryInvariants(unittest.TestCase):
                     self.assertIs(spec.tier, Tier.IRREVERSIBLE)
 
     def test_no_t3_tool_is_innocuous(self):
+        """Every T3 tool must be T3 for a *stated* reason.
+
+        Three reasons, not two. `destructive` and `external` cover the tools that
+        lose data or reach the network; `audible` covers the ones whose effect
+        leaves the machine - sound in a room, an open microphone. `voice.listen`
+        is neither destructive nor external and is still the one tool where being
+        wrong is unrecoverable in a way the user cannot undo by restoring a file,
+        so it must be able to reach T3 without claiming something untrue.
+
+        Before `audible` existed, this test and the matching import-time check
+        both rejected `voice.speak` and `voice.listen` as mis-declarations. The
+        tools were right and the rule was incomplete. Forcing them to set
+        `external` would have made the registry internally consistent by lying in
+        it, which is the worst of both: a check that cannot be satisfied honestly
+        teaches people to satisfy it dishonestly.
+        """
         for spec in ALL_TOOLS:
             if spec.tier is Tier.IRREVERSIBLE:
                 with self.subTest(tool=spec.name):
-                    self.assertTrue(spec.destructive or spec.external)
+                    self.assertTrue(
+                        spec.destructive or spec.external or spec.audible,
+                        f"{spec.name} is T3 for no stated reason",
+                    )
+
+    def test_audible_is_not_a_relabelling_of_external(self):
+        """The three reasons are governed differently and must stay distinct.
+
+        `external` is what D40 constrains to one host and one component;
+        `destructive` is what quarantine makes recoverable. If `audible` were
+        allowed to mean either, one of those guarantees would silently stop
+        applying to the voice tools.
+        """
+        for spec in ALL_TOOLS:
+            if spec.audible:
+                with self.subTest(tool=spec.name):
+                    self.assertFalse(
+                        spec.external and spec.destructive,
+                        f"{spec.name} claims every reason; pick the real one",
+                    )
 
     def test_tool_names_are_unique(self):
         names = [s.name for s in ALL_TOOLS]

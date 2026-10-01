@@ -77,6 +77,22 @@ class ToolSpec:
     # Remote/external side effects. A tool that can talk to the outside world
     # is a T3 candidate regardless of what it claims to do.
     external: bool = False
+    # Effect outside the machine: sound in a room, or an open microphone. A third
+    # reason for T3, added when `voice.speak` and `voice.listen` needed one.
+    #
+    # It is not `destructive` (nothing is deleted) and it is not `external`
+    # (nothing is sent anywhere), so before this flag existed the import-time check
+    # below correctly flagged both as mis-declarations - the tools were right and
+    # the rule was incomplete. Forcing them to claim `external` to get past the
+    # check would have put a lie in the registry, and a registry that has to lie to
+    # be internally consistent is a registry nobody can trust.
+    #
+    # The distinction matters because the two are governed differently: `external`
+    # is what D40 constrains to one host and one component, and `destructive` is
+    # what the quarantine makes recoverable. A microphone is neither, and it is
+    # still the one tool where being wrong is unrecoverable in a way the user
+    # cannot undo by restoring a file.
+    audible: bool = False
     # The tool's own arguments, so the registry can describe itself.
     #
     # D34 requires the decoding grammar to be generated from the live registry,

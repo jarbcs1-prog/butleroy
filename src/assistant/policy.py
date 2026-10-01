@@ -159,10 +159,13 @@ def _norm(path: str) -> str:
 
 
 def _under(candidate: str, root: str) -> bool:
-    """True if candidate is root or lives inside it.
+    r"""True if candidate is root or lives inside it.
 
     Uses `commonpath` rather than `startswith` because `C:\localaized-2` must
     not count as being inside `C:\localaized`.
+
+    Raw because of that backslash: a plain docstring turns `\l` into an invalid
+    escape sequence and Python warns about it on every import.
     """
     try:
         return os.path.commonpath([candidate, root]) == root
@@ -248,9 +251,25 @@ class PolicyGate:
             # anywhere. Empty means nothing is approved, so empty denies (D10).
             if not any(_under(resolved, _norm(root)) for root in self.allowed_roots):
                 if self.allowed_roots:
+                    # Name what IS allowed. "Access requires a manifest" tells
+                    # the caller that it was refused and nothing else - not what
+                    # would have worked, so there is no way to act on it. The
+                    # caller is either the model, which will guess again next
+                    # turn, or the user, who cannot tell which of their folders
+                    # they meant to approve.
+                    #
+                    # Measured: told only this, the 4B answered a copy request by
+                    # reaching for `C:/Users/<name>/Desktop`, a folder it
+                    # remembered from training data rather than one it had been
+                    # given. The roots belong in the refusal.
+                    shown = ", ".join(sorted(str(r) for r in self.allowed_roots)[:8])
+                    more = ""
+                    if len(self.allowed_roots) > 8:
+                        more = f" (and {len(self.allowed_roots) - 8} more)"
                     reason = (
-                        f"path {raw!r} is outside every approved workspace root; "
-                        f"access requires a user-approved manifest (D10)"
+                        f"path {raw!r} is outside every approved workspace root. "
+                        f"Approved: {shown}{more}. Use one of those, or ask the "
+                        f"user to approve this path with a manifest (D10)"
                     )
                 else:
                     reason = (

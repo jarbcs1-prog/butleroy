@@ -113,13 +113,23 @@ def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS,
         # `C:/Users/YourUsername/Documents` - a placeholder straight out of
         # training data. The gate refused every one of them, which is the system
         # working exactly as designed, but a refusal is not assistance.
+        #
+        # And naming them was not sufficient on its own. Asked to "copy notes.txt
+        # to a backup copy", with the roots listed, the model still reached for
+        # `C:/Users/<name>/Desktop` - a folder it remembered rather than one it
+        # was given. So it is told the rule explicitly: a file the user mentions
+        # without a path is somewhere under a root, and a root beats a memory.
         lines += [
             "You may only act inside these approved roots, and you must use "
             "absolute paths - a bare file name is refused because it means "
             "something different to every process:",
             *(f"  {r}" for r in roots),
-            "Anywhere else is refused. If the request is about a path you were "
-            "not given, say so rather than guessing at one.",
+            "",
+            "When the user names a file without giving a path, it is under one "
+            "of those roots - not in a folder you remember from elsewhere. Put "
+            "it under the root rather than reaching for somewhere familiar; a "
+            "path outside these is refused, and a refusal helps nobody. If you "
+            "genuinely cannot tell which root it belongs to, say so.",
             "",
         ]
     lines += [

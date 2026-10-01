@@ -607,7 +607,7 @@ class Daemon:
         """The only path to an action: gate, audit, then execute."""
         tool = str(args["tool"])
         channel = self._channel(args)
-        call_args = args.get("args") or {}
+        call_args = self._anchor_args(args.get("args") or {})
         actor = str(args.get("actor", "user"))
 
         verdict = self._verdict(tool, channel, call_args)
@@ -765,7 +765,18 @@ class Daemon:
         }
 
     def op_confirm_list(self, args: dict) -> Any:
-        """What is waiting on the user right now."""
+        """What is waiting on the user right now.
+
+        `payload_hash` is here, and it was not. The overlay reads it from this
+        list and sends it back on approve, but the list omitted it, so the
+        overlay sent an empty string - and an empty claimed hash is falsy, so
+        `op_confirm_approve` *skipped the payload check entirely*.
+
+        That is D32's central guarantee not happening: the check existed, and
+        was bypassed every time by the one caller that was supposed to use it.
+        A hash is a digest of the payload, not a secret, and the arguments stay
+        out of this list because they may contain one.
+        """
         with self._lock:
             return {
                 "pending": [
@@ -774,6 +785,7 @@ class Daemon:
                         "tool": p["tool"],
                         "reason": p["reason"],
                         "preview": p["preview"],
+                        "payload_hash": p["payload_hash"],
                         "created": p["created"],
                     }
                     for p in sorted(self._pending.values(), key=lambda x: x["created"])
@@ -1069,40 +1081,96 @@ class Daemon:
     def _exec_system_diagnose(self, args: dict) -> Any:
         return sysinfo.diagnose(check_event_log=bool(args.get("event_log", True)))
 
-    # -- the remaining file tools ----------------------------------------------
+    def _anchor_args(self, call_args: dict) -> dict:
+        """Resolve relative path arguments against the single approved root.
+
+        This has to happen *before* the gate, which is the whole point and the
+        reason it did not work the first time it was tried. Anchoring inside the
+        executor is too late: the gate resolves `notes.txt` against the daemon's
+        working directory, finds it outside every root, and refuses - correctly,
+        on the evidence it was given. The call never reaches the executor.
+
+        Anything that makes a call *valid* has to happen before the gate judges
+        it, or the gate is judging a form of the request nobody intends to act
+        on.
+
+        Only `path` and `destination` are touched, and only when they are strings,
+        and only when exactly one root is approved. The rewritten arguments are
+        what gets audited, so the record shows what actually happened.
+        """
+        roots = list(self.manifests.roots())
+        if len(roots) != 1 or not isinstance(call_args, dict):
+            return call_args
+        out = dict(call_args)
+        for key in ("path", "destination"):
+            value = out.get(key)
+            if isinstance(value, str) and value and not os.path.isabs(value):
+                out[key] = os.path.join(str(roots[0]), value)
+        return out
+
+    def _anchor(self, path: str) -> str:
+        """Resolve a relative path against the single approved root.
+
+        The 4B is bad at exactly one thing, and this is it. Asked to "copy
+        notes.txt to a backup copy" it produced `path: "notes.txt"` - which
+        resolves against the *daemon's* working directory, not the workspace, so
+        the gate refused it. It is not a reasoning failure; the file was named
+        and the instruction was followed as well as a 4B can manage it.
+
+        So the deterministic half does it. When exactly one root is approved, a
+        relative path is not ambiguous - there is only one place it can mean -
+        and anchoring it cannot escape anything, because the gate still checks
+        containment afterwards.
+
+        With several roots it is ambiguous, so it is left alone: guessing which
+        directory a relative name belongs to is how files end up in the wrong
+        place. An absolute path is used unchanged either way.
+        """
+        raw = str(path)
+        if os.path.isabs(raw):
+            return raw
+        roots = list(self.manifests.roots())
+        if len(roots) != 1:
+            return raw
+        return os.path.join(str(roots[0]), raw)
+
+    # -- the remaining file tools --------------------------------------------
     #
     # Thin wrappers around `fileops`, which holds the logic. What the wrapper
-    # adds is the one thing `fileops` cannot reach: `self.quarantine`, so that an
-    # overwrite is kept by the same mechanism that makes a delete reversible
-    # (D33). Everything else is a rename of one line.
+    # adds is the two things `fileops` cannot reach: `self.quarantine`, so an
+    # overwrite is kept by the mechanism that makes a delete recoverable (D33),
+    # and `_anchor`, so a relative path means something.
     #
     # Every one of these is bounded by `fileops` on files scanned, bytes read,
     # entries copied, matches returned or bytes archived. An unbounded operation
     # on a user's own machine is a denial of service against the user.
 
     def _exec_file_metadata(self, args: dict) -> Any:
-        return fileops.metadata(str(args["path"]))
+        return fileops.metadata(self._anchor(args["path"]))
 
     def _exec_file_preview(self, args: dict) -> Any:
-        return fileops.preview(str(args["path"]),
+        return fileops.preview(self._anchor(args["path"]),
                                int(args.get("max_bytes", fileops.PREVIEW_MAX_BYTES)))
 
     def _exec_file_search(self, args: dict) -> Any:
-        return fileops.search(str(args["path"]), str(args["query"]),
+        return fileops.search(self._anchor(args["path"]), str(args["query"]),
                               int(args.get("max_bytes", fileops.SEARCH_MAX_BYTES)))
 
     def _exec_file_edit(self, args: dict) -> Any:
-        return fileops.edit(str(args["path"]), str(args.get("content", "")),
+        return fileops.edit(self._anchor(args["path"]), str(args.get("content", "")),
                             backup_dir=self.quarantine)
 
     def _exec_file_copy(self, args: dict) -> Any:
-        return fileops.copy(str(args["path"]), str(args["destination"]))
+        return fileops.copy(self._anchor(args["path"]),
+                            self._anchor(args["destination"]))
 
     def _exec_file_move(self, args: dict) -> Any:
-        return fileops.move(str(args["path"]), str(args["destination"]))
+        return fileops.move(self._anchor(args["path"]),
+                            self._anchor(args["destination"]))
 
     def _exec_file_archive(self, args: dict) -> Any:
-        return fileops.archive(str(args["path"]), str(args["destination"]))
+        return fileops.archive(self._anchor(args["path"]),
+                               self._anchor(args["destination"]))
 
     def _exec_file_bulk_rename(self, args: dict) -> Any:
         # Defaults to a dry run *here*, at the executor, rather than only in the
@@ -1110,7 +1178,8 @@ class Daemon:
         # behaviour rather than whatever the schema happened to say.
         dry = args.get("dry_run")
         return fileops.bulk_rename(
-            str(args["path"]), str(args["pattern"]), str(args.get("replacement", "")),
+            self._anchor(args["path"]), str(args["pattern"]),
+            str(args.get("replacement", "")),
             dry_run=True if dry is None else bool(dry),
         )
 

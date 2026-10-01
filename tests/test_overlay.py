@@ -36,7 +36,14 @@ class FakeDaemon:
     def __call__(self, op, **args):
         self.calls.append((op, args))
         if op == "confirm_list":
-            return {"ok": True, "result": {"pending": list(self.pending), "grants": {}}}
+            # Exactly the fields the real daemon sends. Returning the whole item
+            # would let a test pass against a shape the daemon never produces -
+            # which is how the missing `payload_hash` stayed invisible.
+            return {"ok": True, "result": {"grants": {}, "pending": [
+                {k: p[k] for k in ("id", "tool", "reason", "preview",
+                                   "payload_hash", "created") if k in p}
+                for p in self.pending
+            ]}}
         if op == "confirm_approve":
             return {"ok": True, "result": self.approve_result or
                     {"approved": True, "tool": "file.delete", "result": {"deleted": 1}}}
@@ -548,3 +555,33 @@ def test_the_overlay_never_touches_the_filesystem_itself():
     for banned in ("os.remove", "shutil", "unlink", "os.system", "subprocess"):
         assert banned not in src, f"the overlay must not call {banned}"
     assert "import os" not in src and "import shutil" not in src
+
+
+def test_the_pending_list_carries_the_hash_the_overlay_needs(desk):
+    """D32's payload binding, which was not happening.
+
+    The overlay reads `payload_hash` from `confirm_list` and sends it back on
+    approve. The list omitted it, so the overlay sent an empty string - and an
+    empty claimed hash is falsy, so `op_confirm_approve` skipped the payload
+    check entirely. The check existed and was bypassed by the one caller meant to
+    use it: D32's central guarantee, quietly inert.
+
+    Asserted on what the dialog received rather than on the dict, because the
+    dict having the key is not the same as the check running.
+    """
+    ov, d, _t = desk
+    d.pending = [item()]
+    dlg = ov._present(item())
+    assert dlg.phash, "the overlay received no hash to bind the approval to"
+    assert len(dlg.phash) == 64
+    dlg._approve_once()
+    dlg._sender.join()
+    assert d.args_for("confirm_approve")["payload_hash"] == "a" * 64
+
+
+def test_the_pending_list_does_not_leak_the_arguments(desk):
+    """The hash is a digest, not a secret; the arguments may hold one."""
+    ov, d, _t = desk
+    d.pending = [item()]
+    listing = d("confirm_list")
+    assert "args" not in repr(listing), repr(listing)

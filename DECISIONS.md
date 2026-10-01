@@ -985,3 +985,87 @@ Two implementation notes that are load-bearing rather than incidental:
   enumerate installed programs. It is a repair operation that reconfigures every
   MSI package it finds — minutes on this machine, and it can break things. The
   uninstall registry keys are what Windows itself uses.
+
+---
+
+## D45 - Two tiers means one tier at a time, and the swap is the interesting part
+
+The deep tier is 5.96 GiB of file. The fast tier occupies 4.92 GiB. A 12 GiB card
+cannot hold both, so "we have two models" is not a statement about simultaneity -
+it is a statement about *choosing*. The interesting behaviour is therefore not
+the loading, which `llama.cpp` does, but the transition.
+
+**A tier change stops the old child before starting the new one.** Not "starts it
+and the arbiter sorts it out". The ordering is the claim: the deep model only fits
+once the fast model's memory is actually gone, and a request made while it is
+still held is a denial, correctly issued, for no reason the user can act on.
+
+**One child, not two.** The alternative - a fast child and a deep child side by
+side - cannot be made to work on this card, and pretending otherwise would show up
+as an arbiter denial the user could do nothing about.
+
+**A lease is sized to the ceiling the tier may occupy, not to the file it loads.**
+The gap is measured, not assumed: on the 4B a 4.17 GiB file occupies 4.92 GiB,
+the difference being the CUDA context and the KV cache. Requesting the file size
+would under-ask by most of a gigabyte and let us exceed D1 while every number on
+the books said we were under it.
+
+**An unknown tier name is refused, never defaulted.** A silent fallback means the
+caller asked for the better model, got the worse one, and has no way to tell -
+which is worse than an error, because the answer still looks like an answer. The
+two tiers are only worth having if they are distinguishable, and a fallback is
+precisely a way of making them indistinguishable.
+
+**The daemon names a tier; the child names a file.** `--tier deep`, never a path.
+A second copy of the model table in the daemon would be a second answer to "which
+models exist", and the two would drift apart in exactly the way that produces a
+model nobody can load.
+
+Two consequences worth stating plainly:
+
+* **Conversation gets the fast tier; anything touching files asks for the deep tier
+  by name.** Not inferred from the prompt text. A heuristic that guesses when to
+  spend 6 GiB is a heuristic that will eventually guess wrong on a quiet question,
+  and the cost of guessing wrong is the user's card.
+* **Whether the deep tier earns its place is a measurement, not an assumption.** The
+  4B picks the right tool and gets the arguments right about half the time - a
+  remembered `Desktop` path instead of one it was given. If the 9B is not
+  meaningfully better at that, the honest outcome is one tier and less machinery,
+  and that outcome is preferable to a second model that is merely expensive.
+
+---
+
+## D46 - The child watches for its own parent
+
+D3 says VRAM comes back when the child dies, and the idle TTL is what makes it
+die. But the sweeper that enforces the TTL runs *in the daemon*, so a daemon that
+dies takes the sweeper with it - and the child survives holding ~5 GiB with
+nothing left to reclaim it. Observed twice in one session: a crashed probe left
+two orphans holding the pipe, and the card stayed busy until they were found by
+hand. D3's premise assumes the parent outlives the child, which is exactly what a
+crash denies.
+
+**The child checks whether the process that started it is still running.** Not
+`os.getppid()`: Windows does not reparent orphans the way Unix does, so a child
+keeps its dead parent's pid forever and that check reports a parentless child as
+having a live parent indefinitely. A kernel handle is held instead and asked
+whether the process has exited.
+
+**A handle that will not open means death, not life.** Every way of arriving at
+that branch other than "the parent is running" means the child has lost the thing
+that owns it, and the failure that matters is the child surviving.
+
+**Checked every two seconds**, not every tick of the 250 ms loop. `OpenProcess` is
+cheap but not free, and two seconds is not a meaningful delay against a 90-second
+TTL. A Job Object would be the stronger guarantee - kill-on-close, enforced by the
+kernel - and is the right answer for a build that must survive a hard power loss.
+This is the belt to that braces, and deliberately the smaller piece.
+
+Verifying it took three attempts, and **each failure was the test, not the code**:
+spawning the detector directly makes the test its own parent; `taskkill /T` is a
+deliberate tree-kill that would not happen in production; and a venv `python.exe`
+re-execs the base interpreter, so the detector's real parent was a wrapper one
+level below the process that was killed. The detector was right every time. The
+evidence that mattered was `orphans still running: 0`, not the printed line - a
+grandchild inheriting a killed parent's stdout pipe will lose the very line you
+are looking for.

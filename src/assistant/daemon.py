@@ -61,6 +61,10 @@ from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
 from . import fileops, sysinfo
+#: The child's tier table, imported rather than restated. A second copy of this
+#: list would be a second answer to "which models exist", and the two would drift
+#: apart in exactly the way that produces a model nobody can load.
+from .brain_server import TIERS as BRAIN_TIERS
 from .policy import (
     CHANNEL_PC,
     CHANNEL_SCHEDULED,
@@ -254,6 +258,10 @@ class Daemon:
         # derived from the epoch.
         self._brain: subprocess.Popen | None = None
         self._brain_client: ipc.PipeClient | None = None
+        # Which tier the running child holds, or None if there is no child. Kept
+        # next to the child rather than derived from it, so "the deep tier is
+        # loaded" is a fact we can answer without loading a model to find out.
+        self._brain_tier: str | None = None
         self._brain_last_used = 0.0
         self._brain_loaded = False
         self._sweeper: threading.Thread | None = None
@@ -1614,6 +1622,11 @@ class Daemon:
     #: process held 5 GiB and a stale brain is exactly the thing to be able to
     #: find later.
     BRAIN_HOLDER = "brain"
+    #: Which tier a turn gets when the caller does not ask for one. The fast tier,
+    #: because it is the one that is always present and because answering quickly
+    #: matters more than answering cleverly for most requests. Anything touching
+    #: files asks for the deep tier by name.
+    DEFAULT_BRAIN_TIER = "fast"
 
     def _brain_env(self) -> dict[str, str]:
         """The environment the child is launched with (D26).
@@ -1652,9 +1665,12 @@ class Daemon:
         """
         with self._lock:
             child = self._brain
+            tier = self._brain_tier
             self._brain = None
             self._brain_client = None
             self._brain_last_used = 0.0
+            self._brain_tier = None
+            self._brain_loaded = False
         if child is None or child.poll() is not None:
             return
         self._audit(
@@ -1663,7 +1679,7 @@ class Daemon:
             tool="brain.unload",
             tier=str(Tier.READ),
             decision="allow",
-            reason=f"stopped brain pid={child.pid} ({why})",
+            reason=f"stopped brain pid={child.pid} tier={tier or '?'} ({why})",
         )
         # The lease is released explicitly as well as by TTL. The arbiter's
         # contract is that release does not kill and expiry does not release, so
@@ -1682,17 +1698,37 @@ class Daemon:
         except Exception:  # noqa: BLE001
             pass
 
-    def _brain_ensure(self) -> Any:
+    def _brain_ensure(self, tier: str | None = None) -> Any:
         """Start the child if it is not running, and return a client for it.
 
         Raises ``BrainUnavailable`` rather than returning None, because every
         caller would otherwise have to check, and a caller that forgets the check
         reports a dead brain as an empty answer - which is the failure mode D31
         exists to prevent.
+
+        `tier` selects which model the child serves. A tier change is a *swap*, not
+        a second child: the fast and deep models together need more VRAM than the
+        card has, so keeping both resident is not a slower version of this, it is
+        an impossible one. The old child is stopped, which returns its VRAM
+        immediately, and only then is the new one started - so the swap asks the
+        arbiter for what is actually free rather than for the card's total.
         """
+        tier = str(tier or self.DEFAULT_BRAIN_TIER)
+        if tier not in BRAIN_TIERS:
+            # Refused rather than quietly falling back. Answering a "deep" request
+            # from the 4B would be a lie about which model produced the answer,
+            # and the whole reason to have tiers is that they are not the same.
+            raise Refused(
+                f"unknown brain tier {tier!r}; known tiers are "
+                f"{sorted(BRAIN_TIERS)}"
+            )
         with self._lock:
             if self._brain_alive() and self._brain_client is not None:
-                return self._brain_client
+                if self._brain_tier == tier:
+                    return self._brain_client
+                self._brain_stop(
+                    f"swapping tier {self._brain_tier or '?'} -> {tier}"
+                )
 
             # A previous child that died without being stopped leaves its lease
             # behind. Reclaim it here rather than letting the next turn be denied
@@ -1700,6 +1736,7 @@ class Daemon:
             if self._brain is not None:
                 self._brain = None
                 self._brain_client = None
+                self._brain_tier = None
             try:
                 self.arbiter.release(self.BRAIN_HOLDER)
             except Exception:  # noqa: BLE001
@@ -1733,6 +1770,11 @@ class Daemon:
                 # production daemon last wrote - or against nothing at all.
                 "--authkey",
                 str(self.authkey_path),
+                # Which model to hold. The child resolves this to a file and a
+                # lease request; the daemon does not send the path itself, so
+                # there is exactly one place where a model file is named.
+                "--tier",
+                tier,
             ]
             child = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                 args,
@@ -1743,6 +1785,7 @@ class Daemon:
                 cwd=str(ROOT),
             )
             self._brain = child
+            self._brain_tier = tier
             client = ipc.PipeClient(self.brain_pipe, authkey=self.authkey, timeout=120.0)
             self._brain_client = client
 
@@ -1788,7 +1831,7 @@ class Daemon:
             f"({type(last).__name__ if last else 'no error'}); it was killed"
         )
 
-    def _brain_call(self, op: str, **args: Any) -> Any:
+    def _brain_call(self, op: str, *, tier: str | None = None, **args: Any) -> Any:
         """One round trip to the child, with the idle clock touched.
 
         Every op goes through here rather than touching the client directly, so
@@ -1797,8 +1840,12 @@ class Daemon:
         refreshed the timer by hand would eventually be one that forgot, and a
         brain that is never marked idle never gets evicted - which would quietly
         cost the user 5 GiB indefinitely, which is the exact thing D1 forbids.
+
+        `tier` is consumed here rather than forwarded: it decides which child is
+        running, so it is a property of the connection and not of the request. A
+        tier left in `args` would arrive at the child as an unexpected keyword.
         """
-        client = self._brain_ensure()
+        client = self._brain_ensure(tier)
         self._brain_last_used = time.time()
         # `PipeClient.call` returns the *unwrapped* result and raises on a failed
         # response - there is no {"ok": ...} envelope to inspect. Treating the
@@ -1829,6 +1876,7 @@ class Daemon:
             "idle_s": round(idle, 1) if idle is not None else None,
             "ttl_s": self.BRAIN_IDLE_TTL_S,
             "model_loaded": bool(self._brain_loaded),
+            "tier": self._brain_tier,
             "note": (
                 "no child is running; the next brain.turn starts one "
                 "(~2.5s model load, D22)"
@@ -1844,7 +1892,7 @@ class Daemon:
         model load silently, and a user watching a 6 second pause has no way to
         tell load from thinking. Making it explicit means the overlay can show it.
         """
-        result = self._brain_call("load")
+        result = self._brain_call("load", tier=args.get("tier"))
         self._brain_loaded = bool(result.get("loaded"))
         return result
 
@@ -1860,7 +1908,7 @@ class Daemon:
         prompt = str(args.get("prompt", "")).strip()
         if not prompt:
             raise Refused("brain.turn needs a non-empty prompt")
-        result = self._brain_call("turn", prompt=prompt)
+        result = self._brain_call("turn", prompt=prompt, tier=args.get("tier"))
         self._brain_loaded = bool(result.get("loaded", True))
         # Audited at proposal time, with the tier the *model* chose to reach for,
         # because a brain that keeps reaching for T3 tools is a fact worth having
@@ -1880,7 +1928,7 @@ class Daemon:
         prompt = str(args.get("prompt", "")).strip()
         if not prompt:
             raise Refused("brain.stream needs a non-empty prompt")
-        result = self._brain_call("stream", prompt=prompt)
+        result = self._brain_call("stream", prompt=prompt, tier=args.get("tier"))
         self._brain_loaded = bool(result.get("loaded", True))
         return result
 

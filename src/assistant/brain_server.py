@@ -39,10 +39,36 @@ from .arbiter import as_denial, format_denial
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-DEFAULT_MODEL = (
+FAST_MODEL = (
     ROOT / "models" / "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf"
 )
+DEEP_MODEL = (
+    ROOT / "models"
+    / "Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf"
+)
+
+DEFAULT_MODEL = FAST_MODEL
 DEFAULT_CUDA_BIN = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+
+#: The two tiers, and what each one asks the arbiter for.
+#:
+#: `need_bytes` is a request for a *lease*, not a measurement, so it is the whole
+#: ceiling the tier is allowed to occupy (D1) rather than the file size. The gap
+#: is real and was measured: on the 4B a 4.17 GiB file occupies 4.92 GiB, the
+#: extra 0.75 GiB being the CUDA context and the KV cache. A lease sized to the
+#: file would under-request by most of a gigabyte and let us over the ceiling
+#: while every piece of bookkeeping said we were under it.
+#:
+#: Both tiers are abliterated and uncensored, which is the user's ordering
+#: (abliterated -> heretic -> uncensored) and not a coincidence: a model that
+#: hesitates is worse than useless when it is being asked to copy a file.
+#:
+#: They cannot both be resident. 6.7 + 4.9 is more than the 12 GiB card holds, so
+#: asking for the deep tier means giving the fast one back - see D22.
+TIERS: dict[str, dict[str, Any]] = {
+    "fast": {"model": FAST_MODEL, "need_bytes": 7 * 1024 ** 3},
+    "deep": {"model": DEEP_MODEL, "need_bytes": 7 * 1024 ** 3},
+}
 
 # How long the child waits for the daemon to answer a lease request before giving
 # up. A lease is a hard prerequisite for loading, so a silent daemon must fail
@@ -340,9 +366,33 @@ def parent_alive(pid: int | None = None) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def resolve_tier(tier: str, model: str | None = None,
+                 need_bytes: int | None = None) -> tuple[str, int]:
+    """Turn a tier name into (model path, bytes to lease).
+
+    Separated from `serve` so the decision can be asked without starting a child
+    or touching the disk. A rule that can only be reached by booting a 5 GiB model
+    is a rule nobody checks.
+
+    An unknown tier raises rather than falling back to fast. Silently answering a
+    "deep" request from the 4B would be a lie about which model spoke, and having
+    two tiers is only worth anything if they are actually distinguishable.
+    """
+    spec = TIERS.get(tier)
+    if spec is None:
+        raise ValueError(
+            f"unknown tier {tier!r}; known tiers are {sorted(TIERS)}"
+        )
+    return (
+        model or str(spec["model"]),
+        int(spec["need_bytes"] if need_bytes is None else need_bytes),
+    )
+
+
 def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ,
           authkey_path: str | os.PathLike | None = None,
-          model: str | None = None, need_bytes: int = 5 * 1024 ** 3) -> int:
+          model: str | None = None, need_bytes: int | None = None,
+          tier: str = "fast") -> int:
     """Run the child until told to stop. Returns a process exit code.
 
     Two pipes, and conflating them is a bug worth naming: ``pipe`` is the one the
@@ -358,6 +408,8 @@ def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ
     authkey_path = Path(authkey_path or (ROOT / "state" / "authkey.bin"))
     authkey = ipc.load_authkey(authkey_path)
     to_daemon = ipc.PipeClient(upstream, authkey=authkey, timeout=LEASE_TIMEOUT_S)
+
+    model, need_bytes = resolve_tier(tier, model, need_bytes)
     lease = LeaseClient(to_daemon, need_bytes=need_bytes)
 
     box: dict[str, Any] = {"stop": False}
@@ -365,7 +417,7 @@ def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ
 
     print(f"[brain] pid={os.getpid()} serving on {pipe}", flush=True)
     print(f"[brain] leases from {upstream}", flush=True)
-    print(f"[brain] model={model or DEFAULT_MODEL.name}", flush=True)
+    print(f"[brain] tier={tier} model={Path(model).name}", flush=True)
     server.start()
     # Watched every two seconds rather than every 0.25: OpenProcess is cheap but
     # not free, and two seconds of a 90-second TTL is not a meaningful delay to
@@ -404,8 +456,10 @@ def main(argv: list[str] | None = None) -> int:
     upstream = ipc.PIPE_BRAIN_REQ
     model = None
     authkey = None
+    tier = "fast"
     for flag, slot in (("--pipe", "pipe"), ("--upstream", "upstream"),
-                       ("--model", "model"), ("--authkey", "authkey")):
+                       ("--model", "model"), ("--authkey", "authkey"),
+                       ("--tier", "tier")):
         if flag in argv:
             i = argv.index(flag)
             if i + 1 < len(argv):
@@ -415,9 +469,12 @@ def main(argv: list[str] | None = None) -> int:
                     upstream = argv[i + 1]
                 elif slot == "model":
                     model = argv[i + 1]
+                elif slot == "tier":
+                    tier = argv[i + 1]
                 else:
                     authkey = argv[i + 1]
-    return serve(pipe=pipe, upstream=upstream, model=model, authkey_path=authkey)
+    return serve(pipe=pipe, upstream=upstream, model=model,
+                 authkey_path=authkey, tier=tier)
 
 
 if __name__ == "__main__":

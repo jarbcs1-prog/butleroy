@@ -202,7 +202,7 @@ prompts and executes nothing until confirmed at the PC; an unattended session ex
 
 ### Phase 2 results — **substantially built; the gate is not yet fully closed**
 
-**213 tests green inside the venv.** Built, all pure-stdlib except the tray:
+**509 tests green inside the venv.** Built, all pure-stdlib except the tray:
 
 | Component | File | State |
 |---|---|---|
@@ -213,8 +213,10 @@ prompts and executes nothing until confirmed at the PC; an unattended session ex
 | Named-pipe transport | `ipc.py` | done — no TCP anywhere, enforced by an AST check |
 | Workspace manifests (D10) | `manifest.py` | done — **no discovery method exists at all** |
 | Obsidian bridge (D14) | `obsidian.py` | done — 426 real notes; 7.5 GB corpus excluded |
-| Daemon | `daemon.py` | done — 27 ops, **5 executors** (incl. quarantine `file.delete`/`file.restore`) |
+| Daemon | `daemon.py` | done — 36 ops auto-installed from `op_*`; **16 file/system executors** (8 file, 8 system) plus quarantine `file.delete`/`file.restore` |
 | Tray + hotkey + presence | `tray.py` | done |
+| Overlay (tkinter) | `overlay.py` | done — prompt, streamed answer, T3 dialog |
+| Telegram bridge | `telegram.py` | done — long-poll, allowlist `[199251286]`, no inbound port (D40) |
 | T3 confirmation | `daemon.py` | done — payload-bound, single-use, three-scope (D32) |
 | Quarantine (D33) | `daemon.py` | done — delete is a recoverable *move*, never an unlink |
 
@@ -230,9 +232,10 @@ prompts and executes nothing until confirmed at the PC; an unattended session ex
    daemon's `session.set_attended` may only ever be *narrowed* by a remote channel, and only
    `CHANNEL_PC` may assert it.
 
-**What is not done, and why the gate is not closed:** the **Telegram bridge is not built**. Only **5
-of ~58 registered tools have executors**, by design: the gap is visible in `status` rather than hidden
-behind a stub that returns success.
+**What is not done:** the **brain is wired but only lightly exercised**. Sixteen of the registered
+tools have executors and the rest of the surface is visible in `status` rather than hidden behind a
+stub that returns success — which is the point: a tool listed but unimplemented is a gap the daemon
+admits to, and a tool stubbed to succeed is a lie the model acts on.
 
 **The vertical slice is now closed** (commit `1dec25d` + `overlay.py`). Measured end to end through a
 real daemon, a real child process and the real 4B:

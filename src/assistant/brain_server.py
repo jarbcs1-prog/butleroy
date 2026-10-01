@@ -25,6 +25,7 @@ about the brain changes between the two.
 from __future__ import annotations
 
 import json
+import ctypes
 import os
 import sys
 import time
@@ -298,6 +299,47 @@ def _stream(brain_box: dict[str, Any], lease: LeaseClient, args: dict) -> dict:
     return {"loaded": True, "pieces": pieces, "text": "".join(pieces)}
 
 
+def parent_alive(pid: int | None = None) -> bool:
+    """Whether the process that started us is still running.
+
+    D3 says VRAM comes back when this process dies, and that the idle TTL is how
+    it dies. But the sweeper that enforces the TTL runs *in the daemon* - so a
+    daemon that dies takes the sweeper with it, and the child survives holding
+    ~5 GiB with nothing left to kill it. Observed twice: a crashed probe left
+    two orphans holding the pipe, and the card stayed busy until they were found
+    by hand.
+
+    So the child checks for itself.
+
+    `os.getppid()` is the obvious answer and it does not work on Windows. Windows
+    does not reparent orphans the way Unix does - the child simply keeps the dead
+    parent's PID, forever - so that value looks fine long after the parent is
+    gone. The reliable test is to hold a *handle* to the parent and ask the kernel
+    whether it has exited, which is what this does.
+
+    A failure to open the handle is treated as death, not as life. Every way of
+    getting here other than "the parent is running" means the child has lost the
+    thing that owns it, and the one failure that matters is the child surviving.
+    """
+    if pid is None:
+        pid = os.getppid()
+    if pid <= 0:
+        return False
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ,
           authkey_path: str | os.PathLike | None = None,
           model: str | None = None, need_bytes: int = 5 * 1024 ** 3) -> int:
@@ -325,9 +367,24 @@ def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ
     print(f"[brain] leases from {upstream}", flush=True)
     print(f"[brain] model={model or DEFAULT_MODEL.name}", flush=True)
     server.start()
+    # Watched every two seconds rather than every 0.25: OpenProcess is cheap but
+    # not free, and two seconds of a 90-second TTL is not a meaningful delay to
+    # giving VRAM back.
+    parent = os.getppid()
+    last_check = time.monotonic()
     try:
         while not box.get("stop"):
             time.sleep(0.25)
+            now = time.monotonic()
+            if now - last_check >= 2.0:
+                last_check = now
+                if not parent_alive(parent):
+                    # Not an error and not a crash: the daemon we belong to is
+                    # gone, so the thing that would have reclaimed this process's
+                    # VRAM no longer exists. Exiting is the whole point.
+                    print("[brain] parent is gone; exiting so the VRAM returns",
+                          flush=True)
+                    box["stop"] = True
     except KeyboardInterrupt:
         pass
     finally:

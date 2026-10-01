@@ -398,11 +398,22 @@ def test_load_twice_is_a_no_op_that_does_not_reload(cfg):
 def test_unload_returns_everything_to_the_unloaded_state(cfg):
     b = make_brain(cfg, ["x"])
     b.load()
+    while_loaded = b.describe()
     b.unload()
     s = b.status()
     assert s == {"loaded": False, "turns_served": 0, "uptime_s": 0.0,
                  "idle_s": None, "ttl_s": 90.0, "lease": False}
-    assert b.describe() == {"loaded": False, "tools": [], "undescribed": []}
+    # Unloading frees the model, not the ability to describe it. This used to
+    # assert `{"loaded": False, "tools": [], ...}`, which meant `describe` could
+    # only answer after a load - so the cheap question ("what could this brain
+    # reach, and what was it told?") cost gigabytes, and a brain holding nothing
+    # looked identical to a brain that had never been asked. The description is
+    # now free and says plainly that nothing is loaded.
+    d = b.describe()
+    assert d["loaded"] is False
+    assert d["tools"] == while_loaded["tools"]
+    assert d["prompt"] == while_loaded["prompt"]
+    assert d["prompt"].strip()
 
 
 def test_the_load_summary_reports_the_grammar_gap_counts(cfg):

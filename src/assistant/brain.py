@@ -363,12 +363,23 @@ class Brain:
         *,
         lease: Callable[[], Any],
         llm_factory: Callable[[BrainConfig], Any] | None = None,
-        system_prompt: str = "",
+        system_prompt: str | None = None,
         tools: Sequence[Any] = ALL_TOOLS,
         roots: Callable[[], Sequence[str]] | None = None,
     ):
         self.config = config
-        self.system_prompt = system_prompt
+        # Default to the real prompt rather than an empty string. An empty
+        # system prompt is not a neutral one - it is a model with no instructions
+        # that will confidently produce anything, and it fails by being refused
+        # rather than by erroring, which is the hardest kind of failure to notice.
+        # Found by a test that constructed a brain without a roots reader and got
+        # back `""`; whether or not production always supplies one, a constructor
+        # that produces an empty prompt is a trap for whoever comes next.
+        self.system_prompt = (
+            system_prompt
+            if system_prompt is not None
+            else default_system_prompt(tools, ())
+        )
         # Approved roots, re-read every turn rather than captured at load. They
         # can be granted or revoked while the model is resident, and a prompt
         # that still advertises a revoked root is an assistant inviting itself
@@ -518,18 +529,47 @@ class Brain:
         Surfaced rather than logged quietly, because a tool silently missing from
         the grammar is a tool the model can never call, and that gap has to be
         visible to whoever is debugging "the assistant forgot how to do X".
+
+        Answers without a model loaded, because the grammar and the prompt are
+        pure and the question is worth asking *before* spending gigabytes on it.
+        The two facts are reported separately rather than folded into one:
+        `loaded` says whether six gigabytes are currently resident, and the rest
+        says what would be reachable if they were.
         """
-        gen = self._tool_grammar
+        gen = self._tool_grammar or build_tool_grammar(self.tools)
         if gen is None:
             return {"loaded": False, "tools": [], "undescribed": []}
         return {
-            "loaded": True,
+            # The real load state, not "we can describe this". Reporting True
+            # here because the grammar builds would tell a user watching the card
+            # that six gigabytes are resident when nothing is loaded at all - and
+            # the one thing this field exists for is answering that.
+            "loaded": self._llm is not None,
             "tools": sorted(gen.tools),
             "undescribed": sorted(gen.gaps),
             "rules": gen.n_rules,
+            # The prompt itself, served rather than logged quietly. The grammar
+            # above says what the model *can* call; this says what it was *told*,
+            # and a brain told about a different set of roots than the gate
+            # enforces is the shape of "it kept reaching for Desktop". Answering
+            # "which roots do you think you have" should not require attaching a
+            # debugger to a process holding six gigabytes.
+            "prompt": self.current_prompt(),
+            "roots": sorted(self._current_roots()),
         }
 
     # -------------------------------------------------------------------- prompts
+    def _current_roots(self) -> tuple[str, ...]:
+        """The approved roots, read fresh.
+
+        Read rather than cached because the point of the whole mechanism is that
+        the roots can change while the brain is loaded, and a stale copy would be
+        the assistant describing a permission set that no longer exists.
+        """
+        if self._roots is None:
+            return ()
+        return tuple(self._roots() or ())
+
     def current_prompt(self) -> str:
         """The system prompt, rebuilt when the approved roots change.
 
@@ -540,7 +580,7 @@ class Brain:
         """
         if self._roots is None:
             return self.system_prompt
-        roots = tuple(self._roots() or ())
+        roots = self._current_roots()
         if roots == self._prompt_cache:
             return self.system_prompt
         self._prompt_cache = roots

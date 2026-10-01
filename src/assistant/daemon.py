@@ -256,6 +256,12 @@ class Daemon:
         self._brain_last_used = 0.0
         self._brain_loaded = False
         self._sweeper: threading.Thread | None = None
+        # The Telegram bridge, if one could be built. Absent is not an error:
+        # a machine with no token still serves the PC and the hotkey, and the
+        # bridge is the only thing in Plane A that touches a network.
+        self.telegram = None
+        self.telegram_error: str | None = None
+        self._load_telegram()
         #: The pipe the child *serves* turns on. Distinct from PIPE_BRAIN_REQ,
         #: which is the pipe we *serve* on and the child *calls* to ask for its
         #: lease. Sharing one name would mean the child asks itself for
@@ -418,6 +424,20 @@ class Daemon:
             target=self._brain_sweeper, name="brain-sweeper", daemon=True
         )
         self._sweeper.start()
+        # The Telegram bridge starts only when serving, and only if it was
+        # configured. Same reasoning as the sweeper: a Daemon built in a test or
+        # in --check must not acquire a thread that outlives the assertion.
+        if self.telegram is not None:
+            threading.Thread(
+                target=self._telegram_thread, name="telegram", daemon=True
+            ).start()
+            print(
+                f"[daemon] telegram  bridge configured, "
+                f"{len(self.telegram.config.allowed_chat_ids)} allowed chat id(s)",
+                flush=True,
+            )
+        elif self.telegram_error:
+            print(f"[daemon] telegram  not available: {self.telegram_error}", flush=True)
         try:
             while not self._halt.wait(3600):
                 pass
@@ -438,6 +458,8 @@ class Daemon:
             )
         if self.server is not None:
             self.server.stop()
+        if self.telegram is not None:
+            self.telegram.stop()
         # Kill the brain before we record the stop. A daemon that shut down
         # leaving a child holding 5 GiB would hand the memory back only when the
         # machine reboots, and the audit line "clean shutdown" would be the last
@@ -1719,6 +1741,72 @@ class Daemon:
         re-derivation could disagree with it without anything noticing.
         """
         return self._brain_call("describe")
+
+    # -- the Telegram bridge ------------------------------------------------
+    #
+    # Three ops and a thread. The bridge is a *client* like everything else here:
+    # an inbound message becomes a `handle()` call with channel="telegram" and
+    # nothing more (D31).
+    #
+    # The channel matters more than it looks. A Telegram message does NOT assert
+    # presence. The commonest reason to be away from the PC is not sleep - it is
+    # coffee, phone in pocket - and treating that message as presence would
+    # unlock T2 and T3 on a machine nobody is watching. So T0/T1 run from the
+    # coffee shop and T2/T3 queue until the person is back at the keyboard (D30).
+
+    def op_telegram_status(self, args: dict) -> Any:
+        """What the bridge is doing. Never includes the token."""
+        if self.telegram is None:
+            return {
+                "configured": False,
+                "note": (
+                    "no state/telegram.json - put telegram_bot_token and "
+                    "telegram_allowed_chat_ids there to enable the bridge"
+                ),
+            }
+        return {"configured": True, **self.telegram.status()}
+
+    def op_telegram_send(self, args: dict) -> Any:
+        """Proactively send a message. T3 and external, so the gate rules apply.
+
+        The bridge's own replies are transport and do not come through here -
+        answering the message you were just sent is not this tool. This is for a
+        message the assistant starts: a reminder, an alert, a result nobody asked
+        for. Which is exactly why it is T3.
+        """
+        chat_id = args.get("chat_id")
+        text = str(args.get("text", ""))
+        if self.telegram is None:
+            raise Refused("the Telegram bridge is not configured")
+        if not self.telegram.config.allows(chat_id):
+            raise Refused(
+                f"chat {chat_id!r} is not on the allowlist; the bridge will not "
+                "talk to anyone else"
+            )
+        if not text.strip():
+            raise Refused("telegram.send needs some text")
+        if not self.telegram.say(int(chat_id), text):
+            raise Refused(f"the send failed: {self.telegram.last_error}")
+        return {"sent": True, "chat_id": int(chat_id), "chars": len(text)}
+
+    def _load_telegram(self) -> None:
+        """Build the bridge if it can be built, and say why if it cannot.
+
+        Deliberately non-fatal. A missing or malformed token must not stop the
+        daemon: the tray, the hotkey, the brain and the gate all work without it,
+        and a daemon that refuses to start over a Telegram problem turns one
+        broken integration into a dead assistant.
+        """
+        try:
+            from .telegram import TelegramBridge, TelegramError, load_config
+
+            self.telegram = TelegramBridge(self.handle, load_config(self.state / "telegram.json"))
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            self.telegram = None
+            self.telegram_error = f"{type(exc).__name__}: {exc}"
+
+    def _telegram_thread(self) -> None:
+        self.telegram.start()
 
     def _brain_sweeper(self) -> None:
         """Kill the child once it has been idle past the TTL (D3).

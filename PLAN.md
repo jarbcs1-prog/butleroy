@@ -494,7 +494,7 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
 5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **982 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 49 tool executors covering administration and delegation, and the whole tool registry are done.
+Current state: **1025 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
 
 **The real gap is breadth, not depth.** Measured, not estimated:
 
@@ -502,24 +502,19 @@ Current state: **982 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (vo
 registered tools: 61        executors on the Daemon: 43        unimplemented: 18
 ```
 
-**Capability items 3 and 4 are complete.** What is left is none of them:
+**Capability items 3, 4 and 5 are complete, and so is every `file.*` tool.** What is left is none of them:
 
 | group | missing | what it would buy |
 |---|---|---|
 | `email` | 6 | IMAP, the one transport besides Telegram in scope |
-
 | `reflect` | 4 | Phase 6 self-improvement |
-| `file` | 2 | `write_notes` (T1), `empty_recycle_bin` (T3, destructive) |
 
-**Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60); `delegate.plan`, `.brainstorm`, `.assign`, `.status`, `.intervene`, `.review`, `.accept`, `.audit` (D61). The T3 administration set took the shape the D58 section argues for — an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49). The delegation slice took a third shape: a worker is tracked for its whole life, so it can be stopped along with its process tree, read back afterwards, and audited — and the two reads that would otherwise be a judgement call (`review`, `audit`) return **evidence** rather than an opinion, because judgement belongs to the brain turn and a free read must not cost VRAM.
+**Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60); `delegate.plan`, `.brainstorm`, `.assign`, `.status`, `.intervene`, `.review`, `.accept`, `.audit` (D61); `teach.explain`, `.quiz`, `.recall`, `.summarise`, `.plan_curriculum`, `.progress` (D62); `file.write_notes`, `file.empty_recycle_bin` (D63). The T3 administration set took the shape the D58 section argues for - an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49). The delegation slice took a third shape: a worker is tracked for its whole life, so it can be stopped along with its process tree, read back afterwards, and audited - and the two reads that would otherwise be a judgement call (`review`, `audit`) return **evidence** rather than an opinion, because judgement belongs to the brain turn and a free read must not cost VRAM. The teaching slice found five of its six tools mislabelled as free, and paid for it with a ~5 GiB model load on every "free" read (D62). The last two tools found that the **name of an argument is part of the rule** (`subdir` contains `dir`, so the gate refused it as a path), and that the recycle bin had to be *asked about* rather than read, because our own policy denies its directory (D63).
 
-**Next, in order** — following the capability order the user set, not my own
-preference for the largest gap:
+**Next, in order** - following the capability order the user set, not my own preference for the largest gap:
 
-1. **`file.write_notes`** and **`file.empty_recycle_bin`** - two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
-   last capability item the user named.
-3. **`email.*`** — six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0.
-4. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
+1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later.
+2. **`reflect.*`** - Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
 
 ### The machine can now be read (D40–D44)
 

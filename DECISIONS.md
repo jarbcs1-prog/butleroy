@@ -1572,3 +1572,74 @@ voice input, and it is measured working. The finding to carry forward is not
 about wake words: **a synthetic corpus, however clean, cannot stand in for the
 mouth.** Piper scores 0.99 and the user scores 0.29 on the same phrase, on the
 same day, through the same code.
+---
+
+## D58 - The assistant may open what you asked for, and not what it guessed
+
+Three Tier 2 tools: `app.launch`, `app.close`, `shell.run`. Tier 2 is Tier 3 with
+the volume turned down - consequential, therefore confirmed, but not the kind of
+thing that needs a registry backup first. The build order put them before the T3
+administration set deliberately: the T3 tools should sit on a base that is already
+proven rather than be the first thing that touches the machine.
+
+Proven rather than asserted. `probe_exec.py` ran forty end-to-end checks against
+the real daemon and finished `FAILED: none`, including the two that matter: notepad++
+resolved, launched, and was closed for real
+(`{'closed': [{'pid': 5292, 'name': 'notepad++.exe'}], 'failed': []}`).
+
+**Five defects, all of the same shape - the code did exactly what it said, and
+what it said was not what was meant.**
+
+1. **`os.path.isabs("/c")` is True.** A rooted path is absolute relative to the
+   drive it resolves against, so `cmd /c exit 3` had `/c` screened as a file path
+   and was refused for reaching `C:\c` - a directory that was never named, does
+   not exist, and was invented by the screen. On Windows a leading slash is a
+   switch; that is the convention cmd and tasklist both use. Absolute now means a
+   drive letter and a separator, or a UNC prefix.
+2. **`app.close("python.exe", force=True)` killed the probe that called it.** Eight
+   matches, and the list included the daemon and the shell that started it. The
+   chain is now protected by PID - this process and every ancestor - rather than by
+   name. Name-protection would have to blacklist `python.exe` wholesale, which
+   would leave the tool unable to clean up the stray interpreters it is most often
+   asked about. Own rows are *skipped and reported*, not refused: refusing the
+   whole call would make the tool unable to answer the request at all.
+3. **The resolver could not find a program that was installed.** It compared only
+   `filenames`, so it walked past the folder called `Notepad++`, descended into it,
+   found nothing there, and burned all 3000 of its directory budget inside
+   `Common Files`. `os.walk` hands back a directory's entire listing *on entry*,
+   so the folder is visible in the first iteration. Measured: 1.0 s and a refusal
+   became 0.0 s and a path. Also measured while fixing it: notepad++ is **not on
+   PATH** (`Get-Command notepad++` returns nothing), so a resolver that only asks
+   `shutil.which` refuses most of what is actually installed.
+4. **A refusal that named the wrong problem.** The bare-name validator rejects any
+   `\` or `:`, and it ran before the absolute-path branch - so
+   `G:\localaized\src\assistant\daemon.py` was reported as "not a plain
+   application name". A remark about spelling, for a path whose actual problem is
+   that it is the assistant's own source. D21 sent the user to fix the wrong thing.
+5. **`_IMAGE_NAME` did not allow `+`.** `find_processes("notepad++.exe")` was
+   refused as not a bare image name, while notepad++ was running.
+
+**Two decisions worth their own paragraphs.**
+
+*A failing command is an answer, not a crash.* `run_command` raising is right for a
+probe reading a value and wrong for `shell.run`, where "the build failed" **is** the
+answer. `run_capture` never raises on a non-zero exit; it reports `exit_code`,
+`timed_out`, and truncated output. Every compile error becoming an exception the
+caller has to classify inverts the meaning of the one case that matters most.
+
+*One policy asked two ways, not two policies.* `shell.run` needs the protected half
+of the path test without the workspace rule, because `C:\Program Files\Notepad++\
+notepad++.exe` is outside every approved workspace and that is a true and useless
+thing to say about a program the user asked to open - it reads no user data and is
+only "outside" because Windows installed it elsewhere. So `PolicyGate` grew
+`protected_refusal` beside `path_refusal`, sharing one implementation of the
+protected half. Reimplementing the test inside the executor is how a deny-list ends
+up edited in one of two copies.
+
+**What generalises.** Every one of the five is a screen that was confident and
+narrow, and each was found by *running the tool*, not by reading it. `isabs` is
+correct for the question it was written for; `/c` is not a path for the question we
+asked it. The walk compared the right two things at the wrong moment. The validator
+was correct about the thing it validated and was simply asked too early. None of
+these would have been caught by a unit test written from the docstring, and all of
+them were caught in one probe run - which is the argument for running the thing.

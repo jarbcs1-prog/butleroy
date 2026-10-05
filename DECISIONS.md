@@ -1841,3 +1841,139 @@ that measures the stub.** Pair them.
 them administrative: `delegate` 8, `email` 6, `teach` 6, `reflect` 4,
 `file.write_notes` and `file.empty_recycle_bin`. Administration - capability
 item 3 - is complete.
+---
+
+## D61 - Ten defects, and every one of them was a thing that looked right
+
+`delegate.*` is eight tools over one idea: a worker is a bounded command in an
+approved workspace, tracked for its whole life. What it has that `shell.run` does
+not is a *lifecycle* - an id, a budget, a status you can ask about afterwards,
+and an audit row. `shell.run` returns a result and forgets it; a task can be
+asked about.
+
+The design decisions are three, and each is an absence rather than a feature:
+
+* **No `vram_gib` argument.** D1 says models take turns and the arbiter is the
+  only grantor. An argument would be a promise with nothing behind it.
+  `Priority.WORKER` has been sitting in `arbiter.py` since Phase 2 with no
+  holder; the honest door for a worker that needs a model is
+  `Arbiter.acquire(holder, need_bytes, Priority.WORKER)`. **The absence of the
+  argument is the guarantee** (D49).
+* **`review` and `audit` are evidence, not judgement.** Judgement is the brain
+  turn's job. Making a T0 read call the model would put VRAM in a read that is
+  supposed to be free, which is the D50 lesson. `audit` checks three mechanical
+  things: is there an audit row, does the exit code match the claim, is the
+  workspace still the one it was approved as.
+* **`plan` and `brainstorm` are briefings, not plans.** They report what was
+  measured about a workspace and which constraints will refuse an attempt on
+  it, both labelled `is_a_plan: false`. A T0 read that returns nothing but a
+  summary of nothing is D36's silent no-op.
+
+Ten defects were found by running it, and the common thread is worth more than
+any of them individually: **every one looked correct in isolation.**
+
+**Three were copies of a rule that had drifted from its other copy.**
+
+1. `_admin_is_pathish` called `bool(Path(part).suffix)`, which means *any*
+   argument containing a dot has a filename extension. `Path("import time; time.sleep(120)").suffix`
+   is `".sleep(120)"`, so delegating a python one-liner was refused for reaching
+   `C:\.sleep(120)` - a directory the screen invented. `shell.run` had the same
+   hole, which meant `python -c "print(3.14)"` was unrunnable. Now a regex
+   (`_EXTENSION_OK`) that requires a real extension, and `time.sleep` stays a
+   command while `notes.txt`, `x.dll` and `archive.tar.gz` stay paths.
+2. `policy._under` compared one spelling per side. The manifest stores an
+   approved root as typed, and on this machine that is the 8.3 short form
+   `C:\Users\PCPRIN~1\...`, while `Path.resolve()` produces the long form.
+   `normcase` touches neither, so **the gate reported an approved workspace as
+   outside every approved workspace.** `policy._spellings` now yields the long
+   form as a second spelling to try - never as a replacement, so paths that do
+   not exist still compare exactly and `_norm`'s promise that nothing needs to
+   be on disk survives.
+3. `delegate.py` carried its own `_under` from before fix 2, so the second copy
+   did not get the fix. This one was the worst of the ten: **`constraints_for`
+   is the briefing whose entire job is to state the rule that will refuse the
+   plan**, and it reported `approved: false` with a note naming the very
+   directory as approved - the contradiction visible in its own output, in the
+   two spellings, read by the model before it plans anything. Fixed by making
+   the rule public: `policy.contains(candidate, root)`, with `_under` as its
+   implementation and the delegate copy now calling it. **This is the second
+   instance of the same defect shape, so it is a rule about rules: a second copy
+   of a test is not a belt and braces, it is a second thing that can be wrong
+   without the first one being wrong.**
+
+**Two were the same field read six, then seven, times.**
+
+`_delegate_task` accepted `args.get("task") or args.get("task_id") or
+args.get("id")`; `_delegate_refusals` read only `args.get("task")`. So a caller
+who said `task_id` cleared the refusals and then raised `KeyError: 'task'`.
+Then `_exec_delegate_assign` indexed `args["task"]` directly and did it again.
+Now one `Daemon._delegate_task_id(args)` staticmethod, six call sites. The
+sequencing is the lesson: **a refusal list that agrees with itself is not
+evidence that it agrees with the code it guards**, so the executor had to be
+checked separately - and it was wrong again, one line after the gate let it
+through.
+
+**Two were counts that were counts of the wrong thing.**
+
+`_exec_delegate_audit` computed
+`"problems": sum(1 for c in checks if not c["problems"])` - it counted the
+checks whose problem list was **empty**, the clean ones, and called the total
+"problems". A fully clean audit reported one problem per healthy task, in the
+same response that carried `ok: true` and `problems: []` for each. Now
+`sum(len(c["problems"]) for c in checks)`, with `tasks_with_problems`
+alongside. This is D55 one level down: **both readings of a count look like a
+count**, and a test asserting only that the number is a number passes either
+way. It was caught by reading the number's *meaning* before writing the test
+that would have locked it in.
+
+**Three were the machine contradicting a row, in the same class.**
+
+* Six 120-second sleepers were **still alive five minutes after being stopped**,
+  holding their working directories open, with their rows saying `stopped`. The
+  uv-built venv means `Popen` on `.venv\Scripts\python.exe` starts a *launcher*
+  which starts the real interpreter as a child; `os.kill(pid)` killed the
+  launcher and the work carried on. `_terminate_tree` now uses
+  `taskkill /F /T /PID` on Windows and `os.killpg` elsewhere. **A launcher dying
+  is not the work stopping.**
+* `stop()` set `task.stopped` *after* the kill returned. The worker thread wakes
+  the instant the process dies and computes the terminal status from that flag,
+  so the flag arrived too late and a stopped task reported `failed` with exit
+  code 1 - which is exactly what Windows gives a killed process. Both readings
+  are true; only one is what happened, and the tool is the only thing that knows.
+  The flag is set first and cleared if the kill fails.
+* Then the remaining leak: **one launcher/child pair per test run survived a
+  drain that had correctly stopped every task it could see.** The cause is a
+  window in the pre-spawn guard - between `if task.stopped:` and the pid
+  assignment the thread is *inside* `Popen`, so a stop arriving there sets the
+  flag, reports "asked to stop before it got as far as a process; nothing will
+  be run", and leaves nobody to kill the process that now exists. `_run_blocking`
+  now re-checks the flag immediately after `Popen` returns and kills the tree if
+  it is set. **That closes the window rather than narrowing it**: the flag may
+  land at any moment up to the pid existing, and wherever it lands the process
+  dies. Runtime for the file halved, which is its own evidence - the drain's
+  timeouts stopped timing out.
+
+**Two more, of the ordinary kind, recorded for completeness.** `_exec_delegate_audit`
+called `.row()` on a list of dicts (`AttributeError` on every call, so the tool
+that exists to check things was itself broken in the most breakable way), and
+it filtered the audit log with `isinstance(r, dict)` while `AuditLog.read()`
+yields `AuditRecord` dataclasses - so it read an **empty** log and reported "no
+audit row" for tasks that had one. A check that read nothing and reported the
+opposite of the truth with the confidence of a measurement. **A status field
+that can be either has to be read by name, not assumed.**
+
+The last fifteen test failures were all mine, and the shape is worth recording
+because it cost four runs: I asserted against response shapes I had *imagined*
+(`would_be_refused` is a `telegram.send` convention, not a daemon-wide one;
+`delegate.status` nests under `task`/`tasks` rather than returning flat rows;
+`test_markers` holds marker *names*, not file names; the verdict vocabulary is
+`accept`/`reject`; `Registry` has no `wait_for_pid`). Printing the real shapes
+took one probe and answered all fifteen. **The probe that prints the thing is
+worth more than the fifteen tests written against the thing imagined.**
+
+Corrections to the plan, both found by measuring the machine rather than reading
+the document: **`opencode` is not on PATH here**, so Phase 4's "bind
+`delegate()` to `opencode run` subprocesses" cannot be followed as written, and
+there is **no `vendor/supervisor/`** - nothing from Phase 3 was ever vendored.
+PLAN.md said both. The delegation that does exist is a tracked subprocess, which
+is a different thing and now the one that is measured.

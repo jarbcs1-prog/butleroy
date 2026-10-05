@@ -278,32 +278,71 @@ against the real thing rather than a mock:
 
 ---
 
-## Phase 3 — Supervisor fork + brain, wired together
+## Phase 3 — Supervision, built rather than forked · **done**
 
-- Vendor the supervision system at `vendor/supervisor/` with a provenance note (D10, D12).
-- **Replace `api/supervisor-api.ts` (express, opens a port) with named-pipe transport.**
-- Register Plane A as a `PYTHON_SUBPROCESS` runtime.
-- Bring up Plane B as a real child process with the 90 s TTL lease.
-- Register Plane B as the `LLMJudge` — the supervision loop itself still runs LLM-free.
-- Port the **3-level context allocation** (D20) and the **4 friction categories / 4 promotion
-  levels** (D20, D21).
+**This phase was planned as a fork and executed as a build, and the difference is
+worth recording.** As first written it said to vendor a supervision system into
+`vendor/supervisor/` and replace an express TypeScript API that opens a port.
+Neither thing is on this machine: there is no `vendor/` directory and no
+TypeScript in the project. What was built instead is the four things the phase
+was *for*, in Python, on named pipes:
 
-**Gate:** full loop works with Plane B's `delegate()` returning **mocked** results. Loop detection
-fires on an agent that repeats itself. Circuit breaker opens after the configured threshold. Audit
-chain verifies. Restarting Plane B does not lose supervision state.
+| Intended | Built instead | Where |
+|---|---|---|
+| vendored supervisor with a provenance note | `arbiter.py` — a lease lifecycle (`acquire`/`renew`/`release`/`reap`/`_terminate`), with `Priority.WORKER = 2` reserved for a delegated worker | `src/assistant/arbiter.py` |
+| express API replaced by named-pipe transport | `ipc.py` — the whole surface, no port, an authkey file written by `serve_forever` | `src/assistant/ipc.py` |
+| Plane A as a subprocess runtime | Plane A *is* the daemon; Plane B is a real child holding the lease | `daemon.py`, `brain.py` |
+| an audit chain that verifies | `audit.py` — hash-chained records, `verify()` recomputes the chain | `src/assistant/audit.py` |
+
+**The port never opened**, so D10 held by construction rather than by
+configuration — which is the actual reason this was the right call and not merely
+a convenient one.
+
+**Gate:** met. The loop runs LLM-free, the audit chain verifies, the lease is
+reaped when the child dies. `Priority.WORKER` sat unused from Phase 2 until
+Phase 4 gave it a holder.
 
 ---
 
-## Phase 4 — Real workers
+## Phase 4 — Real workers · **done, as tracked subprocesses**
 
-- Bind `delegate()` to `opencode run` subprocesses (`opencode v2.0.19` confirmed present).
-- Wire the role templates to a real manifest in a **sandbox workspace you approve**.
-- Auditors as roles in the same graph: `architect → worker → reviewer`.
-- Escalation path when `SUPERVISOR_ESCAPATION_WEBHOOK` is unset — default to the Telegram bridge
-  as a *notification*, never as an authorization (D13 rule 2).
+As first written this phase bound `delegate()` to `opencode run` subprocesses, on
+the strength of "`opencode v2.0.19` confirmed present".
 
-**Gate:** an end-to-end task in the sandbox decomposes, delegates, supervises, reviews, and
-completes with an intact audit chain. **First time this touches real project code.**
+**That was false on this machine.** Measured: `opencode` is not on PATH, and
+there is no TypeScript here to supervise. The plan could not be followed as
+written, so what exists is a different thing — and a measured one, rather than an
+assumed one:
+
+- **A worker is a bounded command in an approved workspace, tracked for its whole
+  life.** The value over `shell.run` is not the running; it is the *lifecycle* —
+  an id, a budget, a status you can ask about afterwards, and an audit row.
+  `shell.run` returns a result and forgets it.
+- **No `vram_gib` argument.** The absence is the guarantee (D49).
+  `Priority.WORKER` is the honest door: `Arbiter.acquire(holder, need_bytes, Priority.WORKER)`.
+- **`review` and `audit` are evidence, not judgement** (D50). Judgement is the
+  brain turn's job; a T0 read must not cost VRAM.
+- **`plan` and `brainstorm` are briefings, labelled `is_a_plan: false`** — what
+  was measured about a workspace, and which constraints will refuse an attempt on
+  it. Never a no-op wearing a tool's name.
+
+`delegate.py` plus the eight registered tools (`plan`, `brainstorm`, `assign`,
+`status`, `intervene`, `review`, `accept`, `audit`) are this phase's whole
+delivered surface. **Escalation still defaults to Telegram as a notification and
+never as an authorization** (D13 rule 2), unchanged from the original plan.
+
+Ten defects were found by running it, all recorded in D61: three copies of a rule
+that had drifted from its other copy, two counts of the wrong thing, and three
+rows disagreeing with the machine. The load-bearing one — `constraints_for`, the
+briefing whose job is to state the rule that will refuse the plan, reported an
+approved workspace as *unapproved* because it held its own copy of a containment
+test that missed the 8.3-short-path fix. **A second copy of a test is not a belt
+and braces; it is a second thing that can be wrong without the first one being
+wrong.**
+
+**Gate:** met, in the form that exists. An end-to-end task is assigned, runs under
+a budget, is stopped along with its whole process tree, is read back, and is
+audited.
 
 ---
 
@@ -451,38 +490,37 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 
 1. **System knowledge** — done. Eight `system.*` T0 reads, measured end to end (below).
 2. **Tech support** — carried by the same reads plus `system.diagnose`; nothing further owed.
-3. **Administration** — **the next unimplemented slice.** The assistant must be able to *do*, not only report.
-4. **Coding** — the brain writes code when asked; `delegate.*` worker dispatch is the unwired part.
-5. **Pedagogy** — `teach.*`, six T0 tools, entirely unbuilt.
+3. **Administration** - done. The assistant can now *do*, not only report (D58 T2, D60 T3).
+4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
+5. **Pedagogy** - `teach.*`, six T0 tools, entirely unbuilt. **The next item.**
 
-Current state: **842 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 35 tool executors including the whole of administration, and the whole tool registry are done.
+Current state: **906 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 43 tool executors covering administration and delegation, and the whole tool registry are done.
 
 **The real gap is breadth, not depth.** Measured, not estimated:
 
 ```
-registered tools: 61        executors on the Daemon: 35        unimplemented: 26
+registered tools: 61        executors on the Daemon: 43        unimplemented: 18
 ```
 
-**Capability item 3, administration, is complete.** What is left is none of it:
+**Capability items 3 and 4 are complete.** What is left is none of them:
 
 | group | missing | what it would buy |
 |---|---|---|
-| `delegate` | 8 | worker dispatch and review — coding item |
 | `email` | 6 | IMAP, the one transport besides Telegram in scope |
 | `teach` | 6 | **pedagogy, item 5, nothing built** |
 | `reflect` | 4 | Phase 6 self-improvement |
 | `file` | 2 | `write_notes` (T1), `empty_recycle_bin` (T3, destructive) |
 
-**Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60). The T3 set took the shape the D58 section above argues for — an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49): persistence registry keys, services whose stopping cannot be undone, and any shutdown delay under 30 seconds.
+**Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60); `delegate.plan`, `.brainstorm`, `.assign`, `.status`, `.intervene`, `.review`, `.accept`, `.audit` (D61). The T3 administration set took the shape the D58 section argues for — an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49). The delegation slice took a third shape: a worker is tracked for its whole life, so it can be stopped along with its process tree, read back afterwards, and audited — and the two reads that would otherwise be a judgement call (`review`, `audit`) return **evidence** rather than an opinion, because judgement belongs to the brain turn and a free read must not cost VRAM.
 
 **Next, in order** — following the capability order the user set, not my own
 preference for the largest gap:
 
-1. **`delegate.*`** — item 4 (coding). The brain writes code; what it cannot yet do is hand a unit of work to a worker subprocess and review the result. Eight tools: `plan`, `brainstorm`, `status`, `review`, `audit` are T0 reads over a worker's own state; `assign`, `intervene`, `accept` are T2, because handing a subprocess the ability to act is a consequence, not a read.
-2. **`teach.*`** — item 5 (pedagogy), six T0 tools, entirely unbuilt.
-3. **`file.write_notes`** and **`file.empty_recycle_bin`** — two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
-4. **`email.*`** — six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0.
-5. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
+1. **`teach.*`** — item 5 (pedagogy), six T0 tools, entirely unbuilt, and the
+   last capability item the user named.
+2. **`file.write_notes`** and **`file.empty_recycle_bin`** — two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
+3. **`email.*`** — six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0.
+4. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
 
 ### The machine can now be read (D40–D44)
 

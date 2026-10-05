@@ -1643,3 +1643,65 @@ asked it. The walk compared the right two things at the wrong moment. The valida
 was correct about the thing it validated and was simply asked too early. None of
 these would have been caught by a unit test written from the docstring, and all of
 them were caught in one probe run - which is the argument for running the thing.
+---
+
+## D59 - An op beside a registered tool is a second door, and the door was the defect
+
+`telegram.send` had existed as `op_telegram_send` since the bridge was built.
+Registering it as a T3 `external` tool left the op in place, and that was not a
+redundancy - it was a way around the tool:
+
+| | reaches | tier check | preview | confirmation |
+|---|---|---|---|---|
+| `telegram.send` (tool) | `tool_call` | yes | yes | payload-bound |
+| `telegram_send` (op) | pipe, by name | **no** | **no** | **no** |
+
+Ops are tier-free by design - they are the raw transport surface the bridge and
+the tray speak. So anything holding a pipe handle could send a Telegram message
+by asking for the op, while the registered tool sat behind a dialog. The dialog
+was theatre for anyone who had read the module.
+
+**A test written for a different feature caught it, and it caught it as a rule.**
+`tests/test_voice_ops.py::test_they_are_reached_through_tool_call_like_every_other_tool`
+asserts that no executable tool shares a name with an op, and states its reason:
+"tools are reached by `tool_call`, which is the only path to an action, and an op
+per tool would be a second door to the same room." It was written about voice
+tools, eight weeks and four phases earlier, against a case that did not exist yet.
+Its author had also anticipated this exact trap in the docstring: a test written
+as "no key starts with `voice_`" would have "fixed" this by deleting a
+legitimate op. The rule was right; the case arrived later and it still applied.
+
+Both became private helpers - `_telegram_send`, `_telegram_status` - keeping the
+allowlist check and the failure reporting in one place while removing the name
+from the op table. The bridge never called either op (it speaks `status`,
+`confirm_list`, `confirm_deny`, `brain_turn`, `audit_note`), so nothing else
+moved.
+
+Three smaller decisions from the same slice, each with a reason worth keeping:
+
+* **`telegram.poll` reads an inbox, and the inbox never polls.** `status()`
+  reported a count, which does not answer the only question that matters - *what
+  did Telegram ask*. A bounded deque of 50 rows now records what arrived, and
+  `inbox()` returns the newest n without touching `offset`. `_poll_once` is the
+  only thing that may advance the cursor: a read that polled would consume
+  updates the loop had not handled and those messages would be gone with no error
+  anywhere. Data loss wearing a read tool's clothes. A second concurrent
+  `getUpdates` is a 409, so it would also duplicate everything.
+* **The preview for a send *is* the message.** Everything else about the tool is
+  knowable from its name; the text is the entire risk - a phone number, a
+  password, a confident wrong answer the user did not check. So the words are
+  shown up to 2000 characters, truncation is always flagged, and `reversible` is
+  plainly `False`. Contrast `voice.speak`, which truncates because it echoes the
+  user's own words straight back.
+* **A draft takes no `path`.** `telegram.send_draft` appends to one file inside
+  the daemon's own state directory. A T1 write tool that takes a path from the
+  caller is an arbitrary-write primitive wearing a messaging name, and the whole
+  value of the tool is that it cannot be one. The draft lands where a human can
+  open it in Notepad++ without asking the assistant for anything - which the
+  gate would refuse to do, correctly.
+
+And the guard that could not have caught it: my first regression test grepped
+`inspect.getsource(Daemon)` for the string `op_telegram_send`. It failed, because
+the docstring explaining the defect *names* the method it removed. **A grep over
+source cannot tell a sentence about a name from a call to it.** Replaced with an
+assertion on method names, which is the thing that is actually reachable.

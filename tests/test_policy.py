@@ -164,7 +164,11 @@ class TestUnattendedCap(unittest.TestCase):
             ("file.read", {"path": r"G:\workspace\project\a.txt"}),
             ("file.create", {"path": r"G:\workspace\project\scratch.md"}),
             ("system.info", {}),
-            ("teach.explain", {"topic": "recursion"}),
+            # teach.explain was here until it stopped being true. It is a T2 turn
+            # now, because the explanation it produces is prose, and prose comes
+            # from a resident model (D50) - so this list must name teach.progress,
+            # the one teaching tool that reads the ledger and needs no model.
+            ("teach.progress", {}),
         ]
         for tool, args in cases:
             with self.subTest(tool=tool):

@@ -1977,3 +1977,118 @@ the document: **`opencode` is not on PATH here**, so Phase 4's "bind
 there is **no `vendor/supervisor/`** - nothing from Phase 3 was ever vendored.
 PLAN.md said both. The delegation that does exist is a tracked subprocess, which
 is a different thing and now the one that is measured.
+
+---
+
+## D62 - Five of the six teaching tools were mislabelled as free
+
+The registry declared all six `teach.*` tools `Tier.READ`, which is the tier
+whose own comment reads "enumerate, read, search, git status" and which the gate
+treats as safe to run while nobody is at the keyboard. Four of the six cannot be
+that cheap, and the reason is in the code that consumes them: `Brain.turn()`
+returns an `Action` - a *tool call*, not prose - and prose comes only from
+`Brain.stream()`, which needs the child model resident. An explanation, a quiz,
+a summary and a curriculum are prose. So four tools that said "free" took about
+five gibibytes of VRAM and a lease from the arbiter.
+
+That is the D50 shape with different words. A label that is right about what the
+tool does and wrong about what it costs is how a human who is not looking at the
+code gets surprised, and the tier scale exists precisely so that they are not.
+
+**The correction: `teach.explain`, `teach.quiz`, `teach.recall`, `teach.summarise`
+and `teach.plan_curriculum` are `Tier.CONSEQUENTIAL`. `teach.progress` stays
+`Tier.READ`.** T2 rather than T3 because a model turn is not irreversible: the
+child can be unloaded and the row deleted. T2 rather than T1 because a turn
+spends a resource another turn may have wanted, and T1 is what unattended
+execution is allowed. The queue then does the right thing on its own - the
+existing test `test_t0_and_t1_execute_unattended` named `teach.explain` as its
+example of a tool that may run unattended, and the moment the tier was correct
+the test failed with the gate explaining itself: *"teach.explain is T2 but no
+interactive session is present; unattended execution is capped at T1 (D13).
+Queued for approval."* The test's example was wrong, not the gate, so the example
+became `teach.progress` and the reason is recorded beside it.
+
+**A test now pins the tier in both directions.** Asserting only the five would
+let `teach.progress` be promoted unnoticed; asserting only the one would let a
+prose tool drift back to READ. Two tests, because a tier is exactly the kind of
+label that gets reverted by someone who did not know why it moved.
+
+## The ledger, which is what makes pedagogy a toolset and not six prompts
+
+`teach.progress` cannot report coverage from nothing, `teach.recall` has nothing
+to test, and `teach.quiz` does not know what was taught. So every teaching turn
+appends a row to `state/teaching.jsonl`, and the reads answer from rows rather
+than from the model. Three properties of that file, each arrived at:
+
+* **Append-only.** A rewrite would be tidier and would destroy the one property
+  that makes this useful after something goes wrong: the file is readable in
+  order, by a person, in notepad. The cap is enforced by *refusing* a new row
+  rather than by deleting old ones - a tool that quietly drops the oldest
+  teaching records to make room can make `teach.progress` wrong without saying
+  so. The refusal names the file and says it is yours to clear.
+* **A row is written after the answer, never before.** A row for a turn that
+  failed would be a record of something that did not happen, and `recorded` is
+  the number a future recall works from.
+* **A malformed line is skipped, not raised on.** The file is written only by
+  `record`, so a bad line means a crash mid-append or a person editing it with
+  notepad - which is exactly what they were told they could do.
+
+## Coverage is not learning, and the one number that said otherwise
+
+`progress()` keeps three counts per topic apart and then reports
+`explained_never_tested`: topics that have been explained and never quizzed or
+recalled. Explained is turns where something was *said*; recalled is turns where
+something was asked back. Only the second is evidence.
+
+**That field was empty for every topic, every time, and no shape check noticed.**
+`by_topic` initialised its counters as `explained`, `quizzed`, `recalled`,
+`summarised`, `curriculum` while `KINDS` said `explain`, `quiz`, `recall`,
+`summarise`, `curriculum`. The increment wrote `entry[kind]`, creating keys the
+filter never read, so the counter the filter tested on stayed zero - and zero is
+falsy, so the filter passed everything. Two copies of a list of names, one of
+them true, and the difference between them was a feature that reported the
+opposite of the truth with the confidence of a measurement. Fixed by building the
+counters from `KINDS` so they cannot disagree, and the filter now indexes
+`e[KIND_EXPLAIN]` for the same reason.
+
+The generalisation is D61's, stated again because it paid twice in one slice:
+**a second copy of a list, a name, or a test is not a belt and braces, it is a
+second thing that can be wrong without the first one being wrong.** The doubled
+refusal below is the same shape one level smaller.
+
+## Four defects, three of them the same shape
+
+* **The same refusal twice in one list.** `_teach_refusals` had a
+  `source_refusal` call and then an explicit "neither source nor text" branch
+  that asked the identical question, so a summarise with no material was told
+  the same sentence twice in the same dialog - which reads as two separate faults
+  to whoever is shown it. Found by the probe, not by a test, because the test
+  that would have caught it had not been written yet.
+* **The count bug above**, found by the test that asserts *content*
+  (`explained_never_tested == ["monads"]`) rather than the presence of the key.
+* **`Decision.ALLOW` is a constant, not an enum member**, so `verdict.decision
+  .name` raises - my test reached for an enum API because that is what a verdict
+  looks like in every other language. The house style, already visible in
+  `test_policy.py`, is `assertEqual(v.decision, Decision.ALLOW)`.
+* **`topic_refusal(0)` is not a refusal**, and my test insisted it should be.
+  `str(0).strip()` is `"0"`, which is a legal topic name, and in the executor
+  the `args.get("topic") or args.get("subject")` idiom discards a falsy topic
+  before the grammar ever sees it. The test was wrong about the machine and was
+  rewritten to assert what actually happens, and why it is the better reading:
+  nobody means the topic zero.
+
+## The refusals are the same question in both places
+
+Six cases - no topic, blank topic, topic over the limit, a style that does not
+exist, recall with no question, summarise with nothing pointed at - are asserted
+twice: once that the preview lists them, once that the executor refuses them,
+and once more that the two lists are **equal**, because `_teach_refusals` is the
+one function both call. D32 is the promise that the thing approved is the thing
+run, and that promise is only as strong as the number of places the payload is
+interpreted. One function, six tools, twelve assertions.
+
+Two things are deliberately absent, the same two absences the delegate slice
+recorded. There is **no `vram_gib` argument**, because there is nothing behind
+it: the arbiter grants from real occupancy, so an argument would be a promise the
+tool cannot keep (D1). And **no tool here judges** - `teach.progress` reports
+counts and names the untested topics, and what to do about them is the user's.

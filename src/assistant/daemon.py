@@ -61,7 +61,7 @@ from .arbiter import Denial, Priority, VramArbiter, VramUnavailable, format_deni
 from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
-from . import delegate, fileops, sysinfo
+from . import delegate, fileops, sysinfo, teach
 from . import audio, speech, voice_loop
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
@@ -2961,6 +2961,196 @@ class Daemon:
     def op_arbiter_summary(self, args: dict) -> Any:
         return self.arbiter.summary()
 
+    # ----------------------------------------------------------------- teaching
+
+    _TEACH_SOURCE_MAX = 20000
+
+    def _teach_ledger(self) -> teach.Ledger:
+        """The record of what has been taught.
+
+        Under the state directory, chosen here rather than taken as an argument.
+        A teaching tool that lets the caller name where it writes is an arbitrary
+        write wearing a pedagogy name - the same argument that settled where
+        Telegram drafts go.
+        """
+        return teach.Ledger(self.state / teach.LEDGER_NAME)
+
+    def _teach_refusals(self, args: dict, *, kind: str) -> list[str]:
+        """Everything wrong with this call, as sentences. Never raises.
+
+        Both halves of the D32 rule live in one function because both halves
+        have to be the *same* function: the preview asks this, the executor asks
+        this, and a refusal list that agrees with itself is not evidence that it
+        agrees with the code it guards (D61).
+        """
+        out: list[str] = []
+        topic_bad = teach.topic_refusal(args.get("topic") or args.get("subject"))
+        if topic_bad:
+            out.append(topic_bad)
+        style_bad = teach.style_refusal(args.get("style"))
+        if style_bad:
+            out.append(style_bad)
+        if kind == teach.KIND_RECALL:
+            q_bad = teach.question_refusal(args.get("question"))
+            if q_bad:
+                out.append(q_bad)
+        if kind == teach.KIND_SUMMARY:
+            # One question, asked once. The first version also had an explicit
+            # "neither source nor text" branch below this one, and a call with
+            # neither got the same sentence twice in the same list - which reads
+            # as two separate faults to whoever is shown the dialog, and is the
+            # two-copies shape that produced nine of the ten defects in D61.
+            src_bad = teach.source_refusal(args.get("source") or args.get("text"))
+            if src_bad:
+                out.append(src_bad)
+        return [r for r in out if r]
+
+    def _teach_source(self, args: dict) -> tuple[str, str]:
+        """The material to condense, and where it came from.
+
+        The path is judged by the gate, not here - this module holds no opinion
+        about what the user may read, and the gate holds the approved roots.
+        `text` is checked for emptiness first so an empty path never becomes a
+        request to read the whole drive.
+        """
+        pasted = str(args.get("text") or "")
+        if pasted.strip():
+            return pasted[:self._TEACH_SOURCE_MAX], "pasted"
+        raw = str(args.get("source") or "").strip()
+        if not raw:
+            return "", ""
+        path = Path(raw)
+        bad = self.gate.path_refusal(raw)
+        if bad:
+            raise Refused(bad)
+        if not path.exists():
+            raise Refused(f"{path} is not there. The ledger records what was "
+                          "taught, not what was meant to be.")
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise Refused(f"{path} could not be read: {exc}") from exc
+        return body[:self._TEACH_SOURCE_MAX], str(path)
+
+    def _teach_turn(self, kind: str, args: dict) -> dict[str, Any]:
+        """One teaching turn: prompt, stream, record.
+
+        The recording is the point. Without a row, `teach.progress` has nothing
+        to report, `teach.recall` has nothing to test and `teach.quiz` does not
+        know what was taught - so the ledger is written after the answer comes
+        back and never before, because a row for a turn that failed would be a
+        record of something that did not happen.
+        """
+        topic = str(args.get("topic") or args.get("subject") or "").strip()
+        style = str(args.get("style") or teach.DEFAULT_STYLE).strip().lower()
+        ledger = self._teach_ledger()
+        source_text = ""
+        where = ""
+        if kind == teach.KIND_SUMMARY:
+            source_text, where = self._teach_source(args)
+        prompt = teach.build_prompt(
+            kind, topic=topic,
+            question=str(args.get("question") or "").strip(),
+            style=style, ledger=ledger, source_text=source_text,
+        )
+        result = self._brain_call("stream", prompt=prompt,
+                                  tier=str(Tier.CONSEQUENTIAL))
+        text = str(result.get("text") or "")
+        if not text.strip():
+            return {"taught": False, "topic": topic, "kind": kind,
+                    "note": "the model returned nothing, so there is nothing to "
+                            "record. An empty turn is not a teaching turn.",
+                    "prompt_chars": len(prompt)}
+        row = ledger.record(kind, topic, text,
+                            style=style,
+                            question=str(args.get("question") or "").strip(),
+                            source=where)
+        return {"taught": True, "kind": kind, "topic": topic, "style": style,
+                "answer": row["text"], "chars": row["chars"],
+                "truncated": row["truncated"], "at": row["at"],
+                "recorded": sum(1 for _ in ledger.rows()),
+                "ledger": str(ledger.path),
+                "prompt_chars": len(prompt),
+                "source": where}
+
+    def _preview_teach_turn(self, kind: str, args: dict) -> dict[str, Any]:
+        """What will be asked, and what will be written down."""
+        topic = str(args.get("topic") or args.get("subject") or "")
+        why = self._teach_refusals(args, kind=kind)
+        return {
+            "action": f"teach one {kind} turn and record it in the teaching "
+                      "ledger",
+            "kind": kind,
+            "topic": topic,
+            "style": str(args.get("style") or teach.DEFAULT_STYLE),
+            "question": str(args.get("question") or ""),
+            "source": str(args.get("source") or ""),
+            "recorded_in": str(self._teach_ledger().path),
+            "cost": "streams from the brain, so this is a T2 turn: the child "
+                    "model has to be resident, and the arbiter decides whether "
+                    "it may be (D1, D50).",
+            "reversible": "the row can be deleted by hand; nothing outside the "
+                          "ledger is touched.",
+            "would_be_refused": why or None,
+        }
+
+    def _preview_teach_explain(self, args: dict) -> dict[str, Any]:
+        return self._preview_teach_turn(teach.KIND_EXPLAIN, args)
+
+    def _preview_teach_quiz(self, args: dict) -> dict[str, Any]:
+        return self._preview_teach_turn(teach.KIND_QUIZ, args)
+
+    def _preview_teach_recall(self, args: dict) -> dict[str, Any]:
+        return self._preview_teach_turn(teach.KIND_RECALL, args)
+
+    def _preview_teach_summarise(self, args: dict) -> dict[str, Any]:
+        return self._preview_teach_turn(teach.KIND_SUMMARY, args)
+
+    def _preview_teach_plan_curriculum(self, args: dict) -> dict[str, Any]:
+        return self._preview_teach_turn(teach.KIND_CURRICULUM, args)
+
+    def _exec_teach_explain(self, args: dict) -> Any:
+        why = self._teach_refusals(args, kind=teach.KIND_EXPLAIN)
+        if why:
+            raise Refused("; ".join(why))
+        return self._teach_turn(teach.KIND_EXPLAIN, args)
+
+    def _exec_teach_quiz(self, args: dict) -> Any:
+        why = self._teach_refusals(args, kind=teach.KIND_QUIZ)
+        if why:
+            raise Refused("; ".join(why))
+        return self._teach_turn(teach.KIND_QUIZ, args)
+
+    def _exec_teach_recall(self, args: dict) -> Any:
+        why = self._teach_refusals(args, kind=teach.KIND_RECALL)
+        if why:
+            raise Refused("; ".join(why))
+        return self._teach_turn(teach.KIND_RECALL, args)
+
+    def _exec_teach_summarise(self, args: dict) -> Any:
+        why = self._teach_refusals(args, kind=teach.KIND_SUMMARY)
+        if why:
+            raise Refused("; ".join(why))
+        return self._teach_turn(teach.KIND_SUMMARY, args)
+
+    def _exec_teach_plan_curriculum(self, args: dict) -> Any:
+        why = self._teach_refusals(args, kind=teach.KIND_CURRICULUM)
+        if why:
+            raise Refused("; ".join(why))
+        return self._teach_turn(teach.KIND_CURRICULUM, args)
+
+    def _exec_teach_progress(self, args: dict) -> Any:
+        """What has been covered. No model, no lease, no VRAM.
+
+        The only teaching tool that stays T0, and the only one that would still
+        work with the brain unloaded - which is the honest reason it can be a
+        free read rather than an excuse for one.
+        """
+        ledger = self._teach_ledger()
+        out = ledger.progress(limit=_delegate_int(args.get("limit"), 50))
+        out["cost"] = "reads one file; no model, no VRAM"
+        return out
+
     # ---------------------------------------------------------------- delegation
     #
     # A worker here is a bounded command in an approved workspace, tracked for
@@ -4404,6 +4594,17 @@ def _install_tables() -> None:
         "delegate.intervene": Daemon._exec_delegate_intervene,
         "delegate.review": Daemon._exec_delegate_review,
         "delegate.accept": Daemon._exec_delegate_accept,
+    # Teaching: five turns that stream prose from the brain, and one read.
+    # The previews are here for the same reason the T2 administration tools
+    # have them - what a payload-bound confirmation is bound to is the thing
+    # that will be asked and the file it will be recorded in, and a dialog
+    # showing neither is a dialog the user approves blind (D32).
+    "teach.explain": Daemon._exec_teach_explain,
+    "teach.quiz": Daemon._exec_teach_quiz,
+    "teach.recall": Daemon._exec_teach_recall,
+    "teach.summarise": Daemon._exec_teach_summarise,
+    "teach.plan_curriculum": Daemon._exec_teach_plan_curriculum,
+    "teach.progress": Daemon._exec_teach_progress,
         "delegate.audit": Daemon._exec_delegate_audit,
     }
     Daemon._PREVIEWS = {
@@ -4453,6 +4654,11 @@ def _install_tables() -> None:
         # a verdict with no named subject and no stated reason is the one record
         # in this system that cannot be re-derived later.
         "delegate.accept": Daemon._preview_delegate_accept,
+    "teach.explain": Daemon._preview_teach_explain,
+    "teach.quiz": Daemon._preview_teach_quiz,
+    "teach.recall": Daemon._preview_teach_recall,
+    "teach.summarise": Daemon._preview_teach_summarise,
+    "teach.plan_curriculum": Daemon._preview_teach_plan_curriculum,
     }
 
 

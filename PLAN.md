@@ -492,9 +492,9 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 2. **Tech support** — carried by the same reads plus `system.diagnose`; nothing further owed.
 3. **Administration** - done. The assistant can now *do*, not only report (D58 T2, D60 T3).
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
-5. **Pedagogy** - `teach.*`, six T0 tools, entirely unbuilt. **The next item.**
+5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **906 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 43 tool executors covering administration and delegation, and the whole tool registry are done.
+Current state: **982 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 49 tool executors covering administration and delegation, and the whole tool registry are done.
 
 **The real gap is breadth, not depth.** Measured, not estimated:
 
@@ -507,7 +507,7 @@ registered tools: 61        executors on the Daemon: 43        unimplemented: 18
 | group | missing | what it would buy |
 |---|---|---|
 | `email` | 6 | IMAP, the one transport besides Telegram in scope |
-| `teach` | 6 | **pedagogy, item 5, nothing built** |
+
 | `reflect` | 4 | Phase 6 self-improvement |
 | `file` | 2 | `write_notes` (T1), `empty_recycle_bin` (T3, destructive) |
 
@@ -516,9 +516,8 @@ registered tools: 61        executors on the Daemon: 43        unimplemented: 18
 **Next, in order** — following the capability order the user set, not my own
 preference for the largest gap:
 
-1. **`teach.*`** — item 5 (pedagogy), six T0 tools, entirely unbuilt, and the
+1. **`file.write_notes`** and **`file.empty_recycle_bin`** - two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
    last capability item the user named.
-2. **`file.write_notes`** and **`file.empty_recycle_bin`** — two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
 3. **`email.*`** — six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0.
 4. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
 

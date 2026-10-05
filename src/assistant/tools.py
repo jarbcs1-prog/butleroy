@@ -137,11 +137,26 @@ MESSAGING_TOOLS: tuple[ToolSpec, ...] = (
 # --------------------------------------------------------------------------
 
 TEACHING_TOOLS: tuple[ToolSpec, ...] = (
-    ToolSpec("teach.explain", Tier.READ, "Explain a concept, Socratic by default"),
-    ToolSpec("teach.quiz", Tier.READ, "Generate a quiz on a topic"),
-    ToolSpec("teach.recall", Tier.READ, "Test recall of something taught before"),
-    ToolSpec("teach.summarise", Tier.READ, "Condense material the user points at"),
-    ToolSpec("teach.plan_curriculum", Tier.READ, "Sequence a learning plan"),
+    # Five of these were declared READ when this file was first written, which
+    # told a human that calling them is free. Four of them cannot be: the
+    # explanation, the quiz, the summary and the curriculum are prose, and the
+    # brain produces prose only through `Brain.stream()`, which needs the child
+    # model resident. A READ label on a call that takes five gibibytes of VRAM is
+    # the same lie as a wake word that scores zero and is reported as untested -
+    # right about the words, wrong about the cost (D50). CONSEQUENTIAL is the
+    # honest label: it runs builds, and it spends a resource another turn may
+    # have wanted, which the arbiter then arbitrates.
+    # `teach.progress` stays READ because it is the only one that answers from
+    # the ledger alone, with no model at all.
+    ToolSpec("teach.explain", Tier.CONSEQUENTIAL,
+             "Explain a concept, Socratic by default"),
+    ToolSpec("teach.quiz", Tier.CONSEQUENTIAL, "Generate a quiz on a topic"),
+    ToolSpec("teach.recall", Tier.CONSEQUENTIAL,
+             "Test recall of something taught before"),
+    ToolSpec("teach.summarise", Tier.CONSEQUENTIAL,
+             "Condense material the user points at"),
+    ToolSpec("teach.plan_curriculum", Tier.CONSEQUENTIAL,
+             "Sequence a learning plan"),
     ToolSpec("teach.progress", Tier.READ, "Report what has been covered"),
 )
 

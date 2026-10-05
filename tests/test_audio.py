@@ -541,3 +541,121 @@ def test_an_index_that_does_not_exist_is_refused_by_name(monkeypatch):
     with pytest.raises(A.NoInputDevice) as caught:
         A.Microphone(device=7)
     assert "7" in str(caught.value)
+
+
+# --- the shape of a frame: mono means 1-D ------------------------------------
+#
+# sounddevice's InputStream.read always returns (frames, channels) - for a
+# mono stream, a 2-D (n, 1) array. The synthetic probes could not see the
+# extra axis: piper's files are 1-D to begin with, and the shape-agnostic
+# arithmetic (rms, tobytes) carried it along. Only the real microphone made
+# it visible, through openWakeWord's streaming preprocessor, which turns a
+# (n, 1) block into a 3-D melspectrogram that cannot vstack onto its 2-D
+# history buffer.
+
+def test_frames_yield_one_dimensional_samples_even_when_the_driver_is_two(monkeypatch):
+    """The contract `frames` makes: a frame of samples, 1-D int16.
+
+    The fake stream returns exactly what a real sounddevice InputStream
+    returns - a 2-D (n, 1) int16 block. The flattening belongs to
+    `Microphone`, not to every consumer, so that is what is asserted here.
+    """
+    import assistant.audio as A
+
+    class FakeStream:
+        def __init__(self, **kw):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+        def read(self, frames):
+            data = np.zeros((frames, 1), dtype=np.int16)
+            return data, False
+
+    class FakeSd:
+        class InputStream:
+            def __init__(self, **kw):
+                self._s = FakeStream(**kw)
+
+            def start(self):
+                self._s.start()
+
+            def stop(self):
+                self._s.stop()
+
+            def close(self):
+                self._s.close()
+
+            def read(self, frames):
+                return self._s.read(frames)
+
+    monkeypatch.setattr(A, "list_inputs", lambda: [
+        {"index": 0, "name": "Fake mono device", "channels": 1, "rate": 16000},
+    ])
+    monkeypatch.setitem(sys.modules, "sounddevice", FakeSd)
+
+    with A.Microphone(device=0) as mic:
+        frame = next(mic.frames())
+        assert frame.ndim == 1, (
+            f"a mono frame has shape {frame.shape}; a second axis means the "
+            f"driver's (frames, channels) layout leaked through, and a 2-D "
+            f"block is what crashed the wake word on the real microphone"
+        )
+        assert frame.dtype == np.int16
+        assert len(frame) == mic._block
+
+
+# --- why the failure is told apart from a failure ----------------------------
+#
+# "Blocked" and "in use" read the same on screen and get the same generic
+# advice, and for a stretch that advice was wrong. `-9999 Blocking API not
+# supported yet` arrived on every input this machine exposes - including the
+# onboard Realtek microphone, while nothing was holding it - so the message
+# told people to go and close a program that was never holding anything.
+
+
+def _open_failing(monkeypatch, why_text):
+    """A sounddevice whose InputStream cannot be constructed, with `why_text`."""
+    import assistant.audio as A
+
+    class FakeSd:
+        class InputStream:
+            def __init__(self, **kw):
+                raise RuntimeError(why_text)
+
+    monkeypatch.setattr(A, "list_inputs", lambda: [
+        {"index": 0, "name": "Fake device", "channels": 1, "rate": 16000},
+    ])
+    monkeypatch.setitem(sys.modules, "sounddevice", FakeSd)
+    return A
+
+
+def test_a_blocking_api_failure_is_not_blamed_on_another_program(monkeypatch):
+    """The two failures need opposite advice, and only one involves you closing
+    something."""
+    A = _open_failing(monkeypatch, "PortAudio error: -9999 Blocking API "
+                                    "not supported yet")
+    with pytest.raises(A.NoInputDevice) as caught:
+        A.Microphone(device=0)
+    message = str(caught.value)
+    assert "Blocking API" in message
+    assert "another application holds" not in message, (
+        "telling the user to close a program that was never holding the "
+        "device sends them looking for a cause that is not there"
+    )
+
+
+def test_a_genuine_exclusive_hold_still_gets_that_advice(monkeypatch):
+    """The original advice is right for the failure it was written for, and
+    removing it from the -9999 branch must not take it from this one."""
+    A = _open_failing(monkeypatch, "PortAudio error: -9997 Invalid sample rate")
+    with pytest.raises(A.NoInputDevice) as caught:
+        A.Microphone(device=0)
+    assert "another application holds" in str(caught.value)

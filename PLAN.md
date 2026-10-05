@@ -307,20 +307,36 @@ completes with an intact audit chain. **First time this touches real project cod
 
 ---
 
-## Phase 5 — Voice · **built; the gate is not yet closed**
+## Phase 5 — Voice · **done, without hands-free**
 
-Every component exists and the text side is measured. What is missing is the last
-measurement, and it is not a code measurement.
+Voice works, and it works by push-to-talk. The wake word was built, measured,
+and dropped for a stated reason (D57).
 
 | Component | File | State |
 |---|---|---|
 | TTS | `speech.py` | done — piper, 3 voices, measured **2.6 words/sec** |
 | STT | `speech.py` | done — faster-whisper `small.en` CPU/int8, **RTF 1.30, WER 0.000, 0.27 GiB** |
 | Capture & endpointing | `audio.py` | done — native-rate open then resample, hysteresis band, **measured** calibration |
-| Wake word | `audio.py` (`WAKE_WORD = "hey_jarvis"`) | pretrained, downloaded; 6/6 recall on synthesis, 11/11 ordinary speech at 0.000, weak on "hey + name" shapes (D56); **never tested on a mouth** (D54) |
-| The loop | `voice_loop.py` | done — wake → segment → transcribe → brain → speak, one turn at a time (D51) |
+| Push-to-talk | `audio.py` + `daemon.py` | **the voice input.** `voice.listen`, T3, `audible`, measured end to end |
+| Wake word | `audio.py` (`WAKE_WORD = "hey_jarvis"`) | **abandoned (D57).** 0.993 on piper, **0.290 on the user's mouth** against a 0.5 threshold. Threshold stays: lowering it to 0.3 admits the D56 "hey + name" family at 0.96–0.99 |
+| The loop | `voice_loop.py` | built, not enabled — `voice.watch` refuses rather than open a mic on a model that does not fire on this user |
 | Registry | `tools.py` / `policy.py` | done — `voice.speak` / `voice.listen` (T3, `audible`) / `voice.status` (T0) |
-| Daemon | `daemon.py` | done — executors, previews, and `voice.watch` on its own thread |
+| Daemon | `daemon.py` | done — executors, previews, `voice.watch` on its own thread |
+
+**The gate is closed, in the direction the measurement pointed.** D54 asked
+whether a trained wake word works on a mouth rather than on a synthesised
+corpus. It does not, on this one: piper's rendering of "hey jarvis" scores
+0.993 through the production code path and the user's own voice scores 0.290,
+minutes apart, through the same scorer with a 0.993 control printed beside it.
+Upstream's numbers were someone else's noise.
+
+Four things that were not the model, and cost most of the afternoon: the USB
+mic's **power switch was off**; `default_input()` opens the **44100 Hz copy** of
+a device whose 48000 Hz copy carries the voice, ~100× louder; device indices
+**do not survive replugging**; and `-9999 Blocking API` is a **host-API
+limitation, not another program holding the mic** — which is what the
+`NoInputDevice` message used to tell the user to go and fix. All four now
+corrected or documented (D57).
 
 Three plan lines are now wrong, and being wrong is worth recording:
 
@@ -338,26 +354,51 @@ Three plan lines are now wrong, and being wrong is worth recording:
   English configurations from OmniVoice's voice design), which is also exactly what a
   synthetic wake-word corpus is starved on.
 
-**The one measurement left, and why it is the one that matters.** The custom
-trainer's verdict was measured on audio it synthesised - and the model never
-learned at all, which is why the wake word is now pretrained rather than trained
-(D56). The pretrained numbers above are also on synthesis: piper is cleaner,
-louder and carries none of the room. `probe_wakeword_real.py` measures the four
-things that fail separately: recall, false fires on room tone, false fires on
-**ordinary speech** (the hard one — silence is easy, conversation is not), and
-latency from the first frame carrying energy rather than from record-start. PASS
-is ≥70% recall, ≤1.0 s median latency, zero room-tone fires, ≤1 speech fire.
+**The measurement that closed this phase, and what it overturned.** The plan
+assumed the last thing left was a mouth test on a wake word that already
+worked. It did not work. `probe_wakeword_real.py` and the framing probe
+together say the pretrained model scores **0.993 on piper's rendering of the
+phrase and 0.290 on the user's actual voice**, same scorer, same day, same
+code path, 0.5 threshold, with the 0.993 control printed on the same screen.
+The mouth test was worth running precisely because D54 predicted that
+upstream's numbers, taken on someone else's noise, would not survive contact
+with one specific mouth.
 
-> A wake word that misses you is an inconvenience; one that fires on your television
-> trains you to ignore it. The second is why `voice.watch` **refuses** when no wake word
-> is trained rather than falling back to an always-open microphone.
+That measurement also cost four wrong turns before the right one, all recorded
+in D57 and all about the hardware rather than the model. Two are worth carrying
+into any future audio work here: **a peak is one sample and clipping is a
+proportion** (8 of 240,000 samples at the rail, not a wall), and
+**`default_input()` is not the loudest copy of a device** - the same USB
+microphone enumerates at 44100 Hz (near-silent) and 48000 Hz (usable), and the
+default picks the quiet one.
 
-**Hardware note that cost a session.** Every input on this machine read peak ≤54 of 32767
-— the noise floor of a quiet room. It was the **USB port**, not the code: after the user
-moved it, `Microphone (3- Usb Audio Device` reads peak 20154 and the round trip returned
-`'as we test if it works like that.'` Ask a device for its own rate; four of the nine here
-fail a 16 kHz request outright with `Invalid sample rate`, which reads exactly like
-broken hardware.
+> A wake word that misses you is an inconvenience; one that fires on your
+> television trains you to ignore it. `voice.watch` **refuses** rather than
+> falling back to an always-open microphone, and that refusal is now correct
+> for a reason it could not previously state: the model does not fire on this
+> user. Push-to-talk carries voice instead, and it is measured working.
+
+**Hardware notes that cost two sessions, neither of which was the code.** Every
+input first read peak ≤54 of 32767 — the noise floor of a quiet room. It was
+the **USB port**: after the user moved it the device read peak 20154 and the
+round trip returned `'as we test if it works like that.'` Ask a device for its
+own rate; four of the nine fail a 16 kHz request outright with `Invalid sample
+rate`, which reads exactly like broken hardware.
+
+Then the same device went silent again, and the cause was a **physical power
+switch on the microphone**. From inside the process, a switched-off USB mic and
+a broken one are the same number. Three more things, all D57:
+
+* The port move also changed the enumeration (`Microphone (3-` → `(4-`), so
+  **no device index survives replugging**. Re-enumerate every session; never
+  bake an index into a command or a config.
+* **The same physical mic enumerates twice** — 44100 Hz and 48000 Hz — and the
+  44100 Hz copy is ~100× quieter. `default_input()` picks the quiet one.
+* **`-9999 Blocking API not supported yet` is a PortAudio host-API limitation,
+  not another program holding the device.** It fires on every input at once,
+  including the onboard Realtek mic, while nothing holds anything. `audio.py`
+  used to tell the user to close other applications; it now says what is
+  actually wrong.
 
 ---
 

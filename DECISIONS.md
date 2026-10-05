@@ -1460,3 +1460,115 @@ the threshold choice, which the adversarial numbers above inform but do not
 settle; then `voice.watch` end to end. `models/wakeword/yo_archie.*` remain on
 disk as evidence, not as anything the daemon loads - no `src` file references
 the old phrase.
+
+---
+
+## D57 - The mouth test failed, and the model that passed every other test was not asked
+
+D54 said a wake word is not measured until a mouth has tested it. Here is that
+test, on this mouth, through this microphone, at this desk.
+
+**The verdict is FAIL.** Streaming 80 ms windows - exactly what `voice_loop`
+does in production - scores **0.290** on the user's voice against a 0.5
+threshold. The same code path, on piper's rendering of the same phrase,
+scored **0.993** in the same process minutes earlier. No framing rescues it:
+
+| condition on the recorded take | score |
+|---|---|
+| 80 ms window, 80 ms step (production) | 0.290 |
+| 80 ms window, 40 ms step | 0.338 |
+| 160 ms window, 80 ms step | 0.500 |
+| 320 ms window, 160 ms step | 0.190 |
+| whole file, one call | 0.233 |
+| **control: piper, same code path** | **0.993** |
+
+The control is the load-bearing row. Without it, 0.290 is ambiguous between
+"the phrase was not in the recording" and "the scorer is broken"; with it, the
+scorer is proven working on this machine today and the shortfall belongs to
+the model meeting a real voice. Upstream measured on dinner-party noise and
+did not publish a recall figure for a specific mouth. D54 existed because
+that gap would show up here. It showed up.
+
+**The threshold trade, stated rather than taken.** Lowering to ~0.3 to catch
+this voice would admit the D56 adversarial family wholesale - "hey javascript"
+0.956, "hey jarvisian" 0.994, "hey alexa" 0.979. A wake word that mishears
+"hey Jarvis, save my work" and acts on it is worse than one that misses,
+because one is an annoyance and the other is the assistant doing the wrong
+thing with confidence. The threshold stays at 0.5.
+
+**The decision: push-to-talk, hands-free abandoned.** `voice.listen` already
+works - press, record, transcribe, answer - and it does not depend on any of
+this. The user closed it directly: an issue of no relative importance, against
+a list where system knowledge is item one and this was not on it. Recorded
+rather than relitigated.
+
+### The bug that nearly hid the answer, and then nearly faked it
+
+`openwakeword.Model.predict` is **streaming**: `raw_data_buffer` and
+`melspectrogram_buffer` live on the instance, so a chunk's score depends on
+what that same instance was fed before it. Two consequences, both paid for in
+one afternoon:
+
+* **A contaminated 0.998.** A probe scored piper's control utterance first,
+  priming the mel buffer with two seconds of clean speech, then scored the
+  real take on top of it and reported 0.998 - a perfect result, on a take that
+  was actually at 0.204. A fresh model on the identical wav gave 0.204. The
+  0.998 was real arithmetic on contaminated state.
+* **A window unit blamed for a model problem.** An earlier probe fed a
+  15-second file as a single window and scored 0.008, concluding "the phrase is
+  not in this recording, or is too quiet to match". That reading was closer to
+  the truth than the 0.998 that replaced it.
+
+The instrument's own control would have caught the contamination on the first
+run. What caught it was a second instrument disagreeing with the first on the
+same file - which is the only reason this is a lesson and not a shipped
+defect. **An instrument that is reused without being reset does not measure;
+it accumulates.** `probe_take.py` now renders its control and scores it last,
+and prints both numbers on the same screen where a disagreement is visible.
+
+### Four measurements about the microphone, none of which were about the model
+
+Every earlier real-mic run scored 0.000 with peak levels in the hundreds, and
+three wrong conclusions came out of that before the real causes did:
+
+1. **The USB microphone's power switch was off.** Every input returned digital
+   silence. The drivers were healthy; nothing was arriving. Nothing in the
+   code could have told the difference, because from inside the process a
+   powered-off USB mic and a broken one are the same signal.
+2. **`default_input()` picks the wrong copy of the right device.** The same
+   physical microphone enumerates twice: index 1 at 44100 Hz and index 9 at
+   48000 Hz. Index 9 carries the voice; index 1 is roughly 100x quieter -
+   usable audio at 48 kHz, near-silence at 44.1 kHz, same microphone, same
+   socket. `voice.listen` defaults to the system default, so it was opening the
+   quiet one.
+3. **Device indices are not stable across sessions.** The mic moved ports and
+   enumerated as `Microphone (4- ...)` instead of `(3- ...)`; index 9 vanished
+   from one listing and returned in the next, and `--device 9` failed with "no
+   input named '9'" while `list_inputs()` was enumerating. Any index baked into
+   a config or a command line is a guess about this session.
+4. **`-9999 Blocking API not supported yet` is not an exclusive hold.** It was
+   read as "another application has the device", and it was applied as that
+   advice in `NoInputDevice`. It is a PortAudio host-API limitation: it appeared
+   on every input simultaneously, including the onboard Realtek microphone,
+   while nothing held anything. Closing other programs could never have fixed
+   it. The handler now distinguishes the two, and `audio.py` names three
+   failures rather than two - blocked, in use, and not addressable this way -
+   because blocked and in use read identically on screen and were being given
+   the same advice.
+
+And one that was not clipping at all: peak 32653 against a 32768 ceiling reads
+like a wall, but only **8 of 240,000 samples** touched the rail. One transient,
+not a clipped waveform. Loud and healthy: RMS 2110, loudest 20 ms at 9292.
+**A peak is a single sample; clipping is a proportion.** The first was reported
+as the second, and the cause sent the investigation after gain instead of after
+the model - which was where the actual answer was the whole time.
+
+### What production inherits
+
+None of the above touches `voice.speak`, `voice.listen`, or `voice.status`.
+`voice.watch` still refuses when no wake model resolves rather than opening a
+microphone on a model that does not fire on this user. Push-to-talk is the
+voice input, and it is measured working. The finding to carry forward is not
+about wake words: **a synthetic corpus, however clean, cannot stand in for the
+mouth.** Piper scores 0.99 and the user scores 0.29 on the same phrase, on the
+same day, through the same code.

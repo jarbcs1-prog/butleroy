@@ -14,10 +14,14 @@ devices here declare 44100 or 48000 Hz and reject 16000 Hz outright, with
 that whisper wants - fails on hardware that is working perfectly. What the driver
 will accept and what we want to store are not the same number.
 
-**"Blocked" and "in use" are different failures and get different advice.** A
-device that is exclusive-mode and owned by another application is a configuration
-problem the user can fix by closing the other thing. A device that opens and then
-returns nothing is a gain or connection problem, and no amount of code fixes it.
+**"Blocked", "in use" and "not addressable this way" are three different failures
+and get three different pieces of advice.** A device that is exclusive-mode and
+owned by another application is a configuration problem the user can fix by closing
+the other thing. A device that opens and then returns nothing is a gain or
+connection problem, and no amount of code fixes it. And an error mentioning
+`-9999 Blocking API not supported yet` is neither of those: it is this host API
+declining the device, and it fires on every input at once while nothing holds
+any of them.
 
 **Energy above zero is not speech.** A room with a fan in it has energy. The end
 of an utterance is therefore detected with a hysteresis band and a minimum
@@ -221,11 +225,35 @@ class Microphone:
             )
             self._stream.start()
         except Exception as why:  # noqa: BLE001 - PortAudio raises its own types
+            # Branched on the message, because these two failures need different
+            # advice and the generic version gave the wrong one for days.
+            #
+            # `-9999 Blocking API not supported yet` is NOT another application
+            # holding the device. Measured: it appeared on every input this
+            # machine exposes for the default MME host API, including the
+            # onboard Realtek microphone while nothing was holding it. It means
+            # this host API cannot open that device in blocking mode - the fix
+            # is a different host API (WASAPI), not closing another program.
+            # Telling someone to go close their music player for this sends
+            # them looking for a cause that is not there.
+            blocked_api = "-9999" in str(why) or "Blocking API" in str(why)
+            if blocked_api:
+                advice = (
+                    f"This PortAudio host API cannot open the device in blocking "
+                    f"mode, which is not the same as another program holding it - "
+                    f"it fails identically on every input when nothing is holding "
+                    f"anything. Use a WASAPI input instead; run `voice.status` and "
+                    f"pick one of the indices it lists."
+                )
+            else:
+                advice = (
+                    f"If another application holds the device exclusively, close "
+                    f"it - a microphone can only be opened by one program at a "
+                    f"time on most Windows audio drivers."
+                )
             raise NoInputDevice(
-                f"could not open {self.device_name!r} at {self.rate} Hz: {why}. "
-                f"If another application holds the device exclusively, close it - "
-                f"a microphone can only be opened by one program at a time on most "
-                f"Windows audio drivers."
+                f"could not open {self.device_name!r} at {self.rate} Hz: "
+                f"{why}. {advice}"
             ) from why
 
     # -- streaming ---------------------------------------------------------
@@ -251,7 +279,18 @@ class Microphone:
                 # transcript of a gap.
                 yield _Overflow(len(data))
             else:
-                yield data
+                # sounddevice always yields (frames, channels); we opened the
+                # stream mono, so the channel axis is width 1 and the frame of
+                # samples is what is wanted. Flattening happens here, at the
+                # source, rather than in every consumer: everything downstream
+                # treats a frame as 1-D (rms, resample, the wake word's 80 ms
+                # windows), and openWakeWord's streaming preprocessor turns a
+                # (n, 1) block into a 3-D melspectrogram that cannot vstack
+                # onto its 2-D history buffer - a crash only the real
+                # microphone could have produced, because piper's files are
+                # 1-D and the shape-agnostic arithmetic (rms, tobytes)
+                # tolerated the extra axis silently.
+                yield data[:, 0]
 
     def rms(self, frame: Any) -> float:
         return float(self._np.sqrt(self._np.mean(frame.astype(self._np.float64) ** 2)))

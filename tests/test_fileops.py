@@ -374,16 +374,23 @@ def test_the_assistant_cannot_edit_its_own_source(daemon):
     assert r.get("ok") is False
 
 
-def test_every_file_tool_now_has_an_executor():
-    """The gap is now exactly the two that are deliberately not built.
+def test_every_file_tool_has_an_executor():
+    """The file surface is complete: nothing registered is unreachable.
 
-    Listed rather than asserted empty, so that adding a third unimplemented tool
-    without noticing fails here, and so the list itself is the honest statement
-    of what the assistant can and cannot do.
+    This used to name the two deliberately-absent tools and assert that was the
+    whole gap, which had a second purpose worth keeping: the check ran over
+    *every* `file.` tool rather than over the two, so adding a third
+    unimplemented one without noticing failed here. That property is preserved by
+    computing the missing set and printing it - a hard-coded expectation of two
+    names would have stopped noticing anything new.
     """
     from assistant.tools import ALL_TOOLS
 
-    deliberately_absent = {"file.write_notes", "file.empty_recycle_bin"}
     wanted = {t.name for t in ALL_TOOLS if t.name.startswith("file.")}
     missing = wanted - set(Daemon._EXECUTORS)
-    assert missing == deliberately_absent, f"unexpectedly missing: {sorted(missing)}"
+    assert missing == set(), (
+        f"registered file tools with no executor: {sorted(missing)}")
+    # Every one of them must also be reachable through tool_call and not through
+    # a second, tier-free door (D59).
+    for name in sorted(wanted):
+        assert name not in Daemon._OPS, f"{name} is also an op"

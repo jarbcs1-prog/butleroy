@@ -61,7 +61,7 @@ from .arbiter import Denial, Priority, VramArbiter, VramUnavailable, format_deni
 from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
-from . import delegate, fileops, sysinfo, teach
+from . import delegate, fileops, obsidian, sysinfo, teach
 from . import audio, speech, voice_loop
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
@@ -1694,6 +1694,191 @@ class Daemon:
             restored += 1
         return {"restored": restored, "failed": failed, "batch": batch}
 
+    # ------------------------------------------------- durable notes (D63)
+    #
+    # `file.write_notes` is T1 and takes no path. The vault chooses the
+    # directory, for the same reason `telegram.send_draft` and the teaching
+    # ledger do: a T1 write tool that takes a path from the caller is an
+    # arbitrary-write primitive wearing a better name. Which is also why the
+    # parameter is called `section` and not `subdir` - `subdir` contains
+    # "dir", so `_check_paths` screened the documented call
+    # `{"subdir": "journal"}` as a relative path and refused every valid
+    # invocation. The rename is the fix; carving an exception out of the
+    # screen would have been the alternative, and a hole in a rule is still a
+    # hole (D49 runs both ways).
+
+    def _note_section(self, args: dict) -> str:
+        section = str(args.get("section") or "").strip()
+        if not section:
+            raise DaemonError(
+                "which section? choose one of: "
+                + ", ".join(sorted(obsidian.SUBDIRS)))
+        if section not in obsidian.SUBDIRS:
+            raise DaemonError(
+                f"unknown Assistant section {section!r}; the vault has: "
+                + ", ".join(sorted(obsidian.SUBDIRS)))
+        return section
+
+    def _exec_file_write_notes(self, args: dict) -> Any:
+        section = self._note_section(args)
+        title = str(args.get("title") or "").strip()
+        if not title:
+            raise DaemonError("a note needs a title; it is what the file is named after")
+        body = args.get("body")
+        if not isinstance(body, str) or not body.strip():
+            raise DaemonError("a note needs a body; there is nothing to write otherwise")
+        if len(body.encode("utf-8")) > obsidian.MAX_WRITE_BYTES:
+            raise DaemonError(
+                f"the body is {len(body.encode('utf-8'))} bytes and the vault "
+                f"refuses more than {obsidian.MAX_WRITE_BYTES}; split it, or "
+                "write the long half as a file and link to it")
+
+        target = self._vault().write_note(section, title, body)
+
+        # Whether an existing note was replaced is *measured*, not reported
+        # from the flag we passed in. `write_note` never overwrites unless
+        # asked, and when it declines it writes a timestamped sibling - so the
+        # filename is the evidence. Claiming `overwrote: false` from the
+        # default would be a thing the bridge could contradict, and reading the
+        # consumer is cheaper than being contradicted by it (D53).
+        plain = f"{obsidian.slugify(title)}.md"
+        overwrote = target.name == plain
+        out = {
+            "path": str(target),
+            "section": section,
+            "title": title,
+            "bytes": len(body.encode("utf-8")),
+            "overwrote": overwrote,
+            "reversible": True,
+        }
+        if overwrote:
+            out["note"] = (
+                "the existing note was replaced in place. It is still only a "
+                "file in your vault, and Obsidian keeps its own version "
+                "history if it is switched on")
+        else:
+            out["previous"] = str(target.parent / plain)
+            out["note"] = (
+                "your vault already had a note called "
+                f"{plain!r}, so this was written beside it as "
+                f"{target.name!r} rather than over the top of it. Nothing you "
+                "wrote was replaced. If you meant to update the older note, "
+                "say so and it will be done explicitly")
+        return out
+
+    # -------------------------------------------- emptying the recycle bin
+    #
+    # The one T3 with no inverse, which makes it the honest test of what the
+    # D60 undo journal is for. It still gets a row: a journal that only
+    # records the things it can undo is a journal that cannot tell you which
+    # of its entries were the ones you cannot take back.
+    #
+    # `C:\$Recycle.Bin` is on our own deny list, so nothing here reads it.
+    # `Get-ChildItem 'C:\$Recycle.Bin'` would work perfectly well - that is
+    # exactly why it is the wrong thing to do. The path would be buried in a
+    # script string and would never reach `_check_paths`, which is the gate
+    # bypassed by construction rather than by argument. So we ask the shell's
+    # own namespace instead, and ask PowerShell what it *would* do.
+
+    def _preview_file_empty_recycle_bin(self, args: dict) -> dict:
+        listing = sysinfo.recycle_listing()
+        whatif = sysinfo.recycle_whatif()
+        out: dict[str, Any] = {
+            "action": "empty the recycle bin (there is no undo)",
+        }
+        if listing["available"]:
+            out["count"] = listing["count"]
+            out["items"] = listing["items"][:50]
+            out["items_shown"] = min(len(listing["items"]), 50)
+        else:
+            out["count"] = None
+            out["items"] = []
+            out["count_unknown"] = (
+                "the shell would not tell us what is in the bin, so the "
+                "count below is unknown rather than zero - an empty list and "
+                "an unreadable list look identical and mean opposite things")
+        # Two things here, each said once. The first version interpolated
+        # `listing['note']` and then added a second sentence about the same
+        # unverifiable size column, so the field opened by explaining why there
+        # is no byte total and closed by explaining it again - one sentence
+        # carrying the same fact twice reads as two separate problems to
+        # whoever is being asked to approve this (the shape D62 caught in the
+        # teaching refusals).
+        #
+        # The second thing is the one the first version left out entirely, and
+        # it is the one a reader needs: we did not simply walk the bin
+        # directory, because our own policy denies it. Saying "how we counted"
+        # without saying "and here is the route we were not allowed to take"
+        # invites the reasonable question of why the obvious method was
+        # skipped, with no answer in the dialog.
+        out["how_we_counted"] = (
+            f"{listing['source']}, and not by reading "
+            f"{listing['denied_directory']} - that path is on this system's "
+            "own deny list, and a shell command naming it would slip past the "
+            "check that refuses it rather than pass it. The size column could "
+            "not be verified, so no byte total is given: a number nobody "
+            "checked is worse than no number")
+        out["windows_says"] = (whatif["stdout"] or "").strip() or whatif["stderr"].strip()
+        out["windows_confirmed_the_target"] = whatif["names_target"]
+        if not whatif["names_target"]:
+            out["windows_said_nothing_useful"] = (
+                "PowerShell exited "
+                f"{whatif['exit_code']} without naming the target, so we do "
+                "not actually know this would act on the recycle bin. "
+                "Approving on the strength of the command alone would be "
+                "claiming a confirmation we do not have")
+        out["undo"] = None
+        out["undo_note"] = (
+            "nothing here can be brought back. The bin is emptied by asking "
+            "Windows to empty it, and Windows does not keep a copy")
+        out["reversible"] = False
+        out["not_the_quarantine"] = (
+            "this does not touch this system's quarantine, which is where "
+            "`file.delete` puts things; use `file.restore` for those. "
+            "Emptying the bin leaves them recoverable")
+        return out
+
+    def _exec_file_empty_recycle_bin(self, args: dict) -> Any:
+        # Asked again here, so the *result* carries the evidence rather than
+        # the preview carrying it alone. A confirmation shown ten minutes ago
+        # is evidence about ten minutes ago.
+        whatif = sysinfo.recycle_whatif()
+        if not whatif["names_target"]:
+            raise DaemonError(
+                "PowerShell did not name the recycle bin as its target "
+                f"(exit {whatif['exit_code']}: "
+                f"{whatif['stderr'].strip() or whatif['stdout'].strip()}), so "
+                "we do not know what this would empty. Nothing was done")
+        row = self._admin_journal(
+            "file.empty_recycle_bin", {},
+            undo=None,
+            note="the first action with no inverse. The row exists because a "
+                 "journal that only records what it can undo cannot tell you "
+                 "which entries were the ones you cannot take back")
+        listing = sysinfo.recycle_listing()
+        result = sysinfo.recycle_clear()
+        payload = {
+            "emptied": bool(result["ok"]),
+            "exit_code": result["exit_code"],
+            "stdout": result["stdout"].strip(),
+            "stderr": result["stderr"].strip(),
+            "was_holding": listing["count"] if listing["available"] else None,
+            "windows_says": (whatif["stdout"] or "").strip(),
+            "reversible": False,
+            "undo": None,
+        }
+        if not result["ok"]:
+            payload["note"] = (
+                "Windows refused. The bin is as it was - the exit code and "
+                "its message are above, and nothing was removed")
+        self._admin_close_journal(row, ok=bool(result["ok"]), result=payload)
+        if not result["ok"]:
+            raise DaemonError(
+                f"emptying the recycle bin failed with exit "
+                f"{result['exit_code']}: "
+                f"{result['stderr'].strip() or result['stdout'].strip()}")
+        return payload
+
     # ------------------------------------------------------------ administration
     #
     # Three Tier 2 tools: launch an application, close a process, run one
@@ -2248,6 +2433,17 @@ class Daemon:
     def _admin_journal(self, tool: str, args: dict, *, undo: Any,
                        note: str = "") -> dict[str, Any]:
         """Record how to reverse this, before it happens. Returns the row.
+
+        Named for the section it was born in, and now serving every Tier 3
+        including `file.empty_recycle_bin`, which has no inverse at all and so
+        passes `undo=None` with a note saying so. Not renamed, because renaming
+        it would touch D60's committed tests for the sake of a name; the smell
+        is recorded in D63 instead.
+
+        Why the no-inverse case still gets a row: a journal that only records
+        what it can undo cannot tell you which of its entries were the ones you
+        cannot take back. "Nothing here is reversible" is information, and it
+        has to be findable.
 
         The `ok` field is written later, by the caller, as a second row with
         the same `id`. Appending twice beats rewriting: a half-written journal
@@ -4573,6 +4769,8 @@ def _install_tables() -> None:
         "file.create": Daemon._exec_file_create,
         "file.delete": Daemon._exec_file_delete,
         "file.restore": Daemon._exec_file_restore,
+        "file.write_notes": Daemon._exec_file_write_notes,
+        "file.empty_recycle_bin": Daemon._exec_file_empty_recycle_bin,
         "voice.speak": Daemon._exec_voice_speak,
         "voice.listen": Daemon._exec_voice_listen,
         "voice.status": Daemon._exec_voice_status,
@@ -4612,6 +4810,10 @@ def _install_tables() -> None:
         # tools are the ones a human is asked to bless. A preview for a T0 read
         # would be theatre.
         "file.delete": Daemon._preview_file_delete,
+        # The one T3 with no inverse. Its preview cannot show an undo, so what
+        # it shows instead is the evidence Windows itself produced - and the
+        # difference between a bin we could not read and a bin that is empty.
+        "file.empty_recycle_bin": Daemon._preview_file_empty_recycle_bin,
         # Audible tools get previews for the same reason destructive ones do:
         # a T3 dialog with no payload is a dialog the user approves blind.
         "voice.speak": Daemon._preview_voice_speak,

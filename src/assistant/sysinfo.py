@@ -25,6 +25,7 @@ Nothing here writes, and nothing here changes state. Every function is a read.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import platform
 import re
@@ -1328,3 +1329,168 @@ def power_argv(action: str, delay_s: int | None = None) -> list[str]:
         flags.append(str(delay_s if delay_s is not None
                          else POWER_DEFAULT_DELAY_S))
     return [POWER_EXE] + flags
+
+
+# -- the recycle bin ----------------------------------------------------------
+# `policy.DENY_PATHS` contains `C:\$Recycle.Bin`, so this module must not read
+# that directory - not even by shelling out and naming it inside a script
+# string, which would route around `_check_paths` entirely. That is the same
+# hole recorded in tests/test_delegate_ops.py: "a path buried inside a `-c`
+# source string is opened by python rather than by us."
+#
+# So everything here goes through two doors instead, and both were measured on
+# this machine before anything was written:
+#
+#   * `Clear-RecycleBin -WhatIf` exits 0 and prints
+#     `What if: Performing the operation "Clear-RecycleBin" on target
+#     "All of the contents of the Recycle Bin".` - Windows naming its own
+#     target is stronger evidence than a count we computed ourselves.
+#   * `(New-Object -ComObject Shell.Application).NameSpace(0xA)` enumerates the
+#     bin without the directory ever appearing in a command.
+#
+# The bin was empty when measured, so the COM `Size` column could not be
+# verified. There is therefore no byte total anywhere in here: a number that
+# was never seen is worse than no number, because it answers a question nobody
+# asked with a figure nobody checked.
+
+RECYCLE_PS = "powershell.exe"
+RECYCLE_PS_CLEAR = "Clear-RecycleBin -Force -ErrorAction Stop"
+RECYCLE_PS_WHATIF = "Clear-RecycleBin -WhatIf -ErrorAction Stop"
+
+#: Named so the refusal to read it can say what it is refusing. The string is
+#: documentation, not an operand - nothing passes it to anything.
+RECYCLE_BIN_DIR = r"C:\$Recycle.Bin"
+
+_RECYCLE_LIST_PS = (
+    "$s = New-Object -ComObject Shell.Application;"
+    "$b = $s.NameSpace(0xA);"
+    "if ($null -eq $b) { Write-Output '{\"available\": false}'; exit 0 };"
+    "$i = @($b.Items());"
+    "$n = @($i | ForEach-Object { $_.Name });"
+    "Write-Output ('{\"available\": true, \"count\": ' + $i.Count"
+    " + ', \"names\": [' + (($n | ForEach-Object { '\"' + $_ + '\"' }) -join ',') + ']}')"
+)
+
+
+def _ps_argv(script: str) -> list[str]:
+    """powershell.exe running one script, with the flags that keep it quiet.
+
+    `-NoProfile` because a user's profile can print things of its own and we
+    would be reading them as though Windows had said them; `-NonInteractive`
+    so a prompt cannot appear and hang a tool call that has nobody to answer
+    it.
+    """
+    return [RECYCLE_PS, "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def _recycle_payload(out: str) -> dict[str, Any]:
+    """Pull the one JSON line out of PowerShell's output.
+
+    Takes the last line that starts with `{` and ends with `}`, because a
+    profile or a warning can precede it and we want our own line, not theirs.
+    Returns `{}` when there is no such line - and `{}` means "PowerShell did
+    not answer", never "the bin is empty".
+    """
+    for line in reversed((out or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                got = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(got, dict):
+                return got
+    return {}
+
+
+def recycle_listing() -> dict[str, Any]:
+    """What is in the recycle bin, asked through the shell namespace.
+
+    Never reports a byte total, and never falls back to reading a directory.
+    If the COM object cannot be reached the answer is `available: False` with
+    the reason attached - because the alternative, a count of zero, reads as
+    "there is nothing in there" when the truth is "we could not look".
+    """
+    got = run_capture(_ps_argv(_RECYCLE_LIST_PS))
+    out = str(got.get("stdout") or "")
+    payload = _recycle_payload(out)
+    if not payload.get("available"):
+        return {
+            "available": False,
+            "count": None,
+            "items": [],
+            "source": "shell namespace (COM NameSpace 0xA)",
+            "denied_directory": RECYCLE_BIN_DIR,
+            "note": (
+                "the shell namespace could not be reached"
+                + (f" (exit {got.get('exit_code')})" if got.get("exit_code")
+                   else "")
+                + ". The bin was not read by any other route: "
+                + RECYCLE_BIN_DIR + " is on this project's deny list."
+            ),
+            "measured": True,
+        }
+    names = [str(n) for n in (payload.get("names") or [])]
+    count = payload.get("count")
+    if not isinstance(count, int):
+        count = len(names)
+    return {
+        "available": True,
+        "count": int(count),
+        "items": [{"name": n} for n in names],
+        "source": "shell namespace (COM NameSpace 0xA)",
+        "denied_directory": RECYCLE_BIN_DIR,
+        "note": (
+            "count and names only - the shell API's size column could not be "
+            "verified on this machine, so no byte total is reported rather "
+            "than a number nobody checked"
+        ),
+        "measured": True,
+    }
+
+
+def recycle_whatif() -> dict[str, Any]:
+    """Ask Windows what `Clear-RecycleBin` would do, without doing it.
+
+    `names_target` is the judgement, and it comes from **stdout**, not from the
+    exit code. An earlier reading would have taken exit 0 as consent, but exit
+    0 with no "What if" line means Windows declined to answer - and a preview
+    that reported that as confirmation would be claiming something it does not
+    have.
+    """
+    got = run_capture(_ps_argv(RECYCLE_PS_WHATIF))
+    out = str(got.get("stdout") or "")
+    names_target = "What if:" in out and "Recycle Bin" in out
+    return {
+        "command": RECYCLE_PS_WHATIF,
+        "exit_code": got.get("exit_code"),
+        "stdout": out.strip(),
+        "stderr": str(got.get("stderr") or "").strip(),
+        "names_target": names_target,
+        "note": (
+            "Windows named its own target, so this is its answer and not ours"
+            if names_target else
+            "Windows did not name a target; treat this as no confirmation"
+        ),
+        "measured": True,
+    }
+
+
+def recycle_clear() -> dict[str, Any]:
+    """Empty the bin. Returns the outcome; a non-zero exit is not a raise.
+
+    Same rule as `run_capture`: for a probe reading a value, raising is right;
+    for a tool whose whole job is to try something irreversible, "it failed and
+    here is why" IS the answer.
+    """
+    got = run_capture(_ps_argv(RECYCLE_PS_CLEAR), timeout=180.0)
+    return {
+        "command": RECYCLE_PS_CLEAR,
+        "exit_code": got.get("exit_code"),
+        "ok": got.get("exit_code") == 0,
+        "stdout": str(got.get("stdout") or "").strip(),
+        "stderr": str(got.get("stderr") or "").strip(),
+        "timed_out": bool(got.get("timed_out")),
+        "seconds": got.get("seconds"),
+        "measured": True,
+    }

@@ -471,18 +471,43 @@ def test_a_grant_expires_on_its_own(dg, sandbox):
 
 
 # ------------------------------------------------- 5. T3 without an executor never asks
+def _an_unrunnable_destructive_tool() -> str:
+    """A destructive T3 tool with no executor, *found* rather than named.
+
+    This example has already moved twice. It was `package.install`, then
+    `file.empty_recycle_bin`, and each time one of them gained an executor and
+    quietly stopped being an example - the test failed, which is how the moves
+    were noticed, but the fix was always to point at the next one. Naming a
+    third would only buy time.
+
+    The property is what is under test, so the test looks the property up. And
+    if every destructive tool can now run, that is worth being told plainly
+    here, rather than discovering later that no test covers the case at all.
+    """
+    from assistant.tools import ALL_TOOLS
+
+    found = [s.name for s in ALL_TOOLS
+             if s.destructive and s.tier.name == "IRREVERSIBLE"
+             and s.name not in D.Daemon._EXECUTORS]
+    assert found, (
+        "no destructive T3 tool lacks an executor any more, so the case this "
+        "section covers is exercised by nothing. Either build one that cannot "
+        "run, or delete this section and say in the commit message that the "
+        "property is now vacuous.")
+    return found[0]
+
+
 def test_a_destructive_tool_without_an_executor_never_asks(dg):
     """The user must not go through a security ceremony for a no-op.
 
-    `file.empty_recycle_bin` is destructive, T3, and has no executor. Asking the
-    user to approve it would be theatre: the approval would be recorded, and then
-    nothing would happen. It has to fail before the dialog.
+    Asking the user to approve a destructive T3 that cannot run would be
+    theatre: the approval would be recorded, and then nothing would happen. It
+    has to fail before the dialog.
 
-    The example was `package.install` until it gained an executor; the property
-    is the same either way, and a test that names a tool which can now run would
-    be asserting the wrong thing.
+    Which tool makes the point is looked up rather than named - see
+    `_an_unrunnable_destructive_tool` for why.
     """
-    res = ask(dg, "file.empty_recycle_bin")
+    res = ask(dg, _an_unrunnable_destructive_tool())
     assert res["ok"] is False
     assert res.get("not_implemented") or res["result"].get("not_implemented"), res
     assert dg._pending == {}, "nothing may be left pending for a tool that cannot run"
@@ -494,10 +519,8 @@ def test_a_destructive_tool_without_an_executor_never_asks(dg):
 def test_the_gap_stays_visible_in_status(dg):
     """A tool that cannot run must still be *registered*, or the gap is invisible."""
     status = call(dg, "status")["result"]
-    # `file.empty_recycle_bin`, not `package.install`: that one gained an
-    # executor, so naming it here would be asserting that a working tool does
-    # not work.
-    assert "file.empty_recycle_bin" not in status["tools_executable"]
+    unrunnable = _an_unrunnable_destructive_tool()
+    assert unrunnable not in status["tools_executable"]
     # tools_registered is a count; tools_executable is the list of names.
     assert isinstance(status["tools_registered"], int)
     assert isinstance(status["tools_executable"], list)

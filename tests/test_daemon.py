@@ -192,10 +192,26 @@ def test_tool_check_predicts_but_never_acts_and_is_not_audited(dg: D.Daemon, wor
     # And the same flag must be False for a tool that genuinely has no handler,
     # which is the case that matters: a check that reports a T3 as executable when
     # it could not run would let the user plan around a capability that is absent.
-    # `file.empty_recycle_bin`, not `package.install` - that one has an executor
-    # now, and the point of this assertion is a tool that genuinely cannot run.
-    out2 = req(dg, "tool_check", tool="file.empty_recycle_bin",
-               channel=CHANNEL_PC)
+    #
+    # The example is *looked up* rather than named. It has been named three times
+    # now - `package.install`, then `file.empty_recycle_bin` - and each of those
+    # became false the day the tool it named gained an executor, so the assertion
+    # died twice for a reason that had nothing to do with what it tests. The
+    # property under test is "a destructive T3 with no executor reports
+    # executable: False", so the test asks for whatever currently has that
+    # property instead of assuming one still does.
+    from assistant.tools import ALL_TOOLS
+
+    unrunnable = [s.name for s in ALL_TOOLS
+                  if s.destructive and s.tier.name == "IRREVERSIBLE"
+                  and s.name not in D.Daemon._EXECUTORS]
+    assert unrunnable, (
+        "no destructive T3 tool lacks an executor any more, so the case this "
+        "assertion covers is exercised by nothing. Build one that cannot run, "
+        "or delete the assertion and say so in the commit message.")
+    out2 = req(dg, "tool_check", tool=unrunnable[0], channel=CHANNEL_PC)
+    # The tier verdict still comes back, and it is still right: a tool that
+    # cannot run is not thereby safe. Only `executable` flips.
     assert out2["result"]["would"] == "confirm"
     assert out2["result"]["executable"] is False
     assert len(records(dg)) == before

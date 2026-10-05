@@ -78,6 +78,12 @@ from .policy import (
     Verdict,
 )
 from .tools import ALL_TOOLS, default_gate
+#: The message limit, imported rather than restated. `telegram.send` refuses an
+#: over-long message instead of letting `say` cut it mid-sentence, and a second
+#: copy of 4096 is a second copy that can be wrong. `telegram.py` imports only
+#: the standard library, so this does not make the bridge mandatory at import -
+#: `_load_telegram` keeps its own deliberate laziness about the *config*.
+from .telegram import TELEGRAM_TEXT_MAX
 
 # Where we keep everything that is ours. Nothing outside this tree is ever
 # written by the daemon itself.
@@ -2787,7 +2793,7 @@ class Daemon:
     # unlock T2 and T3 on a machine nobody is watching. So T0/T1 run from the
     # coffee shop and T2/T3 queue until the person is back at the keyboard (D30).
 
-    def op_telegram_status(self, args: dict) -> Any:
+    def _telegram_status(self, args: dict) -> Any:
         """What the bridge is doing. Never includes the token."""
         if self.telegram is None:
             return {
@@ -2799,13 +2805,24 @@ class Daemon:
             }
         return {"configured": True, **self.telegram.status()}
 
-    def op_telegram_send(self, args: dict) -> Any:
-        """Proactively send a message. T3 and external, so the gate rules apply.
+    def _telegram_send(self, args: dict) -> Any:
+        """Deliver one message, once the gate and D32 have had their say.
 
-        The bridge's own replies are transport and do not come through here -
-        answering the message you were just sent is not this tool. This is for a
-        message the assistant starts: a reminder, an alert, a result nobody asked
-        for. Which is exactly why it is T3.
+        Proactively sending a message is a T3 external action. The bridge's own
+        replies are transport and do not come through here - answering the
+        message you were just sent is not this tool. This is for a message the
+        assistant starts: a reminder, an alert, a result nobody asked for. Which
+        is exactly why it is T3.
+
+        Private, and it was not for a while. While `telegram.send` was only an
+        op this was `op_telegram_send`, and `op_*` names are ops - callable by
+        name through the pipe with no tier check, no preview and no confirmation.
+        Registering the tool therefore left a second door to a T3 action, and
+        anything holding a pipe handle could walk through it while the registered
+        tool sat behind a dialog. `tests/test_voice_ops.py` caught it, by asserting
+        the general rule rather than the case: an executable tool must not also
+        have an op. The helper keeps the allowlist check and the failure reporting
+        in one place; it is no longer reachable by name.
         """
         chat_id = args.get("chat_id")
         text = str(args.get("text", ""))
@@ -2821,6 +2838,215 @@ class Daemon:
         if not self.telegram.say(int(chat_id), text):
             raise Refused(f"the send failed: {self.telegram.last_error}")
         return {"sent": True, "chat_id": int(chat_id), "chars": len(text)}
+
+    # -- the Telegram tools ---------------------------------------------------
+    #
+    # `telegram.send` had a helper before it had a tool. The tool is the
+    # classified, previewed entry point a model reaches for; the helper is the raw
+    # delivery underneath. They end in the same place on purpose: the allowlist
+    # check and the "the send failed" reporting live in `_telegram_send` and
+    # nowhere else, because two copies of "is this chat allowed" is how one of
+    # them ends up not being. Five defects in one afternoon came from
+    # reimplementing a rule the project already had (D58).
+    #
+    # The helper is deliberately *not* an `op_*`. Ops are tier-free and reachable
+    # by name, so an op for a T3 tool is a way around the tool - see the note on
+    # `_telegram_send`.
+
+    _TG_PREVIEW_CHARS = 2000  # enough to read a message; truncation is always flagged
+
+    def _telegram_allowed_ids(self) -> list[int]:
+        if self.telegram is None:
+            return []
+        return list(self.telegram.config.allowed_chat_ids)
+
+    def _telegram_recipient(self, args: dict) -> tuple[int | None, str]:
+        """Who the message goes to, and why not if it cannot be decided.
+
+        Never guesses. With exactly one chat on the allowlist the answer is
+        unambiguous, so `chat_id` is optional and the ordinary case - one phone,
+        one person - needs no ceremony. With two or more, choosing one of the
+        user's own chats is not a decision a T3 tool should make on his behalf, so
+        it asks instead and says which ids would work.
+
+        The second return value is the refusal text. Returning it rather than
+        raising is deliberate: the preview needs to *describe* the ambiguity to a
+        dialog rather than blow up while building one, and `_preview_for` has no
+        exception handling, so a preview that raised would take the whole
+        confirmation down with it.
+        """
+        raw = args.get("chat_id", args.get("to"))
+        ids = self._telegram_allowed_ids()
+        if raw is not None and str(raw).strip() != "":
+            try:
+                chat_id = int(raw)
+            except (TypeError, ValueError):
+                return None, f"{raw!r} is not a chat id; it must be a whole number"
+            if not self.telegram.config.allows(chat_id):
+                return None, (
+                    f"chat {chat_id} is not on the allowlist, so this will be "
+                    f"refused. Allowed: {', '.join(str(i) for i in ids)}"
+                )
+            return chat_id, ""
+        if not ids:
+            return None, "the bridge has no allowlist, so there is nobody to send to"
+        if len(ids) == 1:
+            return ids[0], ""
+        return None, (
+            f"several chats are allowed ({', '.join(str(i) for i in ids)}), so "
+            "this needs an explicit chat_id - picking one of them is the user's "
+            "decision, not the assistant's"
+        )
+
+    def _preview_telegram_send(self, args: dict) -> dict:
+        """D32 for words. The preview *is* the message.
+
+        Everything else about this tool is knowable from its name: a send goes to
+        Telegram. The one thing that cannot be known without reading is the text,
+        and the text is the entire risk - a phone number, a password, a confident
+        wrong answer the user did not check. So unlike `voice.speak`, which
+        truncates because it is echoing the user's own words straight back, this
+        shows the payload in full up to a length that no real message reaches, and
+        when it does cut, it says so.
+
+        It must not raise. `_preview_for` has no exception handling and this runs
+        while a confirmation is being built, so a bridge that is not configured
+        produces a preview that explains the send would fail rather than an
+        exception that loses the dialog.
+        """
+        text = str(args.get("text", "")).strip()
+        chat_id, why = self._telegram_recipient(args)
+        ids = self._telegram_allowed_ids()
+        shown = text[: self._TG_PREVIEW_CHARS]
+        over = len(text) > TELEGRAM_TEXT_MAX
+        out = {
+            "action": "send this message to Telegram, unprompted, on your own initiative",
+            "to": chat_id if chat_id is not None else "(nobody chosen)",
+            "allowed_chat_ids": ids,
+            "message": shown,
+            "characters": len(text),
+            "preview_truncated": len(text) > len(shown),
+            "reversible": False,
+            "note": (
+                "once this is delivered it cannot be recalled or edited from here"
+            ),
+        }
+        if len(text) > len(shown):
+            out["note"] += (
+                f"; the preview is cut at {self._TG_PREVIEW_CHARS} characters, so "
+                "read the staged draft for the rest"
+            )
+        if over:
+            out["would_be_refused"] = (
+                f"{len(text)} characters is over Telegram's {TELEGRAM_TEXT_MAX}; "
+                "this call will be refused rather than delivered cut off"
+            )
+        if why:
+            out["would_be_refused"] = why
+        if self.telegram is None:
+            out["would_be_refused"] = (
+                "the Telegram bridge is not configured, so the send would fail: "
+                f"{self.telegram_error}"
+            )
+        return out
+
+    def _exec_telegram_send(self, args: dict) -> Any:
+        """Deliver one message. T3 and external, so the gate and D32 come first."""
+        if self.telegram is None:
+            raise DaemonError(
+                "the Telegram bridge is not configured: "
+                f"{self.telegram_error}"
+            )
+        text = str(args.get("text", "")).strip()
+        if not text:
+            raise DaemonError("telegram.send needs non-empty text")
+        if len(text) > TELEGRAM_TEXT_MAX:
+            # `say` would cut it, silently, and the user would receive half a
+            # sentence and no sign that half was missing. A refused call is one
+            # the model can see and act on; a silently truncated one it cannot.
+            raise DaemonError(
+                f"the message is {len(text)} characters and Telegram's limit is "
+                f"{TELEGRAM_TEXT_MAX}; it will not be sent cut off. Shorten it, or "
+                "stage it with telegram.send_draft and send the draft yourself."
+            )
+        chat_id, why = self._telegram_recipient(args)
+        if chat_id is None:
+            raise DaemonError(why)
+        # The allowlist, the empty check and the transport-failure reporting all
+        # live in the helper. Calling it is the point: one rule, one place.
+        return self._telegram_send({**args, "chat_id": chat_id})
+
+    def _exec_telegram_poll(self, args: dict) -> Any:
+        """What Telegram has sent, as words rather than as a counter.
+
+        A T0 read of what the bridge already has. It deliberately does not poll:
+        `_poll_once` advances the cursor, and a read that consumed updates would
+        delete messages the loop had not handled yet - see `TelegramBridge.inbox`
+        for why that is data loss wearing a read tool's clothes.
+        """
+        status = self._telegram_status({})
+        if not status.get("configured"):
+            return {**status, "messages": [], "showing": 0}
+        try:
+            limit = int(args.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        rows = self.telegram.inbox(limit)
+        note = ""
+        if not status.get("running"):
+            note = (
+                "the polling loop is not running, so this will not change until it "
+                "is started again"
+            )
+        elif not rows:
+            note = "nothing has arrived on an allowed chat yet"
+        return {**status, "messages": rows, "showing": len(rows), "note": note}
+
+    def _exec_telegram_send_draft(self, args: dict) -> Any:
+        """Stage a message for a human to read. Never sends anything.
+
+        T1 because the only thing it does is append a line to a file inside the
+        daemon's own state directory. No `path` argument, deliberately: a T1 write
+        tool that takes a path from the caller is an arbitrary-write primitive
+        wearing a messaging name, and the whole value of this tool is that it can
+        only ever write to the one place.
+
+        The draft lands where a human can open it without asking the assistant for
+        anything - the gate would refuse to read `state/`, and that is the right
+        answer. Staging is for a person, not for the assistant's own read tools.
+        """
+        text = str(args.get("text", "")).strip()
+        if not text:
+            raise DaemonError("telegram.send_draft needs non-empty text")
+        chat_id, why = self._telegram_recipient(args)
+        path = self.state / "telegram_drafts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "at": time.time(),
+            "chat_id": chat_id,
+            "characters": len(text),
+            "text": text,
+            "sent": False,
+        }
+        if chat_id is None:
+            # Recorded rather than refused: staging a message whose recipient is
+            # still undecided is exactly the state this is for.
+            row["undecided"] = why
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        staged = sum(1 for _ in path.open("r", encoding="utf-8"))
+        return {
+            "staged": True,
+            "sent": False,
+            "path": str(path),
+            "chat_id": chat_id,
+            "characters": len(text),
+            "staged_total": staged,
+            "next": (
+                "open the file and read it; nothing has been sent. Deliver it "
+                "yourself, or ask the assistant to telegram.send the same words."
+            ),
+        }
 
     def _load_telegram(self) -> None:
         """Build the bridge if it can be built, and say why if it cannot.
@@ -2920,6 +3146,9 @@ def _install_tables() -> None:
         "app.launch": Daemon._exec_app_launch,
         "app.close": Daemon._exec_app_close,
         "shell.run": Daemon._exec_shell_run,
+        "telegram.poll": Daemon._exec_telegram_poll,
+        "telegram.send_draft": Daemon._exec_telegram_send_draft,
+        "telegram.send": Daemon._exec_telegram_send,
     }
     Daemon._PREVIEWS = {
         # Only destructive tools need a real preview, because only destructive
@@ -2941,6 +3170,11 @@ def _install_tables() -> None:
         "app.launch": Daemon._preview_app_launch,
         "app.close": Daemon._preview_app_close,
         "shell.run": Daemon._preview_shell_run,
+        # External gets a preview for the same reason audible does, and here the
+        # reason is sharper: for a send, the payload *is* the risk. "Approve
+        # telegram.send?" is a dialog with nothing to approve on, and the one
+        # thing the user must be able to check is the words.
+        "telegram.send": Daemon._preview_telegram_send,
     }
 
 

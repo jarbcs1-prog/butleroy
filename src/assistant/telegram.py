@@ -45,6 +45,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
@@ -73,6 +74,19 @@ BACKOFF_MAX_S = 300.0
 #
 # Found by the test suite hanging, which is the only symptom this has.
 MIN_POLL_GAP_S = 1.0
+
+# Telegram's own hard limit on one message. Named because two callers need it
+# and neither may guess: `say` truncates at it, and `telegram.send` refuses
+# rather than letting a cut-off sentence go out as though it were the whole one.
+TELEGRAM_TEXT_MAX = 4096
+
+# The inbox. Bounded because this daemon is meant to run for weeks, and an
+# unbounded list of the user's own messages is a slow leak of disk. Fifty is
+# about one working day of a chatty bot, which is long enough to answer "what
+# did I miss while I was away" and short enough that the cost of asking is
+# never the thing that goes wrong.
+INBOX_MAX = 50
+INBOX_TEXT_CAP = 2000
 
 
 class TelegramError(RuntimeError):
@@ -158,6 +172,10 @@ class TelegramBridge:
         self._transport = transport or self._http_post
         self.offset: int | None = None
         self._offset_lock = threading.Lock()
+        # What actually arrived, so `telegram.poll` can answer "what did Telegram
+        # ask while you were away" rather than only how many messages there were.
+        # Counters answer a question nobody has; the words are the point.
+        self._inbox: deque[dict[str, Any]] = deque(maxlen=INBOX_MAX)
         self._halt = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_error: str | None = None
@@ -191,6 +209,7 @@ class TelegramBridge:
             "forwarded": self.forwarded,
             "refused_unknown_chat": self.refused_unknown,
             "offset": self.offset,
+            "inbox": len(self._inbox),
             "last_error": self.last_error,
             **self.config.describe(),
         }
@@ -243,6 +262,32 @@ class TelegramBridge:
                 self.offset = last + 1
         return updates
 
+    # -- reading what arrived ------------------------------------------------
+
+    def inbox(self, limit: int = 20) -> list[dict[str, Any]]:
+        """The most recent allowed messages, oldest first.
+
+        A read of what this bridge already received. It does **not** poll, and it
+        does not touch `offset`, and both of those are load-bearing rather than
+        tidy.
+
+        `_poll_once` is the only thing that advances the cursor. Calling it from a
+        read would consume updates the loop has not handled yet: `_poll_once`
+        would hand them over, this method would drop them on the floor, and the
+        messages would vanish with no error anywhere - because by the time the
+        loop woke, the offset said they had been dealt with. That is data loss
+        wearing a read tool's clothes, and a T0 tool is exactly the kind that gets
+        to do it, since nothing stops it.
+
+        Two pollers is the other reason, and it is Telegram's rule rather than
+        ours: a second concurrent `getUpdates` is a 409, and if it were merely
+        slow rather than concurrent the result would be two copies of every
+        message.
+        """
+        n = max(1, int(limit))
+        rows = list(self._inbox)[-n:]
+        return rows
+
     # -- message handling --------------------------------------------------
 
     def _handle_update(self, update: dict) -> None:
@@ -252,6 +297,7 @@ class TelegramBridge:
             return  # a reaction, a poll vote, a join notice
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
+        message_id = message.get("message_id")
         if not self.config.allows(chat_id):
             # Silent. See the module docstring.
             self.refused_unknown += 1
@@ -259,8 +305,21 @@ class TelegramBridge:
         text = (message.get("text") or "").strip()
         if not text:
             return
+        # Recorded here, after the allowlist and after the empty check, and
+        # nowhere earlier. An unlisted chat's words must not be written down
+        # anywhere on this machine - the allowlist is silent, and a silent
+        # allowlist that quietly keeps a copy of what it rejected would be the
+        # opposite of silent.
+        self._inbox.append({
+            "chat_id": int(chat_id),
+            "message_id": message_id,
+            "at": time.time(),
+            "text": text[:INBOX_TEXT_CAP],
+            "chars": len(text),
+            "truncated": len(text) > INBOX_TEXT_CAP,
+        })
         self.forwarded += 1
-        self._on_text(int(chat_id), text, message.get("message_id"))
+        self._on_text(int(chat_id), text, message_id)
 
     def _on_text(self, chat_id: int, text: str, message_id: int | None) -> None:
         """Route one allowed message. Commands first, everything else is a prompt."""
@@ -386,7 +445,7 @@ class TelegramBridge:
             return False
         args: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text[:4096],  # Telegram's own hard limit
+            "text": text[:TELEGRAM_TEXT_MAX],  # Telegram's own hard limit
         }
         if reply_to is not None:
             args["reply_to_message_id"] = reply_to

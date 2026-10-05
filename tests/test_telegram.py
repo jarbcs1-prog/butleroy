@@ -515,3 +515,104 @@ def test_the_token_never_reaches_the_token_argument():
     assert "api.telegram.org" in T.API_HOST
     # the token is only ever read through _api, never interpolated into a call
     assert src.count("self.config._token") == 1
+
+
+# --- the inbox ---------------------------------------------------------------
+
+
+def test_a_message_is_written_down_so_a_read_can_answer_what_was_asked():
+    """A status of "there were N updates" does not answer "what did Telegram ask".
+
+    Before the inbox existed the only way to see an incoming message was to be
+    looking at the log while it arrived. The inbox is what makes `telegram.poll`
+    a read of *content* rather than a count.
+    """
+    b, d, h = bridge()
+    feed(b, "how much memory is free", update_id=7)
+    rows = b.inbox()
+    assert len(rows) == 1
+    assert rows[0]["text"] == "how much memory is free"
+    assert rows[0]["chat_id"] == ALLOWED
+    assert rows[0]["message_id"] == 7
+    assert rows[0]["chars"] == len("how much memory is free")
+
+
+def test_a_strangers_words_are_not_written_down_anywhere_on_this_machine():
+    """The allowlist governs what leaves the machine. It has to govern what stays.
+
+    The stranger's message reaches no daemon op and gets no reply, which was
+    already tested. It must equally leave no trace: an inbox that recorded
+    unlisted chats would be a transcript of everyone who ever typed at the bot,
+    written to disk and readable by every later tool.
+    """
+    b, d, h = bridge()
+    feed(b, "delete everything", chat_id=999, update_id=1)
+    assert b.inbox() == []
+    assert b.status()["inbox"] == 0
+
+
+def test_an_empty_message_is_not_written_down_either():
+    """A sticker, a join notice or an empty text has nothing to record, and a row
+    of blanks in a transcript is worse than no row."""
+    b, d, h = bridge()
+    feed(b, "", update_id=1)
+    assert b.inbox() == []
+
+
+def test_the_inbox_is_bounded_because_the_daemon_runs_for_days():
+    """Unbounded growth on a machine that is never shut down is a slow failure
+    that shows up as the machine being full, not as a log line."""
+    b, d, h = bridge()
+    for i in range(T.INBOX_MAX + 25):
+        feed(b, f"message {i}", update_id=i)
+    # Two different caps, on purpose: the store holds INBOX_MAX so the process
+    # stays flat, and a read shows a default window so one call does not dump a
+    # wall of text. `status()["inbox"]` is what says how many there really are.
+    assert len(b.inbox(limit=T.INBOX_MAX)) == T.INBOX_MAX, "unbounded growth"
+    assert len(b.inbox()) == 20, "the default read window"
+    assert b.status()["inbox"] == T.INBOX_MAX
+    # the cap drops the oldest, so what survives is the most recent
+    assert b.inbox(limit=1)[0]["text"] == f"message {T.INBOX_MAX + 24}"
+
+
+def test_the_inbox_returns_the_newest_n_in_the_order_they_were_sent():
+    """Oldest first within the window: the transcript reads as a conversation.
+
+    Reversed, the reader has to mentally re-sort it before answering anything,
+    and the most recent message - the one being replied to - lands in the middle.
+    """
+    b, d, h = bridge()
+    for i in range(1, 8):
+        feed(b, f"m{i}", update_id=i)
+    rows = b.inbox(limit=3)
+    assert [r["text"] for r in rows] == ["m5", "m6", "m7"]
+
+
+def test_reading_the_inbox_consumes_nothing_and_calls_nothing():
+    """The reason `inbox()` is not `_poll_once`.
+
+    `_poll_once` is the only thing that advances `offset`. A read that polled
+    would consume updates the loop had not handled yet, and those messages would
+    be gone with no error anywhere - data loss wearing a read tool's clothes. A
+    second concurrent `getUpdates` is a 409, so it would also duplicate every
+    message. Both are asserted rather than reasoned about.
+    """
+    b, d, h = bridge()
+    feed(b, "one", update_id=1)
+    h.calls.clear()
+    before = b.offset
+    rows = b.inbox()
+    assert rows and b.offset == before, "reading advanced the cursor"
+    assert h.calls == [], "reading spoke to the network"
+
+
+def test_a_long_message_is_capped_but_says_it_was():
+    """A preview that silently cuts text is a preview that lies about length, so
+    the row carries both the shape and the fact that the shape is shortened."""
+    b, d, h = bridge()
+    long_text = "x" * (T.INBOX_TEXT_CAP + 500)
+    feed(b, long_text, update_id=1)
+    row = b.inbox()[0]
+    assert row["chars"] == len(long_text), "the true length is the useful number"
+    assert row["truncated"] is True
+    assert len(row["text"]) == T.INBOX_TEXT_CAP

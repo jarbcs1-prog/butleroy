@@ -61,7 +61,7 @@ from .arbiter import Denial, Priority, VramArbiter, VramUnavailable, format_deni
 from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
-from . import fileops, sysinfo
+from . import delegate, fileops, sysinfo
 from . import audio, speech, voice_loop
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
@@ -145,6 +145,32 @@ class NotImplementedOp(DaemonError):
     built this yet" are different answers and conflating them is how an
     assistant ends up reporting unfinished work as finished.
     """
+
+
+_EXTENSION_OK = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,9}")
+"""What counts as a file extension in `_admin_is_pathish`.
+
+Declared here rather than inside the method because it is a grammar, and a
+grammar that lives in a `return` statement is a grammar nobody can read. See
+`_admin_is_pathish` for why the naive version of this test refused
+`python -c "print(3.14)"`.
+"""
+
+
+def _delegate_int(raw: Any, fallback: int) -> int:
+    """An integer argument that a caller may have sent as anything at all.
+
+    Coerces, and falls back on anything it cannot read rather than refusing: a
+    read tool that raises because `limit` arrived as a string would make the
+    read unavailable exactly when the caller most wants it, and the fallback is
+    the documented default rather than an invented number.
+    """
+    if raw is None or isinstance(raw, bool):
+        return fallback
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _jsonable(value: Any) -> Any:
@@ -250,6 +276,13 @@ class Daemon:
 
         # --- VRAM arbiter ---------------------------------------------------
         self.arbiter = VramArbiter()
+
+        # --- delegated tasks ------------------------------------------------
+        # Created here rather than lazily on first use because the bound is a
+        # property of the daemon, not of the call: `MAX_TASKS` tasks exist from
+        # the moment the process does, and a lazily-created registry would let
+        # the count mean something different after a restart than before.
+        self.tasks = delegate.Registry()
 
         # --- Obsidian: optional, must never stop the daemon -----------------
         # The vault is on E:, which is a removable-or-not volume the user may
@@ -1788,6 +1821,22 @@ class Daemon:
 
         Absolute therefore means a drive letter and a separator, or a UNC
         prefix - not merely a leading slash.
+
+        The last line is the extension test, and it was `bool(Path(part).suffix)`
+        until delegating a task to a python one-liner refused it. `PurePath`
+        takes everything after the last dot as the suffix, so
+        `"import time; time.sleep(120)"` has the suffix `".sleep(120)"`, is
+        therefore a filename, and the call was refused for reaching a path the
+        screen had invented - the same defect as `/c` above, found by the same
+        route of asking what a real command line looks like. It also made
+        `python -c "print(3.14)"` unrunnable, which is the ordinary case rather
+        than the exotic one.
+
+        So the suffix has to look like a file extension: letters and digits only,
+        short, not starting with a digit. `notes.txt` and `x.dll` pass;
+        `.sleep(120)`, `.14)` and `.tar.gz`-as-a-whole-directory-name do not.
+        Over-matching a real filename still costs the user one restatement, which
+        is why this stays a heuristic rather than becoming a real parser.
         """
         if not part:
             return False
@@ -1800,7 +1849,7 @@ class Daemon:
             return False                       # /c, /FI, \n - switches
         if "\\" in part or "/" in part:
             return True                        # ..\..\secrets.txt, build/out
-        return bool(Path(part).suffix)         # notes.txt, x.dll
+        return bool(_EXTENSION_OK.fullmatch(Path(part).suffix))
 
     def _admin_arg_paths(self, argv: list[str]) -> list[tuple[str, str]]:
         """The arguments that name a path, paired with the path.
@@ -2095,21 +2144,14 @@ class Daemon:
         most likely to be asked about. PID-protection keeps the useful cases
         working: the strays still close, and the ones that are us are reported
         as skipped rather than silently killed.
+
+        The walk itself lives in `delegate.own_chain`, because delegation needs
+        the same walk for a second and sharper reason: a task's process is a
+        *child* of this daemon, so `delegate.intervene --action stop` can name
+        the daemon. Two copies of this loop would drift, and the drifted one
+        would be the one guarding the process that stops everything (D58).
         """
-        chain: set[int] = set()
-        pid = os.getpid()
-        for _ in range(64):                  # a cycle would otherwise hang here
-            if pid <= 0 or pid in chain:
-                break
-            chain.add(pid)
-            try:
-                parent = os.getppid()
-            except OSError:
-                break
-            if parent == pid:
-                break
-            pid = parent
-        return chain
+        return delegate.own_chain()
 
     def _admin_unkillable_reason(self, args: dict) -> str | None:
         """Refuse to kill a process the machine needs, and say which one.
@@ -2919,6 +2961,663 @@ class Daemon:
     def op_arbiter_summary(self, args: dict) -> Any:
         return self.arbiter.summary()
 
+    # ---------------------------------------------------------------- delegation
+    #
+    # A worker here is a bounded command in an approved workspace, tracked for
+    # its whole life. The difference from `shell.run` is not that it can do more -
+    # it runs the same argv through the same screen - it is that it can afterwards
+    # be *asked about*. An id, a budget, a status readable after the fact and an
+    # audit row are what give `delegate.status`, `delegate.review` and
+    # `delegate.audit` something to read. `shell.run` returns a result and forgets
+    # it, which is the right shape for a command and the wrong shape for a task.
+    #
+    # Two things this section deliberately does not have. There is no `vram_gib`
+    # argument, because there is nothing behind it: D1 says models take turns and
+    # the arbiter is the only grantor, so a worker that needs a model has to take
+    # a lease like anything else, and the absence of the argument is the
+    # guarantee rather than a promise. And there is no "ask the model whether this
+    # is a good idea" - `review` and `audit` are evidence, not judgement, because
+    # putting a model in a Tier 0 read would cost VRAM on a call the user expects
+    # to be free (D50). Judging the evidence is the brain turn's job.
+
+    def _delegate_roots(self) -> list[str]:
+        """The approved workspaces, as the delegation tools see them."""
+        return list(getattr(self, "manifests", None).roots()) \
+            if hasattr(self, "manifests") else []
+
+    def _delegate_workspace(self, args: dict) -> str:
+        """Where a task runs, resolved the way `shell.run` resolves its cwd.
+
+        Shared deliberately rather than reimplemented: a second rule for "inside
+        a workspace" is how one of two copies ends up not having it, and the
+        difference between them is a hole with no symptom.
+        """
+        raw = str(args.get("workspace") or args.get("path") or "").strip()
+        roots = self._delegate_roots()
+        if not raw:
+            if len(roots) == 1:
+                return str(Path(roots[0]).resolve())
+            if not roots:
+                raise Refused(
+                    "no workspace has been approved, so there is nowhere for a "
+                    "task to run. Approve one first; nothing can be delegated "
+                    "until then"
+                )
+            raise Refused(
+                "several workspaces are approved, so a task needs to say which "
+                f"one. Approved: {', '.join(roots[:8])}"
+            )
+        target = Path(raw)
+        if not target.is_absolute() and len(roots) == 1:
+            target = Path(roots[0]) / target
+        why = self.gate.path_refusal(str(target))
+        if why:
+            raise Refused(f"delegate workspace refused - {why}")
+        return str(target.resolve())
+
+    def _delegate_argv(self, args: dict) -> list[str]:
+        why = delegate.argv_refusal(args.get("command"))
+        if why:
+            raise Refused(f"delegate command refused - {why}")
+        return [str(a) for a in args["command"]]
+
+    def _delegate_arg_paths(self, argv: list[str], cwd: str) -> list[str]:
+        r"""The path-ish arguments, each resolved against the task's cwd.
+
+        Copied in behaviour from `_exec_shell_run`'s re-check, including the
+        relative-to-cwd resolution: a relative name is meaningless to the gate
+        until it knows what it is relative *to*, and refusing `del notes.txt`
+        because the string does not start with a drive letter would refuse the
+        ordinary case to prevent the rare one.
+        """
+        out: list[str] = []
+        for _, path in self._admin_arg_paths(argv):
+            candidate = Path(cwd) / path if not Path(path).is_absolute() else path
+            out.append(str(candidate))
+        return out
+
+    def _delegate_refusals(self, args: dict) -> list[str]:
+        """Every reason this assignment would be refused, in one pass.
+
+        Returns rather than raises, because the preview builder must never
+        raise: `_preview_for` has no exception handling, so a preview that
+        throws takes the whole confirmation down with it and the user sees an
+        error instead of the thing they were asked to approve. The executor
+        asks the same questions and raises, which is what makes the approved
+        payload the executed payload (D32).
+        """
+        why: list[str] = []
+        for raw, why_one in (
+            ("task id", delegate.task_id_refusal(self._delegate_task_id(args))),
+            ("goal", delegate.goal_refusal(args.get("goal"))),
+            ("budget_s", delegate.budget_refusal(args.get("budget_s"))),
+            ("command", delegate.argv_refusal(args.get("command"))),
+        ):
+            if why_one:
+                why.append(f"{raw}: {why_one}")
+        if why:
+            return why
+        try:
+            cwd = self._delegate_workspace(args)
+        except DaemonError as exc:
+            return [f"workspace: {exc}"]
+        try:
+            argv = self._delegate_argv(args)
+        except DaemonError as exc:
+            return [str(exc)]
+        for path in self._delegate_arg_paths(argv, cwd):
+            reason = self.gate.path_refusal(path)
+            if reason:
+                why.append(f"argument {path}: {reason}")
+        return why
+
+    @staticmethod
+    def _delegate_task_id(args: dict) -> Any:
+        """The task id, however the caller spelled it.
+
+        One reader for three spellings, because the first version of this read
+        the aliases in six places by hand: `_delegate_task` accepted `task`,
+        `task_id` and `id`, while `_delegate_refusals` accepted only `task`. A
+        caller who said `task_id` therefore got a task lookup that worked and an
+        assignment that was refused for having no id - the tool reporting two
+        different answers about the same field of the same call. Six copies of
+        a rule is five ways for the rule to be wrong (D58).
+        """
+        return args.get("task") or args.get("task_id") or args.get("id")
+
+    def _delegate_task(self, args: dict) -> delegate.Task:
+        """Look up a task by id, or refuse naming what is on offer.
+
+        Used by every read that takes a `task`. An unknown id is a refusal that
+        lists the ids in hand, because "no such task" on its own cannot be acted
+        on and the caller has no other way to learn the names.
+        """
+        raw = self._delegate_task_id(args)
+        why = delegate.task_id_refusal(raw)
+        if why:
+            raise Refused(f"delegate task refused - {why}")
+        task = self.tasks.get(str(raw))
+        if task is None:
+            held = ", ".join(self.tasks.ids()) or "none"
+            raise Refused(
+                f"no task called {str(raw)!r}. Tasks in hand: {held}"
+            )
+        return task
+
+    # -- the readings -----------------------------------------------------------
+
+    def _exec_delegate_plan(self, args: dict) -> Any:
+        """What is measurably true about the workspace a task would run in.
+
+        Named `plan` because that is what a caller asks for, and it is a
+        *briefing*, not a plan: it reports measurements and the constraints that
+        will apply. It produces no sequence of steps, because the one thing that
+        makes a generated plan dangerous is that it reads like an authority -
+        and a wall of "unknown" beside facts the assistant could have read is an
+        invitation to fill the gap from training data, which is how a plan comes
+        to name a directory the user never approved.
+        """
+        root = self._delegate_workspace(args)
+        brief = delegate.workspace_briefing(root)
+        return {
+            "action": "briefing: what is measurably true about this workspace",
+            "kind": "briefing",
+            "is_a_plan": False,
+            "workspace": root,
+            "what_is_there": brief,
+            "constraints": delegate.constraints_for(
+                root,
+                self._delegate_roots(),
+                deny_paths=self.gate.deny_paths,
+                self_paths=self.gate.self_paths,
+            ),
+            "note": (
+                "this is a set of measurements, not a plan. Nothing here has "
+                "been decided for you; a plan that claims otherwise was not "
+                "produced by this tool"
+            ),
+        }
+
+    def _exec_delegate_brainstorm(self, args: dict) -> Any:
+        """The constraints, without the measurements.
+
+        Separate from `plan` because the two answer different questions and the
+        model reaches for the wrong one. `plan` answers "what is here"; this
+        answers "what will be refused", which is the part a generated plan
+        usually gets wrong - it proposes work in a directory that was never
+        approved, or an edit to the assistant's own source, and both are refused
+        at the gate after the thinking has been done.
+
+        The constraints are read from the same gate the refusal will come from,
+        rather than copied into a prompt: a rule quoted in a prompt and a rule
+        enforced in code are two rules, and they drift.
+        """
+        root = self._delegate_workspace(args)
+        topic = str(args.get("topic") or args.get("question") or "").strip()
+        return {
+            "action": "briefing: the constraints any plan for this workspace "
+                      "must already satisfy",
+            "kind": "briefing",
+            "is_a_plan": False,
+            "workspace": root,
+            "topic": topic[:500],
+            "constraints": delegate.constraints_for(
+                root,
+                self._delegate_roots(),
+                deny_paths=self.gate.deny_paths,
+                self_paths=self.gate.self_paths,
+            ),
+            "note": (
+                "these are read from the gate that will apply, so they are not "
+                "guidance to weigh - they are what a call will be checked "
+                "against. A plan that violates one is not wrong because the "
+                "assistant disagreed with it"
+            ),
+        }
+
+    def _exec_delegate_status(self, args: dict) -> Any:
+        raw = self._delegate_task_id(args)
+        if raw:
+            task = self._delegate_task(args)
+            limit = _delegate_int(args.get("output_chars"), 4000)
+            return {"task": task.result(output_chars=limit)}
+        # `Registry.rows` already returns the public dict form; calling `.row()`
+        # on it again was the first version's bug, and it raised
+        # AttributeError on every call - which is the same shape as the D57
+        # wake-word failure, where a tool that cannot do its one job reports
+        # itself broken rather than crashing loudly.
+        rows = list(self.tasks.rows())
+        return {
+            "tasks": rows,
+            "count": len(rows),
+            "capacity": self.tasks.capacity(),
+            "running": sum(1 for r in rows if r["status"] == "running"),
+            "note": (
+                "output is not included here; ask for one task by id to read "
+                "what it printed. A listing carrying 4000 characters of stdout "
+                "per task is a wall, and a wall is not a status"
+            ),
+        }
+
+    def _exec_delegate_review(self, args: dict) -> Any:
+        """The evidence a judgement would be made from, and no judgement.
+
+        Deliberately free. A review that called the model would be the most
+        expensive read in the system - VRAM on a call the user expects to cost
+        nothing - and its output would be an opinion about a transcript with no
+        more grounding than the exit code the caller could already read. What it
+        does add is the *comparison*: the goal as it was written, next to what
+        the task actually did, so the reader can see the gap themselves.
+        """
+        task = self._delegate_task(args)
+        out = {
+            "action": "evidence for reviewing a task, not a verdict",
+            "kind": "evidence",
+            "task": task.row(),
+            "goal_as_written": task.goal,
+            "command_line": subprocess.list2cmdline(task.argv),
+            "workspace": task.root,
+            "still_approved": self.gate.path_refusal(task.root) is None,
+            "note": (
+                "no model was consulted and none was needed to produce this. "
+                "Judging whether the output does what the goal asked is the "
+                "caller's job, or the brain's on a turn where a model is "
+                "already loaded"
+            ),
+        }
+        if task.status == "running":
+            out["incomplete"] = True
+            out["incomplete_note"] = (
+                "this task has not finished; anything read now is partial"
+            )
+        else:
+            out["exit_code"] = task.exit_code
+            out["stderr"] = task.stderr[-2000:]
+            out["stderr_chars"] = len(task.stderr)
+            out["stdout_chars"] = len(task.stdout)
+        return out
+
+    def _exec_delegate_audit(self, args: dict) -> Any:
+        """Check the record against the machine, mechanically.
+
+        Three questions, none of which needs judgement: is every finished task
+        in the audit log, did each run in a workspace that is still approved,
+        and does each task's claimed exit code match its status. A gap in any
+        of those is a real finding about this daemon, and it is reported as
+        such rather than as a warning - which is the difference between a
+        broken audit trail and an honest report about one.
+        """
+        # `Registry.rows` already returns the public dict form; calling `.row()`
+        # on it again was the first version's bug, and it raised
+        # AttributeError on every call - which is the same shape as the D57
+        # wake-word failure, where a tool that cannot do its one job reports
+        # itself broken rather than crashing loudly.
+        rows = list(self.tasks.rows())
+        if args.get("task") or args.get("task_id") or args.get("id"):
+            rows = [self._delegate_task(args).row()]
+        # `AuditLog.read()` yields `AuditRecord` objects, not dicts. The first
+        # version filtered on `isinstance(r, dict)` and so read an audit log as
+        # though it were empty - which made every finished task report "no
+        # audit row" on a daemon that had written one for each of them. A check
+        # that reads nothing cannot report anything true, and it reported the
+        # opposite of the truth with the confidence of a measurement.
+        recorded = {
+            str(getattr(r, "args", {}).get("task"))
+            for r in self.audit.read()
+            if getattr(r, "tool", "").startswith("delegate.")
+            and getattr(r, "args", {}).get("task")
+        }
+        checks: list[dict] = []
+        for row in rows:
+            problems: list[str] = []
+            root = str(row.get("workspace") or "")
+            if root and self.gate.path_refusal(root):
+                problems.append(
+                    "the workspace it ran in is no longer approved"
+                )
+            if row.get("status") != "running" and row.get("id") not in recorded:
+                problems.append("no audit row for a task that has finished")
+            exit_code = row.get("exit_code")
+            if row.get("status") == "done" and exit_code not in (0, None):
+                problems.append(
+                    f"status says done but the exit code was {exit_code}"
+                )
+            if row.get("status") == "failed" and exit_code == 0:
+                problems.append(
+                    "status says failed but the exit code was zero"
+                )
+            checks.append({
+                "task": row.get("id"),
+                "ok": not problems,
+                "problems": problems,
+            })
+        return {
+            "checks": checks,
+            "checked": len(checks),
+            # Counting the tasks with an *empty* problem list and calling the
+            # total "problems" was the first version, and it reported a clean
+            # audit as one problem per healthy task - the check list said
+            # `ok: true, problems: []` in the same breath as `problems: 1`, so
+            # the tool contradicted itself inside one response. It survived
+            # every test that only asked whether the number was true, because
+            # both readings of a count look like a count: the D55 shape one
+            # level down. Summing the lengths answers the question that was
+            # actually asked.
+            "problems": sum(len(c["problems"]) for c in checks),
+            "tasks_with_problems": sum(1 for c in checks if c["problems"]),
+            "note": (
+                "this compares the record with the machine; it does not judge "
+                "whether the work was good. Every task this daemon has ever "
+                "finished is expected to have an audit row - if one is missing, "
+                "that is this daemon's bug and not a task's"
+            ),
+        }
+
+    # -- the acting -------------------------------------------------------------
+
+    def _preview_delegate_assign(self, args: dict) -> Any:
+        """Never raises, and says plainly when the call would be refused.
+
+        The reason this exists at all is that a confirmation dialog is the last
+        place a bad call can still be caught. Showing the resolved workspace, the
+        command as a real command line, and the budget gives the user three
+        facts to check; the refusal list gives them the reason the call would
+        not work, which is otherwise only discoverable by trying it.
+        """
+        refusals = self._delegate_refusals(args)
+        try:
+            cwd = self._delegate_workspace(args)
+        except DaemonError as exc:
+            cwd = f"unresolved - {exc}"
+        try:
+            argv = self._delegate_argv(args)
+        except DaemonError:
+            argv = [str(a) for a in (args.get("command") or [])]
+        budget = args.get("budget_s")
+        out = {
+            "action": "assign a tracked task and return immediately",
+            "task": args.get("task"),
+            "goal": str(args.get("goal") or "")[:500],
+            "workspace": cwd,
+            "command": argv,
+            "command_line": subprocess.list2cmdline(argv) if argv else "",
+            "budget_s": float(budget) if isinstance(budget, (int, float)) \
+                and not isinstance(budget, bool) else delegate.DEFAULT_BUDGET_S,
+            "blocks_nothing": True,
+            "note": (
+                "the call returns as soon as the task is registered; the task "
+                "runs on its own and is asked about later with "
+                "delegate.status. A task killed on its budget reports as failed "
+                "with the budget named - it is not a task that broke"
+            ),
+        }
+        if refusals:
+            out["would_be_refused"] = refusals
+        return out
+
+    def _exec_delegate_assign(self, args: dict) -> Any:
+        refusals = self._delegate_refusals(args)
+        if refusals:
+            raise Refused(
+                "delegate.assign refused - " + "; ".join(refusals)
+            )
+        root = self._delegate_workspace(args)
+        argv = self._delegate_argv(args)
+        budget = args.get("budget_s")
+        budget_s = delegate.DEFAULT_BUDGET_S if budget is None else float(budget)
+        task = delegate.Task(
+            # The seventh copy of this rule, and the one that was still live:
+            # `_delegate_refusals` had been taught the aliases, so `task_id`
+            # cleared the gate and then raised KeyError one line later. The
+            # gate passing is exactly what makes it worth checking what the
+            # executor does with the same field - a refusal list that agrees
+            # with itself is not evidence it agrees with the code it guards.
+            id=self._delegate_task_id(args),
+            goal=str(args["goal"]).strip(),
+            root=root,
+            argv=argv,
+            budget_s=budget_s,
+            created_at=time.time(),
+        )
+        evicted = self.tasks.start(task)
+        self._audit(
+            actor=str(args.get("actor", "user")),
+            channel=self._channel(args),
+            tool="delegate.assign",
+            tier=str(Tier.CONSEQUENTIAL),
+            decision="allow",
+            reason=f"task {task.id} assigned",
+            args={"task": task.id, "workspace": root, "command": argv,
+                  "budget_s": budget_s},
+        )
+        return {
+            "task": task.row(),
+            "running": True,
+            "evicted": evicted,
+            "note": (
+                "this task is now running and nothing is waiting on this call. "
+                "Ask delegate.status with this id for the result"
+            ),
+        }
+
+    def _preview_delegate_intervene(self, args: dict) -> Any:
+        """Never raises. A task that is already gone is reported, not thrown.
+
+        The refusal that matters here is the one about the assistant's own
+        process: a delegated task is a *child* of this daemon, so `intervene`
+        can name the daemon itself, and killing it would look exactly like a
+        successful intervention until the daemon died. It is refused by PID
+        rather than by name, for the same reason `app.close` is - the stray
+        interpreters are the ones most often worth stopping, and a name
+        blacklist would make them unreachable.
+        """
+        raw = self._delegate_task_id(args)
+        action = str(args.get("action") or "stop").strip().lower()
+        why = delegate.interact_refusal(action)
+        task = self.tasks.get(str(raw)) if raw and not why else None
+        out: dict[str, Any] = {
+            "action": "stop or restart a running task",
+            "task": raw,
+            "requested_action": action,
+            "note": (
+                "a task that has already finished cannot be intervened with; "
+                "use delegate.assign to run it again. Restarting re-runs the "
+                "same command with the same budget - it does not resume"
+            ),
+        }
+        if why:
+            out["would_be_refused"] = [why]
+            return out
+        if task is None:
+            held = ", ".join(self.tasks.ids()) or "none"
+            out["would_be_refused"] = [
+                f"no task called {str(raw)!r}. Tasks in hand: {held}"
+            ]
+            return out
+        out.update({
+            "status": task.status,
+            "pid": task.pid,
+            "workspace": task.root,
+            "goal": task.goal,
+            "command_line": subprocess.list2cmdline(task.argv),
+            "budget_s": task.budget_s,
+        })
+        if task.pid in delegate.own_chain():
+            out["would_be_refused"] = [
+                "that task is this assistant, or something it was started "
+                "from - not stopping it"
+            ]
+        if task.status != "running":
+            out["would_be_refused"] = [
+                f"the task has already finished (status {task.status!r}); "
+                "there is nothing left to intervene with"
+            ]
+        return out
+
+    def _exec_delegate_intervene(self, args: dict) -> Any:
+        raw = self._delegate_task_id(args)
+        action = str(args.get("action") or "stop").strip().lower()
+        why = delegate.interact_refusal(action)
+        if why:
+            raise Refused(f"delegate.intervene refused - {why}")
+        task = self._delegate_task(args)
+        if action == "stop":
+            stopped, reason = self.tasks.stop(task.id)
+            if not stopped:
+                raise Refused(f"delegate.intervene refused - {reason}")
+            self._audit(
+                actor=str(args.get("actor", "user")),
+                channel=self._channel(args),
+                tool="delegate.intervene",
+                tier=str(Tier.CONSEQUENTIAL),
+                decision="allow",
+                reason=f"task {task.id} stop requested",
+                args={"task": task.id, "action": "stop", "pid": task.pid},
+            )
+            return {
+                "task": task.row(),
+                "asked_to_stop": True,
+                "note": (
+                    "the process has been asked to stop, not confirmed dead. "
+                    "delegate.status will report the real outcome once the "
+                    "daemon has reaped it"
+                ),
+            }
+        # restart: stop if alive, then reassign the identical command. The task
+        # keeps its id so that `status` reads the same name throughout - a new
+        # id would strand every reference the caller already holds.
+        was_running = task.status == "running"
+        if was_running:
+            stopped, reason = self.tasks.stop(task.id)
+            if not stopped:
+                raise Refused(f"delegate.intervene refused - {reason}")
+            self.tasks.wait(task.id, timeout=5.0)
+        again = delegate.Task(
+            id=task.id,
+            goal=task.goal,
+            root=task.root,
+            argv=list(task.argv),
+            budget_s=task.budget_s,
+            created_at=time.time(),
+        )
+        evicted = self.tasks.start(again)
+        self._audit(
+            actor=str(args.get("actor", "user")),
+            channel=self._channel(args),
+            tool="delegate.intervene",
+            tier=str(Tier.CONSEQUENTIAL),
+            decision="allow",
+            reason=f"task {task.id} restarted",
+            args={"task": task.id, "action": "restart",
+                  "was_running": was_running},
+        )
+        return {
+            "task": again.row(),
+            "restarted": True,
+            "stopped_first": was_running,
+            "evicted": evicted,
+            "note": (
+                "the same command, from the beginning, with the same budget. "
+                "This does not resume the old run and it does not give it more "
+                "time; a task that ran out of budget will do so again"
+            ),
+        }
+
+    def _preview_delegate_accept(self, args: dict) -> Any:
+        """Never raises. An unrecognised verdict is listed, not guessed.
+
+        `accept` is the one delegation tool that records an opinion, so the
+        preview is mostly about making sure the opinion has an owner and a
+        subject: who is accepting, which task, and on what basis. A verdict with
+        no stated reason is not reviewable later, and this is the one record in
+        the system that a person will be asked to trust without being able to
+        re-derive it.
+        """
+        raw = self._delegate_task_id(args)
+        verdict = str(args.get("verdict") or args.get("decision")
+                      or "accept").strip().lower()
+        why = delegate.task_id_refusal(raw)
+        out: dict[str, Any] = {
+            "action": "record your judgement of a finished task",
+            "task": raw,
+            "verdict": verdict,
+            "reason": str(args.get("reason") or "")[:500],
+            "note": (
+                "this records what you concluded, not what the task did. It "
+                "cannot make a failed task pass; the exit code stays in "
+                "delegate.review whatever is recorded here"
+            ),
+        }
+        if why:
+            out["would_be_refused"] = [why]
+            return out
+        if verdict not in ("accept", "reject"):
+            out["would_be_refused"] = [
+                f"{verdict!r} is not a verdict this tool understands; use "
+                "'accept' or 'reject'"
+            ]
+            return out
+        task = self.tasks.get(str(raw))
+        if task is None:
+            held = ", ".join(self.tasks.ids()) or "none"
+            out["would_be_refused"] = [
+                f"no task called {str(raw)!r}. Tasks in hand: {held}"
+            ]
+            return out
+        out["status"] = task.status
+        if task.status == "running":
+            out["would_be_refused"] = [
+                "the task is still running; there is nothing to accept yet"
+            ]
+        return out
+
+    def _exec_delegate_accept(self, args: dict) -> Any:
+        raw = self._delegate_task_id(args)
+        verdict = str(args.get("verdict") or args.get("decision")
+                      or "accept").strip().lower()
+        why = delegate.task_id_refusal(raw)
+        if why:
+            raise Refused(f"delegate.accept refused - {why}")
+        if verdict not in ("accept", "reject"):
+            raise Refused(
+                f"{verdict!r} is not a verdict this tool understands; use "
+                "'accept' or 'reject'"
+            )
+        task = self._delegate_task(args)
+        if task.status == "running":
+            raise Refused(
+                "delegate.accept refused - the task is still running; there is "
+                "nothing to accept yet"
+            )
+        reason = str(args.get("reason") or "").strip()
+        if not reason:
+            raise Refused(
+                "delegate.accept refused - a verdict with no stated reason "
+                "cannot be reviewed later, and this is the one record in the "
+                "system a person is asked to trust without re-deriving it"
+            )
+        task.accepted = verdict
+        task.accept_reason = reason
+        self._audit(
+            actor=str(args.get("actor", "user")),
+            channel=self._channel(args),
+            tool="delegate.accept",
+            tier=str(Tier.CONSEQUENTIAL),
+            decision="allow",
+            reason=f"task {task.id} {verdict}: {reason[:200]}",
+            args={"task": task.id, "verdict": verdict, "reason": reason[:500]},
+        )
+        return {
+            "task": task.row(),
+            "verdict": verdict,
+            "reason": reason[:500],
+            "note": (
+                "recorded against the task and in the audit log. This does not "
+                "change the exit code or the status; it records that you looked "
+                "and decided"
+            ),
+        }
+
     # -------------------------------------------------------------------- audit
 
     def op_audit_verify(self, args: dict) -> Any:
@@ -3698,6 +4397,14 @@ def _install_tables() -> None:
         "telegram.poll": Daemon._exec_telegram_poll,
         "telegram.send_draft": Daemon._exec_telegram_send_draft,
         "telegram.send": Daemon._exec_telegram_send,
+        "delegate.plan": Daemon._exec_delegate_plan,
+        "delegate.brainstorm": Daemon._exec_delegate_brainstorm,
+        "delegate.assign": Daemon._exec_delegate_assign,
+        "delegate.status": Daemon._exec_delegate_status,
+        "delegate.intervene": Daemon._exec_delegate_intervene,
+        "delegate.review": Daemon._exec_delegate_review,
+        "delegate.accept": Daemon._exec_delegate_accept,
+        "delegate.audit": Daemon._exec_delegate_audit,
     }
     Daemon._PREVIEWS = {
         # Only destructive tools need a real preview, because only destructive
@@ -3732,6 +4439,20 @@ def _install_tables() -> None:
         # telegram.send?" is a dialog with nothing to approve on, and the one
         # thing the user must be able to check is the words.
         "telegram.send": Daemon._preview_telegram_send,
+        # The delegation Tier 2 tools, for the ambiguity reason above and one
+        # more that only delegation has. `delegate.assign` starts something that
+        # keeps running after the call returns, so the dialog has to say what
+        # will still be running in a minute - command, workspace, budget - and a
+        # `pause` action is not offered because Windows cannot honour one. The
+        # refusal list is the other half: an assign that would be refused shows
+        # why, so the reason is learned from the dialog rather than by trying.
+        "delegate.assign": Daemon._preview_delegate_assign,
+        "delegate.intervene": Daemon._preview_delegate_intervene,
+        # `delegate.accept` records an opinion rather than acting on the machine,
+        # but it is still T2 and still deserves a payload to be checked against:
+        # a verdict with no named subject and no stated reason is the one record
+        # in this system that cannot be re-derived later.
+        "delegate.accept": Daemon._preview_delegate_accept,
     }
 
 

@@ -174,20 +174,77 @@ def _norm(path: str) -> str:
     return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
 
 
+def _spellings(path: str) -> set[str]:
+    r"""Every spelling of a path that means the same place on this machine.
+
+    Found by running the thing, and it is the second time a path comparison has
+    been wrong in a way no test could see by reading the code. The manifest
+    stores an approved root in whatever spelling the caller typed, and on this
+    machine that is the 8.3 short form - `C:\Users\PCPRIN~1\AppData\...` - while
+    `Path.resolve()` hands back the long form, `C:\Users\PC Principal\...`.
+    `os.path.normcase` does not touch either, so the two strings stayed
+    different after normalisation and the gate reported an approved workspace
+    as being outside every approved workspace. The user sees a refusal that is
+    simply false, naming roots they approved a moment earlier.
+
+    `GetLongPathNameW` is what turns one into the other, and it needs the path
+    to exist - so it is a second spelling to *try*, never a replacement for the
+    plain one. A path that does not exist still compares exactly as it always
+    did, which is what keeps `_norm`'s promise of not requiring existence.
+    """
+    plain = _norm(path)
+    out = {plain}
+    try:
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetLongPathNameW(  # type: ignore[attr-defined]
+            plain, buf, len(buf))
+        if n and buf.value:
+            wide = os.path.normcase(os.path.abspath(buf.value))
+            if wide != plain:
+                out.add(wide)
+    except (AttributeError, OSError):
+        pass
+    return out
+
+
+def contains(candidate: str | os.PathLike, root: str | os.PathLike) -> bool:
+    """Is `candidate` inside `root`? Public, so there is one containment rule.
+
+    Every part of the system that has to answer this - the gate, the delegation
+    briefing, the tool previews - asks here. The delegation briefing had its own
+    copy, and the copy did not know about the 8.3 short spelling: it reported an
+    approved workspace as *not approved* while naming that same workspace as the
+    approved root, one spelling apart. A briefing that misreports the rule it
+    exists to state is worse than no briefing, and D58 says why it happened.
+    """
+    return _under(os.fspath(candidate), os.fspath(root))
+
+
 def _under(candidate: str, root: str) -> bool:
     r"""True if candidate is root or lives inside it.
 
     Uses `commonpath` rather than `startswith` because `C:\localaized-2` must
     not count as being inside `C:\localaized`.
 
+    Tries every spelling of each side rather than one, for the 8.3 reason in
+    `_spellings`: one side can arrive short and the other long, and a
+    containment test that fails on that is not conservative - it is wrong, in
+    the direction that refuses work the user already approved.
+
     Raw because of that backslash: a plain docstring turns `\l` into an invalid
     escape sequence and Python warns about it on every import.
     """
-    try:
-        return os.path.commonpath([candidate, root]) == root
-    except ValueError:
-        # Different drives - cannot be nested, so not under.
-        return False
+    for cand in _spellings(candidate):
+        for rt in _spellings(root):
+            try:
+                if os.path.commonpath([cand, rt]) == rt:
+                    return True
+            except ValueError:
+                # Different drives - cannot be nested, so not under.
+                continue
+    return False
 
 
 @dataclass

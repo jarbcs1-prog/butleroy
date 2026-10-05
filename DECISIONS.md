@@ -2092,3 +2092,156 @@ recorded. There is **no `vram_gib` argument**, because there is nothing behind
 it: the arbiter grants from real occupancy, so an argument would be a promise the
 tool cannot keep (D1). And **no tool here judges** - `teach.progress` reports
 counts and names the untested topics, and what to do about them is the user's.
+
+---
+
+## D63 - The argument's name was the defect, and the recycle bin had to be asked about
+
+Two tools, both nearly impossible for reasons the specification does not mention.
+
+### The name of an argument is part of the rule
+
+`file.write_notes` was specified with a `subdir` parameter. `policy._check_paths`
+screens every string argument whose key contains `"dir"`. `subdir` contains `dir`.
+So the documented call `{"subdir": "journal"}` was refused - measured, not assumed:
+
+```
+DENY  path 'journal' is outside every approved workspace root.
+      Approved: C:\Users\PCPRIN~1\AppData\Local\Temp\tmpcft62pge\ws
+      Use one of those, or ask the user to approve this path with a manifest (D10)
+ALLOW the same call with "section" instead
+```
+
+The tool could not be used as specified, at all, in any call. Renamed to
+`section`, mapping to the bridge's own `subdir` inside the executor.
+
+The alternative was carving `subdir` out of the path screen. Rejected, and the
+reason generalises D49 in the direction it does not usually get quoted: *"a rule
+the model cannot express is not a rule"* cuts both ways, and so does this - **a
+rule with a hole in it is not a rule**. The screen exists because argument names
+are attacker-controlled; a hole in it is a hole someone will find.
+
+So the general finding: **an argument's name is not a label, it is part of the
+rule's text.** `path`, `dir`, `target` and friends are not conventions here, they
+are the screen's match set, and a name that collides with it collides with the
+refusal. Nothing in the code said so; only running the gate did.
+
+### The recycle bin is ours to refuse
+
+`policy.DENY_PATHS` ends with `C:\$Recycle.Bin`. `file.empty_recycle_bin` is a
+T3 destructive tool whose entire target is that directory. Our own policy forbids
+us from reading it, which is not an obstacle to route around but a decision to
+honour.
+
+The tempting implementation is `Get-ChildItem -LiteralPath 'C:\$Recycle.Bin'`.
+Measured: it works, and reports two subdirectories. It is the wrong thing to do,
+for a reason already written down in `tests/test_delegate_ops.py` - *a path buried
+inside a `-c` source string is opened by python rather than by us*. A shell command
+naming the denied path would **slip past** the check that refuses it rather than
+pass it. The shell is not more permitted than we are; it is less inspected.
+
+So the tool is built from what Windows will tell us:
+
+* `Clear-RecycleBin -WhatIf` - Windows names its own target, for free, with no
+  action taken. `exit 0`, stdout exactly: `What if: Performing the operation
+  "Clear-RecycleBin" on target "All of the contents of the Recycle Bin".`
+  A preview built from Windows' own sentence is stronger evidence than any count
+  we could compute ourselves.
+* The shell namespace enumerates: `(New-Object -ComObject Shell.Application)
+  .NameSpace(0xA)` - the documented COM way to read the bin without touching its
+  directory.
+
+Two things are deliberately **not** done:
+
+* **No byte total.** The COM `Size` column could not be verified on this machine,
+  because the bin was empty. An unverifiable number is worse than no number, so
+  the preview reports a count and names, and says in as many words that no size is
+  given.
+* **`names_target` is judged from stdout, not from the exit code.** Exit 0 with no
+  `What if:` line means Windows declined to answer. A preview that read that as
+  confirmation would be claiming something it does not have (D53). When
+  `names_target` is false the preview sets `windows_said_nothing_useful`, and the
+  executor **raises without calling `recycle_clear` at all** - a test asserts on
+  the call log, not on a word.
+
+The preview also carries the one clarification no other T3 needs: emptying the bin
+**does not touch this system's quarantine**, which is where `file.delete` puts
+things and where `file.restore` gets them from. Without it, a user could reasonably
+believe emptying the bin had made their quarantine unrecoverable.
+
+### The journal's first row with nothing in it
+
+D60 gave every T3 an undo journal. `file.empty_recycle_bin` is the first action
+with **no inverse**, and it still gets a row - with `undo: null` and a reason.
+*"A journal that only records what it can undo cannot tell you which of its entries
+were the ones you cannot take back."* Two rows per attempt, as before: one opened
+before acting with `ok: null`, one closed after with the real outcome, and a failed
+attempt is closed `ok: false` like any other.
+
+`_admin_journal` is now used by a tool outside the administration section, which it
+is named for. **It was not renamed.** Renaming is the tidier change and would have
+touched D60's committed tests for a naming preference; the smell is recorded here
+instead, and the method's docstring now says what it is (every T3) rather than what
+it was born as.
+
+### `overwrote` is measured, not reported
+
+`file.write_notes` writes into the Obsidian vault. `write_note` never overwrites by
+default - a repeated title produces a **timestamped sibling**
+(`a-note-2026-20261006-052847.md`). Reporting `overwrote: false` from the default
+would have been a claim the bridge could contradict (D53). So it is measured from
+the filename: `overwrote = target.name == f"{slugify(title)}.md"`. True means this
+write is the plain-named file; false means a sibling was written and the older note
+is untouched, and the result carries `previous` plus *"Nothing you wrote was
+replaced. If you meant to update the older note, say so and it will be done
+explicitly."*
+
+There is no `path` argument at all - the vault picks the directory, the same
+argument as `telegram.send_draft` and the teaching ledger. A T1 write tool that
+takes a path from the caller is an arbitrary-write primitive wearing a name.
+
+### Three defects, one shape
+
+1. **`how_we_counted` said half of what it was for, and one thing twice.** The
+   field named *how* we counted but omitted the statement its own design called
+   for - *why not the obvious way* - so the dialog invited exactly the question it
+   should have answered. And it repeated the size caveat that `listing["note"]`
+   had already carried. One field explaining the same thing twice reads as two
+   separate faults to whoever is approving. That is the same shape D62 caught in
+   the teaching refusals, in a different file.
+2. **`sysinfo.py` was missing `import json`.** It would have been a `NameError` in
+   `_recycle_payload`. Caught by reading the imports before running the code - the
+   same shape as D60's *"daemon.py used `re` without importing it"*. Twice is a
+   pattern: **read the imports before you write the function that needs them.**
+3. **Three tests asserted a message no code produced.** `"the bin is as it was"`
+   was never written. The real message is `"emptying the recycle bin failed with
+   exit 5: "`, which is the house pattern every other T3 uses (`sc`, `package
+   uninstall`, `power.shutdown`). The test now asserts the two **facts** - the exit
+   code reaches the user, and the journal row is closed `ok: false` - and records
+   why: `Clear-RecycleBin` failing part-way could have removed some items, so a
+   reassurance about the bin's state would have been a guess, and **whether a
+   partial clear is possible was not measured, so the tool does not claim either
+   way.** The code was left alone deliberately: a special message here would be a
+   second convention beside the house one.
+
+### The stand-in that died three times
+
+`tests/test_confirm.py` and `tests/test_daemon.py` each assert that a **destructive
+T3 with no executor** reports `executable: false` and is never audited as having
+run. Each named a specific tool as its example. The examples were `package.install`,
+then `file.empty_recycle_bin` - and each became false **the day that tool gained an
+executor**. The assertion died twice for reasons entirely unrelated to what it
+tests, and this slice was about to kill it a third time.
+
+Both now **derive** the example from the property itself:
+`[s.name for s in ALL_TOOLS if s.destructive and s.tier.name == "IRREVERSIBLE"
+and s.name not in Daemon._EXECUTORS]`, with an assertion that the list is non-empty
+and a message saying what to do if it is empty - build a tool that cannot run, or
+delete the section and say in the commit message that the property is now vacuous.
+
+The general finding, and it is about tests rather than code: **a test that names an
+example of a property is asserting about the example.** The property is what is
+under test, so the test should ask for whatever currently has it. The count of
+times a stand-in had to be moved is the evidence - and the first assertion in this
+project that failed three times for one reason was found by running the suite, not
+by reading the test.

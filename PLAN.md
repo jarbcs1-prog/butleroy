@@ -475,10 +475,11 @@ registered tools: 61        executors on the Daemon: 35        unimplemented: 26
 
 **Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60). The T3 set took the shape the D58 section above argues for — an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49): persistence registry keys, services whose stopping cannot be undone, and any shutdown delay under 30 seconds.
 
-**Next, in order:**
+**Next, in order** — following the capability order the user set, not my own
+preference for the largest gap:
 
-1. **`teach.*`** — item 5, six T0 tools, entirely unbuilt. The largest untouched capability item, and the one the user's ordering names last but not least.
-2. **`delegate.*`** — item 4's unwired half. The brain writes code; what it cannot yet do is hand a unit of work to a worker subprocess and review the result.
+1. **`delegate.*`** — item 4 (coding). The brain writes code; what it cannot yet do is hand a unit of work to a worker subprocess and review the result. Eight tools: `plan`, `brainstorm`, `status`, `review`, `audit` are T0 reads over a worker's own state; `assign`, `intervene`, `accept` are T2, because handing a subprocess the ability to act is a consequence, not a read.
+2. **`teach.*`** — item 5 (pedagogy), six T0 tools, entirely unbuilt.
 3. **`file.write_notes`** and **`file.empty_recycle_bin`** — two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
 4. **`email.*`** — six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0.
 5. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.

@@ -1654,6 +1654,527 @@ class Daemon:
             restored += 1
         return {"restored": restored, "failed": failed, "batch": batch}
 
+    # ------------------------------------------------------------ administration
+    #
+    # Three Tier 2 tools: launch an application, close a process, run one
+    # command. Each gets a real preview, not because Tier 2 is destructive -
+    # `file.read` is T0 and touches far more - but because of what a preview is
+    # for here. "Launch an application" and "close a process" are the two
+    # vaguest phrases in the registry: `notepad` is a name the shell may
+    # resolve to five different binaries, and `chrome.exe` is a request that
+    # means "all eight of them". A confirmation dialog that says only that
+    # passes D32's letter - the args hash - and fails its purpose, because the
+    # user is being asked to approve a word rather than an action.
+    #
+    # So each preview resolves the payload *first* and shows the resolution.
+    # That is also what binds the confirmation to something real: approving
+    # `app.launch` binds to the resolved path, so a different `app.launch`
+    # resolving elsewhere needs a second confirmation rather than inheriting
+    # the first.
+
+    _ADMIN_MAX_ARGS = 4096          # a command line a human cannot read is not a preview
+    _ADMIN_OUTPUT_CAP = 4000
+    # Directory-walk budget for resolving an application name. A search that can
+    # take an unbounded time is a search a confirmation dialog waits on.
+    _APP_DIR_BUDGET = 3000
+    # Directories under Program Files that hold libraries and SDKs rather than
+    # applications. Skipping them is the difference between a resolution that
+    # answers in one iteration and one that never answers: `Common Files` and
+    # `Reference Assemblies` alone are thousands of directories, and nothing a
+    # person says out loud is installed in them.
+    _APP_PRUNE = frozenset({
+        "common files", "windowsapps", "reference assemblies", "dotnet",
+        "microsoft.net", "windows kits", "windows powershell", "nodejs",
+        "package cache", "microsoft sdks", "microsoft shared", "gadget meta",
+        "windows photo viewer", "windows portable devices", "diagnostics",
+        "hostednetwork", "internet explorer", "windows sidebar", "xbox games",
+        "microsoft games", "windows nt", "winsxs", "servicing",
+    })
+
+    # Windows' own protected processes. Killing any of these ends the session,
+    # the desktop, or the machine - and the failure mode is a blue screen or an
+    # instant logout, neither of which a confirmation dialog describes well.
+    _ADMIN_UNKILLABLE = frozenset({
+        "system", "system idle process", "registry", "smss.exe", "csrss.exe",
+        "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe",
+        "svchost.exe", "lsm.exe", "audiodg.exe", "dwm.exe", "spoolsv.exe",
+        "fontdrvhost.exe", "sihost.exe", "ctfmon.exe", "wmiprvse.exe",
+        "memory compression", "secure system", "explorer.exe",
+    })
+
+    def _admin_argv(self, args: dict, key: str = "command") -> list[str]:
+        """A command as an argv list, or refuse.
+
+        A string is refused rather than split. `subprocess` with `shell=False`
+        takes a list and treats every element as one argument, which is the
+        whole reason there is no injection surface here; accepting a string
+        would mean splitting it ourselves with quoting rules that are wrong in
+        some corner case we have not thought of yet. `shlex` is not used either
+        - it implements POSIX rules, and a Windows command line is not POSIX.
+        """
+        raw = args.get(key)
+        if raw is None:
+            raise DaemonError(f"{key!r} is required")
+        if isinstance(raw, str):
+            raise DaemonError(
+                f"{key!r} must be a list of arguments, not a string. A command "
+                f"string has to be split on spaces, and every rule for that split "
+                f"is wrong for some argument; a list is unambiguous, and it is "
+                f"what stops a path with a space in it from becoming two "
+                f"arguments. Example: {json.dumps([key, raw])}"
+            )
+        if not isinstance(raw, (list, tuple)) or not raw:
+            raise DaemonError(f"{key!r} must be a non-empty list of arguments")
+        argv = []
+        for i, part in enumerate(raw):
+            if not isinstance(part, str):
+                raise DaemonError(
+                    f"{key}[{i}] is {type(part).__name__}, not a string. Every "
+                    f"argument must already be a string - this tool does no "
+                    f"quoting, conversion or interpolation of its own"
+                )
+            argv.append(part)
+        total = sum(len(a) for a in argv)
+        if total > self._ADMIN_MAX_ARGS:
+            raise DaemonError(
+                f"command line is {total} characters, over the "
+                f"{self._ADMIN_MAX_ARGS} this tool will accept. A confirmation "
+                f"dialog showing the first 4 KB of a command is a dialog the "
+                f"user approves without reading"
+            )
+        return argv
+
+    def _admin_cwd(self, args: dict) -> str:
+        """Where the command runs, anchored and confined like any other path.
+
+        Defaults to the single approved root rather than to the daemon's own
+        working directory, which is wherever the daemon happened to be started
+        from. A command with no cwd that inherits `G:\` is a command whose
+        relative paths reach the whole drive.
+        """
+        raw = str(args.get("cwd") or "").strip()
+        if not raw:
+            roots = list(getattr(self, "manifests", None).roots()) if hasattr(
+                self, "manifests") else []
+            if len(roots) == 1:
+                return str(Path(str(roots[0])).resolve())
+            return str(Path.cwd())
+        target = Path(raw)
+        if not target.is_absolute() and len(list(getattr(self, "manifests", None).roots())) == 1:
+            target = Path(str(list(self.manifests.roots())[0])) / target
+        why = self.gate.path_refusal(str(target))
+        if why:
+            raise Refused(f"shell.run working directory refused - {why}")
+        return str(target.resolve())
+
+    @staticmethod
+    def _admin_is_pathish(part: str) -> bool:
+        """Does this argument name a file, rather than being a switch?
+
+        The first version of this test asked `os.path.isabs`, which is wrong in
+        a way only running it finds: `os.path.isabs("/c")` is True, because a
+        rooted path is "absolute" relative to the drive it resolves against. So
+        `["cmd", "/c", "exit", "3"]` had `/c` screened as a path, and the call
+        was refused for reaching `C:\c` - a directory that does not exist, was
+        never named, and was invented by the screen. On Windows a leading slash
+        is a switch; that is the convention `cmd.exe` and `tasklist` both use.
+
+        Absolute therefore means a drive letter and a separator, or a UNC
+        prefix - not merely a leading slash.
+        """
+        if not part:
+            return False
+        head, sep, tail = part.partition(":")
+        if sep and len(head) == 1 and head.isalpha() and tail[:1] in ("\\", "/"):
+            return True                        # C:\... or C:/...
+        if part.startswith("\\\\"):
+            return True                        # \\server\share
+        if part.startswith(("/", "\\")):
+            return False                       # /c, /FI, \n - switches
+        if "\\" in part or "/" in part:
+            return True                        # ..\..\secrets.txt, build/out
+        return bool(Path(part).suffix)         # notes.txt, x.dll
+
+    def _admin_arg_paths(self, argv: list[str]) -> list[tuple[str, str]]:
+        """The arguments that name a path, paired with the path.
+
+        A heuristic, and it is applied *in addition to* the gate's own check
+        rather than instead of it: `policy._check_paths` already screens every
+        argument whose *name* looks like a path (`path`, `dir`, `target`, ...),
+        and this catches the ones hidden behind a program name, where
+        `["del", "C:/Windows/System32/config/SAM"]` passes that screen entirely
+        because no argument is named `path`.
+
+        Over-matching a real path costs the user one restatement; missing one is
+        a hole with no symptom. The gap that remains is a bare relative name
+        with no extension - `del secrets` - which resolves inside the working
+        directory, and `_admin_cwd` confines that to an approved root. So what
+        this fails to catch still cannot escape.
+        """
+        found: list[tuple[str, str]] = []
+        for part in argv[1:]:
+            if part.startswith("-"):
+                # A flag, or `--flag=value`. The value is the path, so it is
+                # still screened; the flag itself is not.
+                if "=" not in part:
+                    continue
+                part = part.split("=", 1)[1]
+            if self._admin_is_pathish(part):
+                found.append((part, part))
+        return found
+
+    def _preview_shell_run(self, args: dict) -> dict:
+        argv = self._admin_argv(args)
+        cwd = self._admin_cwd(args)
+        paths = [p for p, _ in self._admin_arg_paths(argv)]
+        return {
+            "action": "run one command (no shell; output is returned, not streamed)",
+            "command": argv,
+            "command_line": subprocess.list2cmdline(argv),
+            "cwd": cwd,
+            "paths_in_arguments": paths[:50],
+            "paths_truncated": len(paths) > 50,
+            "timeout_s": float(args.get("timeout_s", 120.0)),
+            "note": (
+                "no shell is involved, so & | ; > and redirection are literal "
+                "characters rather than syntax. That is deliberate: it removes "
+                "the injection surface, at the cost of not being able to run "
+                "pipelines. Use two calls, or a build script in the workspace."
+            ),
+        }
+
+    def _exec_shell_run(self, args: dict) -> Any:
+        argv = self._admin_argv(args)
+        cwd = self._admin_cwd(args)
+        timeout = min(max(float(args.get("timeout_s", 120.0)), 1.0), 900.0)
+        # Re-check the paths in the executor as well as the preview. The
+        # preview is what the user approved; this is what runs. If they differ,
+        # that is a bug worth refusing rather than executing (D32).
+        for _, path in self._admin_arg_paths(argv):
+            why = self.gate.path_refusal(str(Path(cwd) / path)
+                                         if not Path(path).is_absolute() else path)
+            if why:
+                raise Refused(f"shell.run refused - {why}")
+        result = sysinfo.run_capture(argv, timeout=timeout)
+        result["cwd"] = cwd
+        result["ok"] = result.get("exit_code") == 0 and not result.get("timed_out")
+        return result
+
+    def _preview_app_launch(self, args: dict) -> dict:
+        raw = str(args.get("app") or args.get("name") or "").strip()
+        resolved, how = self._resolve_app(raw)
+        extra = args.get("args") or []
+        return {
+            "action": "start an application",
+            "requested": raw,
+            # Resolved here, not in the executor, so the dialog names the file
+            # that will actually run. An unresolved name is refused rather than
+            # run: handed to CreateProcess, a bare name could resolve against the
+            # working directory as well as PATH, and the user would be approving
+            # a word instead of an executable.
+            "resolved": str(resolved) if resolved else None,
+            "found_by": how,
+            "arguments": extra if isinstance(extra, list) else str(extra),
+            "note": (
+                "resolved to an executable before this dialog is shown; an "
+                "unresolved name is refused rather than run"
+            ),
+        }
+
+    def _exec_app_launch(self, args: dict) -> Any:
+        raw = str(args.get("app") or args.get("name") or "").strip()
+        if not raw:
+            raise DaemonError("app.launch needs 'app' - an executable name or a full path")
+        exe, how = self._resolve_app(raw)
+        if exe is None:
+            # Say why the search came up empty and what would work instead,
+            # rather than handing the string to CreateProcess and letting it
+            # fail with "not a valid Win32 application".
+            raise DaemonError(f"cannot launch {raw!r}: {how}")
+        why = self.gate.protected_refusal(str(exe))
+        if why:
+            raise Refused(f"app.launch refused - {why}")
+        # Arguments are screened exactly as `shell.run` screens them: opening an
+        # editor is harmless, opening it on somebody's private key is not, and
+        # the argument is the only place the difference can be seen.
+        extra: list[str] = []
+        if args.get("args"):
+            extra = self._admin_argv(args, "args")
+            for _, path in self._admin_arg_paths([str(exe), *extra]):
+                if self.gate.path_refusal(path):
+                    raise Refused(f"app.launch refused - {path} is off-limits")
+        proc = subprocess.Popen(
+            [str(exe), *extra],
+            cwd=str(self._admin_cwd(args)) if args.get("cwd") else None,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            # Its own process group, so a Ctrl-C aimed at the daemon does not
+            # reach a program the user just opened, and so a launched GUI does
+            # not inherit the daemon's console.
+            creationflags=(getattr(subprocess, "DETACHED_PROCESS", 0)
+                           | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
+        )
+        return {"launched": str(exe), "found_by": how, "pid": proc.pid,
+                "requested": raw, "detached": True}
+
+    def _preview_app_close(self, args: dict) -> dict:
+        rows = sysinfo.find_processes(str(args.get("process") or args.get("name") or ""))
+        blocked = self._admin_unkillable_reason(args)
+        own = self._admin_own_chain()
+        described = [{**p, "protected": p["name"].lower() in self._ADMIN_UNKILLABLE
+                      or int(p["pid"]) in own}
+                     for p in rows.get("processes", [])]
+        return {
+            "action": "ask a running process to close",
+            "requested": str(args.get("process") or args.get("name") or ""),
+            "found": rows.get("count", 0),
+            "processes": described[:20],
+            "truncated": rows.get("count", 0) > 20,
+            "force": bool(args.get("force")),
+            "note": blocked or (
+                "processes are asked to close first; 'force' terminates without "
+                "the chance to save. Unsaved work is not recoverable. Rows marked "
+                "protected - Windows' own, or the assistant and whatever started "
+                "it - are shown so the request can be seen to include them, and "
+                "are left alone"
+            ),
+            "refused": blocked is not None,
+        }
+
+    @staticmethod
+    def _app_name_ok(raw: str) -> bool:
+        """Is this a plain application name, rather than something else?
+
+        Checked because the name is used to build a glob pattern. A name
+        carrying `*`, `?` or `[]` would match whatever the caller liked rather
+        than the program they named - and "launch whatever matches notepad*"
+        is not a thing to hand to a human's approval dialog.
+        """
+        if not raw or len(raw) > 64:
+            return False
+        if not (raw[0].isalnum()):
+            return False
+        # `+` because of notepad++.exe, space because it is legal in a filename.
+        return all(c.isalnum() or c in "._+- " for c in raw)
+
+    def _app_search_roots(self) -> list[Path]:
+        """Where Windows puts programs that are not on PATH.
+
+        Measured, not assumed: notepad++ is installed at
+        `C:/Program Files/Notepad++/notepad++.exe` and `Get-Command notepad++`
+        finds nothing, because no installer adds it to PATH. A resolver that
+        only asks `shutil.which` therefore refuses most of what is actually
+        installed, which is the opposite of useful.
+        """
+        out: list[Path] = []
+        for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+            value = os.environ.get(var)
+            if value:
+                out.append(Path(value))
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            out.append(Path(local) / "Programs")
+            out.append(Path(local) / "Microsoft" / "WindowsApps")
+        system = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if system:
+            out.append(Path(system) / "System32")
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for candidate in out:
+            # ProgramW6432 duplicates ProgramFiles on a 64-bit build; walking
+            # it twice doubles the cost of every resolution for no new match.
+            key = str(candidate).lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        return unique
+
+    def _resolve_app(self, raw: str) -> tuple[Path | None, str]:
+        """Find the executable `raw` names. Returns (path, how).
+
+        Three sources, in order, because they differ in how much they can be
+        trusted: PATH is what the shell would use, an absolute path is the
+        caller's own claim and is checked for existence, and the install
+        folders are a guess bounded by a directory budget.
+
+        The budget matters more than it looks. `Program Files` holds tens of
+        thousands of directories; an unbounded walk makes `app.launch` slow
+        enough that the user learns to approve it without waiting for it, which
+        is worse than the tool not existing. So the walk is capped and says so
+        when the cap is what stopped it.
+        """
+        name = str(raw).strip().strip('"')
+        if not name:
+            return None, "no application name given"
+        # An absolute path is a different kind of claim from a bare name, and it
+        # is checked by a different rule. The bare-name validator rejects any
+        # `\` or `:`, so running it first made the absolute-path branch
+        # unreachable and reported `G:\localaized\src\assistant\daemon.py` as
+        # "not a plain application name" - a complaint about spelling, for a
+        # path the real question is whether it is protected. Order is the fix.
+        candidate = Path(name)
+        if candidate.is_absolute() or name.startswith("\\\\"):
+            if candidate.is_file():
+                return candidate.resolve(), "absolute path given"
+            return None, f"{name!r} does not exist"
+        if not self._app_name_ok(name):
+            return None, (
+                f"{name!r} is not a plain application name. Give the "
+                f"executable's own name (letters, digits, dot, dash, plus) or "
+                f"a full path - wildcards are refused, because 'launch whatever "
+                f"matches this' is not something to put in front of an approval"
+            )
+        found = shutil.which(name)
+        if found:
+            return Path(found).resolve(), "on PATH"
+        target = name if name.lower().endswith(".exe") else f"{name}.exe"
+        budget = self._APP_DIR_BUDGET
+        for root in self._app_search_roots():
+            if not root.is_dir():
+                continue
+            for dirpath, dirnames, filenames in os.walk(root):
+                budget -= 1
+                if budget < 0:
+                    return None, (
+                        f"searched {self._APP_DIR_BUDGET} directories under the "
+                        f"program folders without finding {name!r} - give the "
+                        f"full path to skip the search"
+                    )
+                # A folder named after the application, checked here rather than
+                # by descending into it. `os.walk` hands back a directory's
+                # entire listing on entry, so `Notepad++` is visible in the
+                # *first* iteration under Program Files. Measured: the previous
+                # version only compared `filenames`, so it walked past the
+                # match, burned all 3000 of its budget in `Common Files`, and
+                # reported that notepad++ was not installed.
+                for folder_name in dirnames:
+                    if folder_name.lower() != name.lower():
+                        continue
+                    folder = Path(dirpath) / folder_name
+                    for inner in (target, name):
+                        if (folder / inner).is_file():
+                            return (folder / inner).resolve(), f"under {folder}"
+                for found_name in filenames:
+                    if found_name.lower() == target.lower():
+                        return (Path(dirpath) / found_name).resolve(), \
+                            f"under {dirpath}"
+                # Prune before descending, not after listing: these trees hold
+                # tens of thousands of directories, none of which contain
+                # anything a person launches by name.
+                dirnames[:] = [
+                    d for d in dirnames
+                    if not d.startswith(".") and d.lower() not in self._APP_PRUNE
+                ]
+        return None, (
+            f"no executable named {name!r} on PATH or in the program folders. "
+            f"A full path works, and 'system.package_list' shows what is "
+            f"installed"
+        )
+
+    def _admin_own_chain(self) -> set[int]:
+        """This process and every ancestor of it, by PID.
+
+        `app.close` matches by image name, and on this machine the assistant is
+        a `python.exe` that a request for "close the python processes" matches.
+        Measured: asking to close `python.exe` produced eight matches, and the
+        list included the daemon itself and the shell that started it. Force
+        closing those is the same class of outcome as force-closing
+        `explorer.exe` - the session ends mid-call, with no audit entry, no
+        error, and no way to ask why.
+
+        So the chain is protected by PID rather than by name. Name-protection
+        would have to blacklist `python.exe` and `pwsh.exe` wholesale, which
+        would make the tool unable to clean up the stray interpreters it is
+        most likely to be asked about. PID-protection keeps the useful cases
+        working: the strays still close, and the ones that are us are reported
+        as skipped rather than silently killed.
+        """
+        chain: set[int] = set()
+        pid = os.getpid()
+        for _ in range(64):                  # a cycle would otherwise hang here
+            if pid <= 0 or pid in chain:
+                break
+            chain.add(pid)
+            try:
+                parent = os.getppid()
+            except OSError:
+                break
+            if parent == pid:
+                break
+            pid = parent
+        return chain
+
+    def _admin_unkillable_reason(self, args: dict) -> str | None:
+        """Refuse to kill a process the machine needs, and say which one.
+
+        Checked by *name*, because that is what the caller supplied and what the
+        confirmation shows. Checking the PID instead would pass the moment the
+        OS restarted that process, which is exactly the moment it matters.
+        """
+        name = str(args.get("process") or args.get("name") or "").strip().lower()
+        bare = name if name.endswith(".exe") else f"{name}.exe"
+        for protected in self._ADMIN_UNKILLABLE:
+            if name == protected or bare == protected:
+                return (
+                    f"{name!r} is a process Windows does not survive being closed. "
+                    f"Closing it ends the session or the machine rather than the "
+                    f"application, so this tool will not do it. If you meant a "
+                    f"different program, give that name instead."
+                )
+        return None
+
+    def _exec_app_close(self, args: dict) -> Any:
+        blocked = self._admin_unkillable_reason(args)
+        if blocked:
+            raise Refused(blocked)
+        name = str(args.get("process") or args.get("name") or "").strip()
+        if not name:
+            raise DaemonError("app.close needs 'process' - an image name such as notepad.exe")
+        rows = sysinfo.find_processes(name)
+        targets = rows.get("processes", [])
+        if not targets:
+            # `find_processes` distinguishes "no such process" from "that is
+            # not a name I can look up", and reporting both as the first is how
+            # a rejected query came to read as a program that was not running
+            # - which is a claim about the machine, and it was wrong.
+            detail = rows.get("note") or f"no process named {name!r} is running"
+            raise DaemonError(
+                f"{detail}. 'system.processes' lists what is, and "
+                f"'app.launch' starts something."
+            )
+        force = bool(args.get("force"))
+        own = self._admin_own_chain()
+        closed, failed = [], []
+        for row in targets:
+            pid, proc_name = int(row["pid"]), str(row["name"])
+            if pid in own:
+                # Skipped, not fatal: "close the stray interpreters" is a
+                # reasonable request on a machine where the assistant is itself
+                # a python.exe, and refusing the whole call would make the tool
+                # unable to answer it at all. What is reported is what was left.
+                failed.append({"pid": pid, "name": proc_name,
+                               "error": "this is the assistant, or something it "
+                                        "was started from - not closing it"})
+                continue
+            if proc_name.lower() in self._ADMIN_UNKILLABLE:
+                failed.append({"pid": pid, "name": proc_name,
+                               "error": "protected process"})
+                continue
+            argv = ["taskkill", "/PID", str(pid)]
+            if force:
+                argv.append("/F")
+            result = sysinfo.run_capture(argv, timeout=20.0)
+            if result.get("exit_code") == 0:
+                closed.append({"pid": pid, "name": proc_name})
+            else:
+                failed.append({
+                    "pid": pid, "name": proc_name,
+                    "error": (result.get("stderr") or result.get("stdout")
+                              or "").strip()[:200] or "taskkill failed",
+                })
+        return {"requested": name, "force": force, "closed": closed,
+                "failed": failed, "closed_count": len(closed)}
+
     # ---------------------------------------------------------------- workspaces
 
     def op_workspace_add(self, args: dict) -> Any:
@@ -2396,6 +2917,9 @@ def _install_tables() -> None:
         "voice.speak": Daemon._exec_voice_speak,
         "voice.listen": Daemon._exec_voice_listen,
         "voice.status": Daemon._exec_voice_status,
+        "app.launch": Daemon._exec_app_launch,
+        "app.close": Daemon._exec_app_close,
+        "shell.run": Daemon._exec_shell_run,
     }
     Daemon._PREVIEWS = {
         # Only destructive tools need a real preview, because only destructive
@@ -2406,6 +2930,17 @@ def _install_tables() -> None:
         # a T3 dialog with no payload is a dialog the user approves blind.
         "voice.speak": Daemon._preview_voice_speak,
         "voice.listen": Daemon._preview_voice_listen,
+        # The Tier 2 administration tools, which are the opposite case from the
+        # comment above and are worth spelling out. `file.delete` is T3; these
+        # are T2. The reason a T2 tool still needs a preview is not risk but
+        # ambiguity: the confirmation's job is to let the user check that the
+        # thing being blessed is the thing they meant, and "run this command" /
+        # "close this" cannot be checked by reading the words. The preview shows
+        # the resolved executable, the argv as a real command line, and the
+        # exact PIDs - so approval is given against facts rather than intent.
+        "app.launch": Daemon._preview_app_launch,
+        "app.close": Daemon._preview_app_close,
+        "shell.run": Daemon._preview_shell_run,
     }
 
 

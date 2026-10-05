@@ -31,6 +31,67 @@ from assistant.policy import (  # noqa: E402
 from assistant.tools import ALL_TOOLS, default_gate  # noqa: E402
 
 
+class TestTheTwoPathQuestions(unittest.TestCase):
+    r"""`path_refusal` and `protected_refusal` are the same policy asked twice.
+
+    They were one method until `shell.run` needed the protected half on its own.
+    Asking the gate rather than reimplementing the test in the executor is the
+    point: two policies disagreeing is how a deny-list ends up edited in one of
+    them.
+    """
+
+    def setUp(self):
+        self.gate = make_gate()
+
+    def test_both_refuse_a_protected_path(self):
+        for ask in ("path_refusal", "protected_refusal"):
+            why = getattr(self.gate, ask)(r"C:\Windows\System32\config\SAM")
+            self.assertTrue(why, ask)
+            self.assertIn("protected", why.lower(), ask)
+
+    def test_the_assistants_own_source_is_protected(self):
+        for ask in ("path_refusal", "protected_refusal"):
+            self.assertTrue(getattr(self.gate, ask)(
+                r"G:\localaized\src\assistant\daemon.py"), ask)
+
+    def test_only_the_workspace_rule_is_dropped(self):
+        r"""A program the user asked to open is outside every workspace.
+
+        That is true and useless: `app.launch` on
+        `C:\Program Files\Notepad++\notepad++.exe` reads no user data, and it is
+        denied by the roots rule purely because Windows installed it somewhere
+        else. So the roots question is asked of file paths and not of executables.
+        """
+        program = r"C:\Program Files\Notepad++\notepad++.exe"
+        self.assertIsNone(self.gate.protected_refusal(program))
+        self.assertIsNotNone(self.gate.path_refusal(program))
+
+    def test_a_nothing_special_path_passes_both(self):
+        ws = r"G:\workspace\project\notes.txt"
+        self.assertIsNone(self.gate.path_refusal(ws))
+        self.assertIsNone(self.gate.protected_refusal(ws))
+
+    def test_a_path_outside_every_root_is_refused_by_the_full_check_only(self):
+        outside = r"C:\Users\somebody\Desktop\notes.txt"
+        self.assertIsNone(self.gate.protected_refusal(outside))
+        why = self.gate.path_refusal(outside)
+        self.assertTrue(why)
+        # And it must name what would have worked, which is the standing rule.
+        self.assertIn("workspace", why.lower())
+
+    def test_an_empty_root_list_denies_but_the_protected_half_still_answers(self):
+        """D10 with nothing approved denies everything.
+
+        And the protected half still works with no workspace at all, which is
+        what lets `app.launch` be available before a workspace exists.
+        """
+        bare = make_gate(allowed_roots=[])
+        self.assertTrue(bare.path_refusal(r"G:\anything\at\all.txt"))
+        self.assertIsNone(bare.protected_refusal(
+            r"C:\Program Files\Notepad++\notepad++.exe"))
+        self.assertTrue(bare.protected_refusal(r"G:\localaized\src\x.py"))
+
+
 def make_gate(attended: bool = True,
               allowed_roots: list[str] | None = None) -> PolicyGate:
     """A gate with the full registry and one approved workspace."""

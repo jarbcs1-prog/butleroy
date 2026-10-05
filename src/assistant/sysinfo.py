@@ -27,6 +27,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,130 @@ def run_command(argv: list[str], *, timeout: float = RUN_TIMEOUT_S) -> str:
         detail = (proc.stderr or proc.stdout or "").strip()[:300]
         raise RuntimeError(f"{argv[0]} exited {proc.returncode}: {detail}")
     return proc.stdout
+
+
+def run_capture(argv: list[str], *, timeout: float = 120.0) -> dict[str, Any]:
+    """Run a command and report what happened, including when it failed.
+
+    `run_command` raises on a non-zero exit, which is right for a probe reading
+    a value it needs and wrong for `shell.run`, where "the build failed" and
+    "the test suite is red" are the answer the caller asked for. Turning an
+    exit code into an exception makes the tool unusable for exactly the
+    commands it exists to run - and it teaches the caller to read the error
+    string, which is where the exit code goes to die.
+
+    The `shell=False` discipline from `run_command` is not repeated as a
+    reminder here; it is the reason this function is allowed to exist at all.
+    """
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        # A timeout is a result, not a crash: `npm test` on a suite with a
+        # hung integration test is a fact about the suite. Reported, bounded.
+        return {
+            "argv": list(argv), "exit_code": None, "timed_out": True,
+            "stdout": "", "stderr": f"no exit after {timeout:g}s",
+            "seconds": round(timeout, 2), "truncated": False,
+        }
+    except (OSError, ValueError) as exc:
+        return {
+            "argv": list(argv), "exit_code": None, "timed_out": False,
+            "stdout": "", "stderr": str(exc),
+            "seconds": round(time.time() - started, 2), "truncated": False,
+        }
+    out, err = proc.stdout or "", proc.stderr or ""
+    # Bounded, and said so. A command that prints a megabyte would otherwise
+    # put a megabyte into a confirmation dialog and an audit log.
+    cap = 4000
+    return {
+        "argv": list(argv),
+        "exit_code": proc.returncode,
+        "timed_out": False,
+        "stdout": out[:cap],
+        "stderr": err[:cap],
+        "truncated": len(out) > cap or len(err) > cap,
+        "seconds": round(time.time() - started, 2),
+    }
+
+
+# Windows image names are `[A-Za-z0-9._+-]`. Nothing else is a process name, and
+# the characters left over are the ones a `tasklist /FI` filter string is built
+# out of - so the grammar is checked here rather than trusted to the caller.
+#
+# `+` is not decoration: `notepad++.exe` is a real, installed process on this
+# machine, and the first version of this pattern omitted it, so every query for
+# it was answered "that is not a bare process image name" while the program sat
+# there running. Tasklist handles `+` in a filter perfectly well - verified by
+# hand before the pattern was widened.
+_IMAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+
+
+def find_processes(name: str) -> dict[str, Any]:
+    """Every running process whose image name matches `name`.
+
+    Filtered by the OS rather than by listing everything and grepping in Python:
+    `tasklist` knows the answer natively, and `processes()` truncates to 200 rows
+    by memory - which is to say, by size. A match on a quiet process is exactly
+    the case a size-sorted list drops, so reusing it here would report "no such
+    process" for a process that is running.
+
+    A name that is not a bare image name is refused rather than sanitised: a
+    caller who passed `chrome.exe" or IMAGENAME eq notepad` did not mean a
+    process, and guessing which of the two they meant is how the wrong one gets
+    closed.
+    """
+    image = str(name).strip()
+    if not image:
+        return {"count": 0, "image": "", "processes": [],
+                "note": "no process name given", "measured": True}
+    if not _IMAGE_NAME.match(image):
+        return {
+            "count": 0, "image": image, "processes": [],
+            "note": (
+                f"{image!r} is not a bare process image name. Use the "
+                f"executable name as tasklist reports it, e.g. 'chrome.exe' or "
+                f"'notepad++.exe' - letters, digits, dot, dash, plus and "
+                f"underscore only"
+            ),
+            "measured": True,
+        }
+    proc = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True, timeout=15.0, shell=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if proc.returncode != 0:
+        # Same reasoning as `service_status`: a filter tasklist dislikes is a
+        # question we cannot answer, and saying so beats a traceback.
+        return {
+            "count": 0, "image": image, "processes": [],
+            "note": f"tasklist rejected the filter: "
+                    f"{(proc.stderr or proc.stdout or '').strip()[:200]}",
+            "measured": True,
+        }
+    rows: list[dict[str, Any]] = []
+    for line in proc.stdout.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        # "INFO: No tasks are running which match the specified criteria." has
+        # the right shape and no pid, so the pid test is what distinguishes it.
+        if len(parts) < 5 or not parts[1].isdigit():
+            continue
+        digits = "".join(ch for ch in parts[4] if ch.isdigit())
+        rows.append({"name": parts[0], "pid": int(parts[1]),
+                     "session": parts[2], "mem_bytes": int(digits or 0) * 1024})
+    out: dict[str, Any] = {"count": len(rows), "image": image,
+                           "processes": rows, "measured": True}
+    if not rows:
+        out["note"] = f"no process named {image!r} is running"
+    return out
 
 
 # --- the basics -------------------------------------------------------------

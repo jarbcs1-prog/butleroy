@@ -224,6 +224,22 @@ class PolicyGate:
         spec = self.tools.get(tool)
         return spec.tier if spec else None
 
+    def path_refusal(self, raw: str) -> str | None:
+        """The path test, asked directly, for callers whose paths are not in args.
+
+        `_check_paths` finds paths by looking at *argument names*, which cannot
+        see inside a list. `shell.run` receives its paths as an argv list, so
+        the heuristic walks straight past it and the gate would wave through
+        `["del", "C:/Windows/System32/config/SAM"]`.
+
+        The tempting fix is to re-check those strings here, in the executor.
+        That is how two policies start disagreeing: the deny-list lives in one
+        place for six months and then gets edited in one of them. This asks the
+        one gate instead, so a rule added to `_check_candidates` is enforced on
+        every surface at once.
+        """
+        return self._check_candidates([raw])
+
     def _check_paths(self, tool: str, args: dict[str, Any]) -> str | None:
         """Return a denial reason if any argument path is off-limits.
 
@@ -247,9 +263,29 @@ class PolicyGate:
         for declared in spec.paths:
             candidates.append(declared)
 
+        return self._check_candidates(candidates)
+
+    def protected_refusal(self, raw: str) -> str | None:
+        """The protected-location rule alone, with no workspace-root rule.
+
+        Two rules live in this class and they answer different questions.
+        *Where may data be touched* (the deny-list, the self-paths, the
+        approved roots) governs file access. *What may be executed* is a
+        narrower question: `app.launch` on `C:/Program Files/.../notepad.exe`
+        reads no user data and is denied by the roots rule purely because
+        Windows installed the program somewhere else.
+
+        So the protected half is available on its own. Not because it is
+        laxer - it still refuses the assistant's own source and the registry
+        hives - but because "outside every approved workspace" is a true and
+        useless thing to say about a program the user asked to open.
+        """
+        return self._check_protected([raw])
+
+    def _check_protected(self, candidates: list[str]) -> str | None:
+        """The deny-list and self-paths, over paths someone else found."""
         for raw in candidates:
             resolved = _norm(raw)
-
             for denied in (*self.deny_paths, *self.self_paths):
                 if _under(resolved, _norm(denied)):
                     return (
@@ -257,6 +293,16 @@ class PolicyGate:
                         f"({denied}); the assistant may not read, write or delete "
                         f"its own code or policy (D21)"
                     )
+        return None
+
+    def _check_candidates(self, candidates: list[str]) -> str | None:
+        """The policy itself, over paths someone else found."""
+        why = self._check_protected(candidates)
+        if why is not None:
+            return why
+
+        for raw in candidates:
+            resolved = _norm(raw)
 
             # No `self.allowed_roots and` guard here. An earlier version had one,
             # on the reasoning that "no roots configured" should not constrain a

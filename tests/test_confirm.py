@@ -474,11 +474,15 @@ def test_a_grant_expires_on_its_own(dg, sandbox):
 def test_a_destructive_tool_without_an_executor_never_asks(dg):
     """The user must not go through a security ceremony for a no-op.
 
-    `package.install` is destructive, T3, and has no executor. Asking the user to
-    approve it would be theatre: the approval would be recorded, and then nothing
-    would happen. It has to fail before the dialog.
+    `file.empty_recycle_bin` is destructive, T3, and has no executor. Asking the
+    user to approve it would be theatre: the approval would be recorded, and then
+    nothing would happen. It has to fail before the dialog.
+
+    The example was `package.install` until it gained an executor; the property
+    is the same either way, and a test that names a tool which can now run would
+    be asserting the wrong thing.
     """
-    res = ask(dg, "package.install", package="something", source="winget")
+    res = ask(dg, "file.empty_recycle_bin")
     assert res["ok"] is False
     assert res.get("not_implemented") or res["result"].get("not_implemented"), res
     assert dg._pending == {}, "nothing may be left pending for a tool that cannot run"
@@ -490,7 +494,10 @@ def test_a_destructive_tool_without_an_executor_never_asks(dg):
 def test_the_gap_stays_visible_in_status(dg):
     """A tool that cannot run must still be *registered*, or the gap is invisible."""
     status = call(dg, "status")["result"]
-    assert "package.install" not in status["tools_executable"]
+    # `file.empty_recycle_bin`, not `package.install`: that one gained an
+    # executor, so naming it here would be asserting that a working tool does
+    # not work.
+    assert "file.empty_recycle_bin" not in status["tools_executable"]
     # tools_registered is a count; tools_executable is the list of names.
     assert isinstance(status["tools_registered"], int)
     assert isinstance(status["tools_executable"], list)

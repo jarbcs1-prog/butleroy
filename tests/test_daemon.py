@@ -192,8 +192,10 @@ def test_tool_check_predicts_but_never_acts_and_is_not_audited(dg: D.Daemon, wor
     # And the same flag must be False for a tool that genuinely has no handler,
     # which is the case that matters: a check that reports a T3 as executable when
     # it could not run would let the user plan around a capability that is absent.
-    out2 = req(dg, "tool_check", tool="package.install", channel=CHANNEL_PC,
-               args={"package": "ripgrep"})
+    # `file.empty_recycle_bin`, not `package.install` - that one has an executor
+    # now, and the point of this assertion is a tool that genuinely cannot run.
+    out2 = req(dg, "tool_check", tool="file.empty_recycle_bin",
+               channel=CHANNEL_PC)
     assert out2["result"]["would"] == "confirm"
     assert out2["result"]["executable"] is False
     assert len(records(dg)) == before

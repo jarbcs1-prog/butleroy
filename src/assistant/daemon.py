@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1751,7 +1752,7 @@ class Daemon:
         return argv
 
     def _admin_cwd(self, args: dict) -> str:
-        """Where the command runs, anchored and confined like any other path.
+        r"""Where the command runs, anchored and confined like any other path.
 
         Defaults to the single approved root rather than to the daemon's own
         working directory, which is wherever the daemon happened to be started
@@ -1775,7 +1776,7 @@ class Daemon:
 
     @staticmethod
     def _admin_is_pathish(part: str) -> bool:
-        """Does this argument name a file, rather than being a switch?
+        r"""Does this argument name a file, rather than being a switch?
 
         The first version of this test asked `os.path.isabs`, which is wrong in
         a way only running it finds: `os.path.isabs("/c")` is True, because a
@@ -2180,6 +2181,549 @@ class Daemon:
                 })
         return {"requested": name, "force": force, "closed": closed,
                 "failed": failed, "closed_count": len(closed)}
+
+    # ------------------------------------------ administration, tier 3
+
+    # These five are the highest-consequence tools in the registry, and the
+    # thing they have in common is that the tier name says `IRREVERSIBLE`. It
+    # does not have to be true.
+    #
+    # Every one of them writes a row to `state/admin_undo.jsonl` *before* it
+    # changes anything, recording the exact inverse - the backup file to import,
+    # the service action to run, the version to reinstall. The preview shows the
+    # undo, the result carries the undo, and the row is written whether the
+    # action succeeds or fails, so the journal cannot lose a failure.
+    #
+    # The journal is a plain append-only text file rather than a table because
+    # its whole job is to be readable after something has gone wrong, by a
+    # human, with a text editor. A database that will not open is a poor place
+    # to keep the record of the thing that broke it.
+    _ADMIN_UNDO_FILE = "admin_undo.jsonl"
+
+    def _admin_undo_path(self) -> Path:
+        return Path(self.state) / self._ADMIN_UNDO_FILE
+
+    def _admin_journal(self, tool: str, args: dict, *, undo: Any,
+                       note: str = "") -> dict[str, Any]:
+        """Record how to reverse this, before it happens. Returns the row.
+
+        The `ok` field is written later, by the caller, as a second row with
+        the same `id`. Appending twice beats rewriting: a half-written journal
+        is still a journal, and a rewritten one that fails mid-rewrite is not.
+
+        A journal that cannot be written is not fatal. An action whose undo we
+        failed to record is still the user's call - refusing would turn "we
+        could not save a note" into "we cannot help you", which is a worse
+        outcome than the missing note. The caller is told either way.
+        """
+        row = {
+            "id": time.strftime("%Y%m%d-%H%M%S") + f"-{self._pending_seq:03d}",
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "tool": tool,
+            "channel": self._channel(args) if isinstance(args, dict) else "pc",
+            "args": _redact(args) if isinstance(args, dict) else {},
+            "undo": undo,
+            "note": note,
+            "ok": None,
+        }
+        path = self._admin_undo_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as exc:
+            row["journal_error"] = str(exc)
+        return row
+
+    def _admin_close_journal(self, row: dict[str, Any], *,
+                            ok: bool, result: Any = "") -> None:
+        """Append the outcome against the row that said what would happen."""
+        if row.get("journal_error"):
+            return
+        done = dict(row)
+        done["ok"] = bool(ok)
+        done["result"] = result
+        done["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._admin_undo_path().open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(done, sort_keys=True, default=str) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError:
+            pass
+
+    def _admin_undo_tip(self, row: dict[str, Any]) -> str:
+        """One line for the result, saying how to put it back."""
+        undo = row.get("undo")
+        if isinstance(undo, dict) and undo.get("command"):
+            return (f"recorded in {self._ADMIN_UNDO_FILE}; to put it back run: "
+                    f"{undo['command']}")
+        if row.get("journal_error"):
+            return (f"could NOT be recorded to the undo journal "
+                    f"({row['journal_error']})")
+        return f"recorded in {self._ADMIN_UNDO_FILE}"
+
+    # -- the preview answers first, for every one of these ------------------
+
+    def _preview_registry_write(self, args: dict) -> dict:
+        key = str(args.get("key", ""))
+        name = str(args.get("name", ""))
+        kind = str(args.get("type", "REG_SZ")).upper()
+        delete = bool(args.get("delete"))
+        refusal = (sysinfo.registry_key_refusal(key)
+                   or sysinfo.registry_value_refusal(name)
+                   or (None if kind in sysinfo.REG_VALUE_TYPES else
+                       f"type {kind!r} is not one of "
+                       f"{', '.join(sysinfo.REG_VALUE_TYPES)}")
+                   or (None if delete else
+                       sysinfo.registry_data_refusal(kind, args.get("data"))))
+        before = sysinfo.registry_read(key) if not refusal else {}
+        current = (before.get("values") or {}).get(name)
+        backup = str(self._registry_backup_path(key))
+        return {
+            "action": ("remove one registry value"
+                       if delete else "set one registry value"),
+            "key": key,
+            "name": name,
+            "type": kind,
+            "data": None if delete else args.get("data"),
+            "deleting": delete,
+            "key_exists": before.get("exists", False),
+            "current_value": current,
+            "changes_anything": current is not None,
+            "backup_of_the_key": None if not before.get("exists") else backup,
+            "undo": (f'reg import "{backup}"' if before.get("exists")
+                     else "remove the value again (the key did not exist)"),
+            "reversible": True,
+            "would_be_refused": refusal,
+            "note": "the key is exported to a .reg file before the write, so "
+                    "this is reversible even though the tier says otherwise",
+        }
+
+    def _registry_backup_path(self, key: str) -> Path:
+        """A stable, readable path for this key's backup."""
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", key).strip("_") or "key"
+        return (Path(self.state) / "registry_backups"
+                / f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}.reg")
+
+    def _preview_service_start_stop(self, args: dict) -> dict:
+        name = str(args.get("service", ""))
+        action = str(args.get("action", "")).lower()
+        refusal = self._service_refusal(name, action)
+        state = sysinfo.service_state(name) if not refusal else {}
+        prior = state.get("state_name")
+        opposite = {"start": "stop", "stop": "start"}.get(action, "restart")
+        return {
+            "action": f"{action} a Windows service",
+            "service": name,
+            "requested": action,
+            "current_state": prior,
+            "currently_running": state.get("running"),
+            "command": f'sc {action} {name}' if name else "",
+            "undo": (f'sc {opposite} {name}' if name and action in
+                     ("start", "stop") else
+                     "restarting twice is not an undo"),
+            "reversible": action in ("start", "stop"),
+            "would_be_refused": refusal,
+            "note": ("stopping a boot-critical or security service leaves "
+                     "nothing to undo, which is why those are refused"),
+        }
+
+    def _service_refusal(self, name: str, action: str) -> str | None:
+        """Why this service action will not run, or None."""
+        if action not in ("start", "stop", "restart"):
+            return (f"action {action!r} is not one of start, stop, restart")
+        if not name:
+            return "service is required - the name it is registered under"
+        if not sysinfo.SERVICE_NAME_OK.match(name):
+            return (f"{name!r} is not a service name. Windows allows letters, "
+                    f"digits, dot, dash, underscore and backslash - nothing "
+                    f"else. It is refused rather than trimmed, because a name "
+                    f"with a space or a quote in it is a mistake, not a "
+                    f"service")
+        state = sysinfo.service_state(name)
+        if not state.get("exists"):
+            return (f"there is no service named {name!r}. Run "
+                    f"system.services to see the ones that exist")
+        if action in ("stop", "restart"):
+            blocked = sysinfo.SERVICE_NO_STOP.get(name) or \
+                sysinfo.SERVICE_NO_STOP.get(name.lower())
+            if blocked:
+                return (f"{name!r} will not be {action}ped: {blocked}. This is "
+                        f"not a judgement about whether it is safe - it is "
+                        f"that stopping it cannot be undone from inside the "
+                        f"machine")
+        return None
+
+    def _preview_package_install(self, args: dict) -> dict:
+        package = str(args.get("package", ""))
+        managers = sysinfo.package_managers()
+        available = [m["name"] for m in managers.get("managers", [])
+                     if m.get("usable")]
+        asked = str(args.get("manager", "")).lower()
+        chosen = asked or (available[0] if available else "")
+        refusal = self._package_refusal(package, asked, available)
+        argv: list[str] = []
+        if chosen and not refusal:
+            try:
+                argv = sysinfo.manager_install_argv(
+                    chosen, package, str(args.get("version", "")))
+            except FileNotFoundError:
+                refusal = f"{chosen} is not installed on this machine"
+        return {
+            "action": "install a package",
+            "package": package,
+            "manager": chosen or "(none found)",
+            "managers_here": available,
+            "version": str(args.get("version", "")) or "(latest)",
+            "command": subprocess.list2cmdline(argv) if argv else "",
+            "undo": (f'uninstall it again: {chosen} uninstall'
+                     if chosen else ""),
+            "reversible": True,
+            "would_be_refused": refusal,
+            "note": managers.get("note", ""),
+        }
+
+    def _package_refusal(self, package: str, asked: str,
+                         available: list[str]) -> str | None:
+        if not package:
+            return ("package is required - the id as its manager knows it, "
+                    "e.g. notepad++")
+        if not sysinfo.PACKAGE_NAME_OK.match(package):
+            return (f"{package!r} is not a package id. Windows package ids are "
+                    f"letters, digits, dot, dash, underscore, plus and spaces")
+        if asked and asked not in available:
+            return (f"{asked!r} is not a package manager here. Available: "
+                    f"{', '.join(available) or 'none'} - both are checked, "
+                    f"because being on PATH is not the same as being "
+                    f"installed")
+        if not available:
+            return ("no package manager was found on this machine, so nothing "
+                    "can be installed")
+        return None
+
+    def _preview_package_uninstall(self, args: dict) -> dict:
+        package = str(args.get("package", ""))
+        owners = self._package_owners(package)
+        managers = [name for name, _ in owners]
+        refusal: str | None = None
+        if not package:
+            refusal = "package is required"
+        elif not sysinfo.PACKAGE_NAME_OK.match(package):
+            refusal = (f"{package!r} is not a package id. Letters, digits, "
+                       f"dot, dash, underscore, plus and spaces")
+        elif len(owners) > 1:
+            refusal = (f"{package!r} is claimed by more than one package "
+                       f"manager ({', '.join(managers)}). Which one to remove "
+                       f"it from is the user's decision, not a default")
+        elif not owners:
+            installed = sysinfo.package_list(query=package, limit=200)
+            match = [p for p in installed.get("packages", [])
+                     if p["name"].lower() == package.lower()]
+            refusal = (
+                f"{package!r} is not a package any manager here claims to "
+                f"have installed"
+                + (f", although Windows lists {len(match)} program(s) with "
+                   f"that name"
+                   if match else
+                   " - uninstalling something this machine did not install is "
+                   "not a package operation, it is a guess"))
+        argv: list[str] = []
+        undo: Any = "no version recorded, so reinstalling the same version "\
+                    "is not guaranteed"
+        if owners and not refusal:
+            name, version = owners[0]
+            argv = sysinfo.manager_uninstall_argv(name, package)
+            undo = (f"reinstall {version}: {subprocess.list2cmdline(sysinfo.manager_install_argv(name, package, version))}"
+                    if version else
+                    f"reinstall the latest: {subprocess.list2cmdline(sysinfo.manager_install_argv(name, package))}")
+        return {
+            "action": "uninstall a package",
+            "package": package,
+            "manager": managers[0] if managers else "(none claims it)",
+            "installed_version": owners[0][1] if owners else "",
+            "command": subprocess.list2cmdline(argv) if argv else "",
+            "undo": undo,
+            "reversible": bool(owners),
+            "would_be_refused": refusal,
+            "note": "an installed program and a manager-owned package are "
+                    "different facts; only the second can be uninstalled here",
+        }
+
+    def _package_owners(self, package: str) -> list[tuple[str, str]]:
+        """Every manager that claims this package, with the version it reports.
+
+        Checked against the listing's *contents*, never its exit code: measured
+        on this machine, `choco list <missing> --exact` exits 0 with empty
+        output, so an exit code cannot tell "installed" from "not installed".
+        """
+        if not package:
+            return []
+        found: list[tuple[str, str]] = []
+        for name in sysinfo.PACKAGE_MANAGERS:
+            if sysinfo.package_owned_by(name, package):
+                found.append((name, sysinfo.package_installed_version(name, package)))
+        return found
+
+    def _preview_power_shutdown(self, args: dict) -> dict:
+        action = str(args.get("action", "")).lower()
+        delay = args.get("delay_seconds")
+        refusal, seconds = self._power_refusal(action, delay)
+        argv: list[str] = []
+        if action and not refusal:
+            argv = sysinfo.power_argv(action, seconds)
+        return {
+            "action": f"{action} this machine" if action else "(no action)",
+            "requested": action,
+            "delay_seconds": seconds,
+            "command": subprocess.list2cmdline(argv) if argv else "",
+            "cancel_with": sysinfo.POWER_CANCEL_HINT if action in
+            ("shutdown", "restart") else "",
+            "undo": (sysinfo.POWER_CANCEL_HINT if action in
+                     ("shutdown", "restart") else "nothing to undo"),
+            "reversible": action == "cancel" or bool(action in
+                                                     ("shutdown", "restart")),
+            "would_be_refused": refusal,
+            "note": ("the delay is why this is reversible: Windows will not "
+                     "act on it until the countdown ends, and the countdown "
+                     "can be stopped"),
+        }
+
+    def _power_refusal(self, action: str,
+                       delay: Any) -> tuple[str | None, int | None]:
+        """Why this power action will not run, and the delay it would use."""
+        if action not in ("shutdown", "restart", "cancel", "logoff"):
+            return (f"action {action!r} is not one of shutdown, restart, "
+                    f"cancel, logoff", None)
+        if action == "cancel":
+            return None, None
+        seconds = sysinfo.POWER_DEFAULT_DELAY_S
+        if delay is not None:
+            # A float is refused before `int()` is tried, because `int(1.5)`
+            # is 1 - it succeeds, and then the reason the user is given is
+            # "too short to cancel" rather than "that is not a whole number
+            # of seconds". Two different mistakes, two different fixes, and
+            # the first one reported would have sent them looking at the
+            # delay's *size* rather than its *type*.
+            if isinstance(delay, bool) or (
+                    isinstance(delay, float) and not delay.is_integer()):
+                return (f"delay_seconds {delay!r} is not a whole number of "
+                        f"seconds", None)
+            try:
+                seconds = int(delay)
+            except (TypeError, ValueError):
+                return (f"delay_seconds {delay!r} is not a whole number of "
+                        f"seconds", None)
+        if seconds < sysinfo.POWER_MIN_DELAY_S:
+            return (f"a {seconds}s delay is too short to cancel: this tool "
+                    f"will not schedule a shutdown you cannot stop, so the "
+                    f"minimum is {sysinfo.POWER_MIN_DELAY_S}s "
+                    f"({subprocess.list2cmdline(sysinfo.power_argv(action, sysinfo.POWER_MIN_DELAY_S))} "
+                    f"then {sysinfo.POWER_CANCEL_HINT})", seconds)
+        if seconds > sysinfo.POWER_MAX_DELAY_S:
+            return (f"a {seconds}s delay is longer than the "
+                    f"{sysinfo.POWER_MAX_DELAY_S}s maximum", seconds)
+        return None, seconds
+
+    # -- and then the actions ------------------------------------------------
+
+    def _exec_registry_write(self, args: dict) -> Any:
+        key = str(args.get("key", ""))
+        name = str(args.get("name", ""))
+        kind = str(args.get("type", "REG_SZ")).upper()
+        data = args.get("data")
+        delete = bool(args.get("delete"))
+        refusal = self._preview_registry_write(args).get("would_be_refused")
+        if refusal:
+            raise Refused(str(refusal))
+        before = sysinfo.registry_read(key)
+        backup = ""
+        undo: Any
+        if before.get("exists"):
+            target = self._registry_backup_path(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            exported = sysinfo.run_capture(
+                ["reg.exe", "export", key, str(target), "/y"], timeout=60.0)
+            if exported.get("exit_code") == 0 and target.exists():
+                backup = str(target)
+                undo = {"kind": "reg_import", "command":
+                        f'reg import "{backup}"',
+                        # The argv as well as the string, because a command
+                        # that has to be re-parsed to be run is a command that
+                        # can be run differently than it was recorded - and
+                        # the one thing an undo must not be is approximate.
+                        "argv": ["reg.exe", "import", backup],
+                        "file": backup}
+            else:
+                undo = {"kind": "restore_value", "key": key, "name": name,
+                        "previous": (before.get("values") or {}).get(name),
+                        "note": "the key could not be exported; the previous "
+                                "value is recorded here instead"}
+        else:
+            undo = {"kind": "remove_value", "key": key, "name": name}
+        row = self._admin_journal(
+            "registry.write", args, undo=undo,
+            note=f"backup: {backup}" if backup else "no backup needed: the key "
+                                               f"did not exist")
+        written = sysinfo.registry_write(key, name, kind, data, delete=delete)
+        if not written.get("ok"):
+            self._admin_close_journal(row, ok=False,
+                                      result=str(written.get("error")))
+            raise DaemonError(str(written.get("error")))
+        self._admin_close_journal(row, ok=True, result=f"{kind} {name}")
+        after = sysinfo.registry_read(key)
+        return {"ok": True, "key": key, "name": name, "removed": delete,
+                "type": None if delete else kind,
+                "value_now": (after.get("values") or {}).get(name),
+                "backup": backup or None,
+                "undo": row.get("undo"),
+                "undo_tip": self._admin_undo_tip(row)}
+
+    def _exec_service_start_stop(self, args: dict) -> Any:
+        name = str(args.get("service", ""))
+        action = str(args.get("action", "")).lower()
+        refusal = self._service_refusal(name, action)
+        if refusal:
+            raise Refused(refusal)
+        state = sysinfo.service_state(name)
+        prior = state.get("state_name")
+        opposite = {"start": "stop", "stop": "start"}.get(action)
+        undo: Any = ({"kind": "sc", "command": f"sc {opposite} {name}",
+                      "reason": f"it was {prior} before"}
+                     if opposite else
+                     {"kind": "none",
+                      "note": "a restart leaves the service running either "
+                              "way; the undo is to stop it"})
+        row = self._admin_journal("service.start_stop", args, undo=undo,
+                                  note=f"was {prior}")
+        result = sysinfo.run_capture(
+            ["sc.exe", action, name], timeout=120.0)
+        ok = result.get("exit_code") == 0
+        self._admin_close_journal(row, ok=ok,
+                                  result=f"exit {result.get('exit_code')}")
+        if not ok:
+            raise DaemonError(
+                f"sc {action} {name} failed with exit "
+                f"{result.get('exit_code')}: "
+                f"{(result.get('stderr') or result.get('stdout') or '').strip()[:200]}")
+        after = sysinfo.service_state(name)
+        return {"ok": True, "service": name, "action": action,
+                "state_before": prior, "state_after": after.get("state_name"),
+                "undo": undo, "undo_tip": self._admin_undo_tip(row)}
+
+    def _exec_package_install(self, args: dict) -> Any:
+        package = str(args.get("package", ""))
+        version = str(args.get("version", ""))
+        available = [m["name"] for m in
+                     sysinfo.package_managers().get("managers", [])
+                     if m.get("usable")]
+        asked = str(args.get("manager", "")).lower()
+        manager = asked or (available[0] if available else "")
+        refusal = self._package_refusal(package, asked, available)
+        if refusal:
+            raise Refused(refusal)
+        argv = sysinfo.manager_install_argv(manager, package, version)
+        row = self._admin_journal(
+            "package.install", args,
+            undo={"kind": "package_uninstall", "manager": manager,
+                  "command": subprocess.list2cmdline(
+                      sysinfo.manager_uninstall_argv(manager, package)),
+                  "reason": "it was not installed before"})
+        result = sysinfo.run_capture(argv, timeout=1800.0)
+        ok = result.get("exit_code") == 0
+        self._admin_close_journal(row, ok=ok,
+                                  result=f"exit {result.get('exit_code')}")
+        return {"ok": ok, "package": package, "manager": manager,
+                "version": version or "(latest)",
+                "command": subprocess.list2cmdline(argv),
+                "exit_code": result.get("exit_code"),
+                "stdout": result.get("stdout", "")[-800:],
+                "stderr": result.get("stderr", "")[-800:],
+                "undo": row.get("undo"), "undo_tip": self._admin_undo_tip(row)}
+
+    def _exec_package_uninstall(self, args: dict) -> Any:
+        package = str(args.get("package", ""))
+        preview = self._preview_package_uninstall(args)
+        if preview.get("would_be_refused"):
+            raise Refused(str(preview["would_be_refused"]))
+        manager, version = self._package_owners(package)[0]
+        argv = sysinfo.manager_uninstall_argv(manager, package)
+        row = self._admin_journal(
+            "package.uninstall", args,
+            undo={"kind": "package_install", "manager": manager,
+                  "version": version,
+                  "command": subprocess.list2cmdline(
+                      sysinfo.manager_install_argv(manager, package, version)),
+                  "reason": f"it was {version}" if version else
+                            "the version was not reported, so reinstalling "
+                            "may give a newer one"})
+        result = sysinfo.run_capture(argv, timeout=1800.0)
+        ok = result.get("exit_code") == 0
+        self._admin_close_journal(row, ok=ok,
+                                  result=f"exit {result.get('exit_code')}")
+        if not ok:
+            raise DaemonError(
+                f"{manager} uninstall {package} failed with exit "
+                f"{result.get('exit_code')}: "
+                f"{(result.get('stderr') or result.get('stdout') or '').strip()[:200]}")
+        return {"ok": True, "package": package, "manager": manager,
+                "removed_version": version,
+                "command": subprocess.list2cmdline(argv),
+                "undo": row.get("undo"), "undo_tip": self._admin_undo_tip(row)}
+
+    def _exec_power_shutdown(self, args: dict) -> Any:
+        action = str(args.get("action", "")).lower()
+        refusal, seconds = self._power_refusal(action,
+                                              args.get("delay_seconds"))
+        if refusal:
+            raise Refused(refusal)
+        argv = sysinfo.power_argv(action, seconds)
+        if action == "cancel":
+            result = sysinfo.run_capture(argv, timeout=60.0)
+            code = result.get("exit_code")
+            # 1116 is "no shutdown was in progress". Reported plainly, because
+            # the alternative - reporting success for a machine that was never
+            # going to shut down - is a lie with a cheerful shape.
+            if code == 1116:
+                return {"ok": False, "action": action, "exit_code": code,
+                        "cancelled": False,
+                        "detail": "nothing was scheduled to cancel - no "
+                                  "shutdown or restart was pending",
+                        "command": subprocess.list2cmdline(argv)}
+            if code != 0:
+                raise DaemonError(
+                    f"shutdown /a failed with exit {code}: "
+                    f"{(result.get('stderr') or '').strip()[:200]}")
+            return {"ok": True, "action": action, "cancelled": True,
+                    "command": subprocess.list2cmdline(argv)}
+        row = self._admin_journal(
+            "power.shutdown", args,
+            undo={"kind": "power_cancel",
+                  # Built by the same function that built the action, rather
+                  # than as a literal `["shutdown", "/a"]` - a second copy of
+                  # a command is a second chance to have it wrong, and the
+                  # literal had already been proved wrong by the time this
+                  # method ran at all.
+                  "command": subprocess.list2cmdline(
+                      sysinfo.power_argv("cancel")),
+                  "argv": sysinfo.power_argv("cancel"),
+                  "reason": f"it was not scheduled before; cancel it within "
+                            f"{seconds}s if that was not the intention"},
+            note=f"{seconds}s to cancel")
+        result = sysinfo.run_capture(argv, timeout=60.0)
+        ok = result.get("exit_code") == 0
+        self._admin_close_journal(row, ok=ok,
+                                  result=f"exit {result.get('exit_code')}")
+        if not ok:
+            raise DaemonError(
+                f"shutdown failed with exit {result.get('exit_code')}: "
+                f"{(result.get('stderr') or '').strip()[:200]}")
+        return {"ok": True, "action": action, "delay_seconds": seconds,
+                "command": subprocess.list2cmdline(argv),
+                "cancel_with": sysinfo.POWER_CANCEL_HINT,
+                "undo": row.get("undo"), "undo_tip": self._admin_undo_tip(row)}
 
     # ---------------------------------------------------------------- workspaces
 
@@ -3146,6 +3690,11 @@ def _install_tables() -> None:
         "app.launch": Daemon._exec_app_launch,
         "app.close": Daemon._exec_app_close,
         "shell.run": Daemon._exec_shell_run,
+        "registry.write": Daemon._exec_registry_write,
+        "service.start_stop": Daemon._exec_service_start_stop,
+        "package.install": Daemon._exec_package_install,
+        "package.uninstall": Daemon._exec_package_uninstall,
+        "power.shutdown": Daemon._exec_power_shutdown,
         "telegram.poll": Daemon._exec_telegram_poll,
         "telegram.send_draft": Daemon._exec_telegram_send_draft,
         "telegram.send": Daemon._exec_telegram_send,
@@ -3170,6 +3719,14 @@ def _install_tables() -> None:
         "app.launch": Daemon._preview_app_launch,
         "app.close": Daemon._preview_app_close,
         "shell.run": Daemon._preview_shell_run,
+        # Tier 3 needs a preview whether or not it is convenient. Each of these
+        # shows the exact argv it will run, and the undo, because the payload is
+        # the only thing standing between the user and the consequence.
+        "registry.write": Daemon._preview_registry_write,
+        "service.start_stop": Daemon._preview_service_start_stop,
+        "package.install": Daemon._preview_package_install,
+        "package.uninstall": Daemon._preview_package_uninstall,
+        "power.shutdown": Daemon._preview_power_shutdown,
         # External gets a preview for the same reason audible does, and here the
         # reason is sharper: for a send, the payload *is* the risk. "Approve
         # telegram.send?" is a dialog with nothing to approve on, and the one

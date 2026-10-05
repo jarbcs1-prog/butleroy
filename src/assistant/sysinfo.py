@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 import winreg
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -547,7 +548,15 @@ def service_status(name: str = "") -> dict[str, Any]:
         elif current and line.startswith("STATE"):
             parts = line.split(":", 1)[1].strip().split()
             current["state"] = parts[0] if parts else "UNKNOWN"
-            current["win32_exit_code"] = parts[1] if len(parts) > 1 else None
+            # The second field of the STATE line is the state *name*
+            # ("1  STOPPED"), not a win32 exit code - that has its own line
+            # below. Labelling it `win32_exit_code` put the word "STOPPED"
+            # into a field whose name says it is a number, which survives any
+            # test that only checks the value is truthy.
+            current["state_name"] = parts[1] if len(parts) > 1 else "UNKNOWN"
+        elif current and line.startswith("WIN32_EXIT_CODE"):
+            parts = line.split(":", 1)[1].strip().split()
+            current["win32_exit_code"] = parts[0] if parts else None
         elif current and line.startswith("DISPLAY_NAME:"):
             current["display_name"] = line.split(":", 1)[1].strip()
     if current:
@@ -738,3 +747,584 @@ def diagnose(check_event_log: bool = True) -> dict[str, Any]:
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "measured": True,
     }
+
+
+# --- Tier 3 administration: the grammars, and what is behind them ------------
+
+# Every one of these is refused as a shape, not sanitised as a string.
+
+#: Registry hives this module will name. `HKU` is deliberately absent: its
+#: subkeys are other people's user profiles, and writing to another account's
+#: hive is not administration of *this* machine.
+REG_HIVES: dict[str, Any] = {
+    "HKCU": winreg.HKEY_CURRENT_USER,
+    "HKLM": winreg.HKEY_LOCAL_MACHINE,
+    "HKCR": winreg.HKEY_CLASSES_ROOT,
+}
+
+#: Keys that make something run again after a reboot. Writing here is how
+#: software persists, and the distinction that matters is not "is this setting
+#: dangerous" but "does it make the assistant harder to remove". A tool that
+#: writes `Run` can be asked to write it by anything that can call the tool, and
+#: the undo journal would faithfully record the inverse - which undoes the write
+#: without undoing the persistence, because the persistence is now in a place
+#: nobody is looking at.
+REG_PERSISTENCE_KEYS: tuple[str, ...] = (
+    r"Software\Microsoft\Windows\CurrentVersion\Run",
+    r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+    r"Software\Microsoft\Windows\CurrentVersion\RunServices",
+    r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run",
+    r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell",
+    r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Userinit",
+    r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Notify",
+    r"Software\Microsoft\Windows NT\CurrentVersion\Windows\AppInit_DLLs",
+    r"Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+)
+
+#: The value types `reg add` accepts, mapped to the `winreg` constant. Kept as
+#: an explicit allowlist rather than passing a caller-supplied string through to
+#: a lookup: a lookup on an arbitrary key is how "REG_SZ" and "reg_sz" and
+#: something else entirely all reach the same call.
+REG_VALUE_TYPES: dict[str, int] = {
+    "REG_SZ": winreg.REG_SZ,
+    "REG_EXPAND_SZ": winreg.REG_EXPAND_SZ,
+    "REG_MULTI_SZ": winreg.REG_MULTI_SZ,
+    "REG_DWORD": winreg.REG_DWORD,
+    "REG_QWORD": winreg.REG_QWORD,
+    "REG_BINARY": winreg.REG_BINARY,
+}
+
+#: A registry key: a hive, one backslash, then a path. Backslash-separated
+#: segments, no empty segments, no `..`, because a key name is a literal name
+#: and a path that walks upwards is a request to mean something else.
+_KEY_SEGMENT = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]+$")
+
+#: A registry value *name*. Spaces are fine - they are ordinary characters in a
+#: value name, and `reg query` prints them - but a backslash is not, because it
+#: would be read as a key separator.
+_VALUE_NAME = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,163}$")
+
+
+def registry_key_refusal(key: str) -> str | None:
+    """Why this registry key may not be written, or None if it may.
+
+    Three separate refusals, each with its own reason, because "invalid" is not
+    an explanation and the three have different fixes:
+
+    * not a hive we write - a typo, or an attempt at another account's hive;
+    * not a key path - a malformed name, or a `..` that means a different key
+      than it looks like;
+    * a persistence key - well-formed, permitted in general, and refused
+      because writing it makes software that runs at boot.
+
+    Returns rather than raises because `daemon.py` calls this from a preview,
+    and a preview that raises takes the whole confirmation down with it.
+    """
+    if not isinstance(key, str) or not key.strip():
+        return ("key is required. Use hive\\subkey, for example "
+                "HKCU\\Software\\Vendor\\Setting")
+    hive, sep, rest = key.partition("\\")
+    if not sep:
+        return (f"{key!r} names no hive. Use hive\\subkey - one of "
+                f"{', '.join(REG_HIVES)}")
+    if hive.upper() not in REG_HIVES:
+        return (f"hive {hive!r} is not writable here. Use one of "
+                f"{', '.join(REG_HIVES)} - HKU is not included because its "
+                f"subkeys are other people's profiles, not this machine")
+    if not rest.strip():
+        return f"{key!r} names a hive but no key under it"
+    for segment in rest.split("\\"):
+        if not segment.strip():
+            return (f"{key!r} has an empty path segment (a doubled backslash). "
+                    f"Windows treats that as a key with a blank name, which is "
+                    f"never what was meant")
+        if segment.strip() in (".", ".."):
+            return (f"{key!r} contains {segment!r}. A registry key name is "
+                    f"literal - there is no parent to walk up to")
+        if not _KEY_SEGMENT.match(segment):
+            return (f"the key segment {segment!r} contains a character Windows "
+                    f"does not allow in a key name")
+    folded = rest.lower().replace("/", "\\")
+    for blocked in REG_PERSISTENCE_KEYS:
+        low_blocked = blocked.lower()
+        if folded == low_blocked or folded.startswith(low_blocked + "\\"):
+            return (f"{key!r} is a persistence key ({blocked}). This tool can "
+                    f"change a setting; it will not make software that runs "
+                    f"again at boot, because that is the one change an undo "
+                    f"journal cannot fully take back")
+    return None
+
+
+def registry_value_refusal(name: str) -> str | None:
+    """Why this value name may not be written, or None if it may."""
+    if not isinstance(name, str) or not name.strip():
+        return ("name is required - the name of the value inside the key")
+    if not _VALUE_NAME.match(name):
+        return (f"the value name {name!r} contains a character a registry "
+                f"value name cannot hold (a backslash is read as a key "
+                f"separator; the rest are reserved)")
+    return None
+
+
+def registry_data_refusal(kind: str, data: Any) -> str | None:
+    """Whether `data` is the right shape for `kind`, with the mismatch named.
+
+    Checked here rather than at the `winreg` call because the failure there is
+    a `TypeError` naming an internal type, which tells a human nothing about
+    which of their two arguments was wrong.
+    """
+    if kind == "REG_MULTI_SZ":
+        if not isinstance(data, (list, tuple)) or not all(
+                isinstance(v, str) for v in data):
+            return ("REG_MULTI_SZ takes a list of strings, one per line of the "
+                    "value, e.g. [\"first\", \"second\"]")
+        return None
+    if kind == "REG_BINARY":
+        if not isinstance(data, (bytes, bytearray)):
+            return ("REG_BINARY takes bytes, not text. It is the only type here "
+                    "whose data is not human-readable, which is also why it is "
+                    "the one to be most careful with")
+        return None
+    if kind in ("REG_DWORD", "REG_QWORD"):
+        number = data
+        if isinstance(data, str):
+            # A model writing a DWORD as "42" in JSON is writing the right
+            # thing in the wrong type, and `registry_write` converts it. The
+            # refusal and the conversion have to agree, or the conversion is
+            # unreachable code and the refusal is a wall - which is what they
+            # were: the refusal rejected every string, so the branch below it
+            # could never run.
+            try:
+                number = int(data.strip(), 0)
+            except ValueError:
+                return (f"{kind} takes a whole number. Use 42, or the string "
+                        f'"42" - not 4.2, and not "forty two"')
+        elif isinstance(data, bool) or not isinstance(data, int):
+            return (f"{kind} takes a whole number. Use 42, or the string "
+                    f'"42" - not 4.2 and not true')
+        if kind == "REG_DWORD" and not -(2 ** 31) <= number < 2 ** 32:
+            return f"REG_DWORD holds 32 bits; {data} does not fit"
+        if kind == "REG_QWORD" and not -(2 ** 63) <= number < 2 ** 64:
+            return f"REG_QWORD holds 64 bits; {data} does not fit"
+        return None
+    if not isinstance(data, str):
+        return (f"{kind} takes text. A number is accepted and converted, "
+                f"because a model writing a DWORD as 42 in JSON is writing "
+                f"the right thing in the wrong type - but nothing else is "
+                f"converted")
+    return None
+
+
+def _registry_split(key: str) -> tuple[Any, str]:
+    hive, _, rest = key.partition("\\")
+    return REG_HIVES[hive.upper()], rest
+
+
+def registry_read(key: str) -> dict[str, Any]:
+    """Every value under one key, with its type, as Windows holds it.
+
+    Reads through `winreg` rather than parsing `reg query`: the query output is
+    a fixed-column table that spaces names to align them, so a value named
+    "x" and one named "x    " are the same line. The structured read is also
+    what the preview needs - it wants to show what is there *now*, before the
+    write, not a summary.
+    """
+    refusal = registry_key_refusal(key)
+    if refusal:
+        return {"key": key, "exists": False, "values": {}, "error": refusal,
+                "measured": True}
+    hive, rest = _registry_split(key)
+    try:
+        handle = winreg.OpenKey(hive, rest)
+    except FileNotFoundError:
+        return {"key": key, "exists": False, "values": {}, "measured": True,
+                "note": "the key does not exist yet; writing it will create it"}
+    except PermissionError:
+        return {"key": key, "exists": False, "values": {},
+                "error": "access denied reading this key. On Windows this is "
+                         "usually HKLM, which needs an elevated daemon",
+                "measured": True}
+    except OSError as exc:
+        return {"key": key, "exists": False, "values": {},
+                "error": str(exc), "measured": True}
+    reverse = {v: k for k, v in REG_VALUE_TYPES.items()}
+    values: dict[str, dict[str, Any]] = {}
+    with handle:
+        try:
+            count = winreg.QueryInfoKey(handle)[1]
+        except OSError as exc:
+            return {"key": key, "exists": False, "values": {},
+                    "error": str(exc), "measured": True}
+        for i in range(count):
+            try:
+                name, value, kind = winreg.EnumValue(handle, i)
+            except OSError:
+                continue
+            if isinstance(value, bytes):
+                shown: Any = value.hex()
+            elif isinstance(value, (list, tuple)):
+                shown = list(value)
+            else:
+                shown = value
+            values[name or "(Default)"] = {
+                "type": reverse.get(kind, f"0x{kind:08x}"), "data": shown}
+    return {"key": key, "exists": True, "values": values, "measured": True}
+
+
+def registry_write(key: str, name: str, kind: str,
+                   data: Any = None, *, delete: bool = False) -> dict[str, Any]:
+    """Set or remove one value under one key. Refuses; never raises on refusal.
+
+    All four refusals (key shape, value name, value type, data shape) run
+    before anything is opened, so a rejected write cannot have half happened.
+
+    `delete` removes the value, not the key. Deleting a key is not offered:
+    `reg delete /f` on a key with subkeys takes them too, and there is no undo
+    for that beyond a file backup the caller may not have made.
+    """
+    refusal = (registry_key_refusal(key) or registry_value_refusal(name)
+               or (None if kind in REG_VALUE_TYPES else
+                   f"type {kind!r} is not one of "
+                   f"{', '.join(REG_VALUE_TYPES)}")
+               or (None if delete else registry_data_refusal(kind, data)))
+    if refusal:
+        return {"ok": False, "error": refusal, "measured": True}
+    hive, rest = _registry_split(key)
+    coerced: Any = data
+    if kind in ("REG_DWORD", "REG_QWORD") and isinstance(data, str):
+        try:
+            coerced = int(data.strip(), 0)
+        except ValueError:
+            return {"ok": False,
+                    "error": f"{kind} takes a whole number; {data!r} is not one",
+                    "measured": True}
+    elif kind in ("REG_SZ", "REG_EXPAND_SZ") and not isinstance(data, str):
+        coerced = str(data)
+    elif kind == "REG_MULTI_SZ":
+        coerced = list(data)
+    try:
+        with winreg.CreateKeyEx(hive, rest, 0, winreg.KEY_SET_VALUE) as handle:
+            if delete:
+                try:
+                    winreg.DeleteValue(handle, name)
+                except FileNotFoundError:
+                    return {"ok": False,
+                            "error": f"there is no value named {name!r} under "
+                                     f"{key}, so there was nothing to remove",
+                            "measured": True}
+            else:
+                winreg.SetValueEx(handle, name, 0, REG_VALUE_TYPES[kind], coerced)
+    except PermissionError:
+        return {"ok": False,
+                "error": "access denied. On Windows this is usually HKLM, "
+                         "which needs an elevated daemon - this one is not",
+                "measured": True}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc), "measured": True}
+    return {"ok": True, "key": key, "name": name,
+            "removed": bool(delete),
+            "type": None if delete else kind, "measured": True}
+
+
+# --- package managers -------------------------------------------------------
+
+#: Preference order for `package.install`, resolved by what is actually here.
+#: winget first because it is the one Windows ships and the one that knows
+#: about Store and MSIX packages a package manager cannot; choco second; scoop
+#: last because it is per-user and its own package ids are the least portable.
+PACKAGE_MANAGERS: tuple[str, ...] = ("winget", "choco", "scoop")
+
+_MANAGER_ARGV: dict[str, list[str]] = {
+    "winget": ["install", "--exact", "--accept-package-agreements",
+               "--accept-source-agreements", "--disable-interactivity"],
+    "choco": ["install", "-y", "--no-progress"],
+    "scoop": ["install"],
+}
+_MANAGER_QUERY: dict[str, list[str]] = {
+    "winget": ["list", "--exact", "--accept-source-agreements"],
+    "choco": ["list", "--exact", "--limit-output"],
+    "scoop": ["list"],
+}
+
+
+def _winget_path() -> Path | None:
+    """Where winget lives when PATH does not know.
+
+    Measured, not assumed: on this machine `shutil.which("winget")` is None
+    while the binary answers `--version` with `v1.29.380`. winget is a Store
+    app whose launcher is a per-user alias directory, and that directory is not
+    on a PATH inherited from a service. The notepad++ slice already paid for
+    the difference between "not on PATH" and "not installed".
+    """
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    candidate = Path(local) / "Microsoft" / "WindowsApps" / "winget.exe"
+    return candidate if candidate.exists() else None
+
+
+def manager_exe(name: str) -> str | None:
+    """The absolute path of a package manager, or None if it is not installed."""
+    if name == "winget":
+        return str(_winget_path()) if _winget_path() else None
+    return shutil.which(name)
+
+
+def package_managers() -> dict[str, Any]:
+    """Which package managers exist here, and at what version.
+
+    Reports the resolved path rather than the name alone, because "winget" in a
+    preview means nothing to someone who has just learned that this machine has
+    two of them and only one is on PATH.
+    """
+    found: list[dict[str, Any]] = []
+    for name in PACKAGE_MANAGERS:
+        exe = manager_exe(name)
+        if not exe:
+            continue
+        row: dict[str, Any] = {"name": name, "exe": exe, "on_path": bool(
+            shutil.which(name))}
+        try:
+            probe = run_capture([exe, "--version"], timeout=60.0)
+            row["version"] = (probe.get("stdout") or "").strip()[:40]
+            row["usable"] = probe.get("exit_code") == 0
+        except Exception as exc:                   # noqa: BLE001 - a read
+            row["error"] = str(exc)
+            row["usable"] = False
+        found.append(row)
+    return {"count": len(found), "managers": found,
+            "note": "" if found else
+            "no package manager was found on this machine, so "
+            "package.install cannot install anything",
+            "measured": True}
+
+
+def manager_install_argv(name: str, package: str,
+                         version: str = "") -> list[str]:
+    """The exact argv `package.install` would run, for the preview to show.
+
+    Built in one place so the preview and the executor cannot disagree about
+    what was blessed - a preview that shows one command and an executor that
+    runs another is D32 with the confirmation attached to the wrong payload.
+    """
+    exe = manager_exe(name)
+    if not exe:
+        raise FileNotFoundError(name)
+    argv = [exe] + _MANAGER_ARGV[name] + [package]
+    if version:
+        argv += ["--version", version] if name == "winget" else \
+                ["--version=" + version]
+    return argv
+
+
+def manager_uninstall_argv(name: str, package: str) -> list[str]:
+    """The exact argv `package.uninstall` would run, for the preview to show."""
+    exe = manager_exe(name)
+    if not exe:
+        raise FileNotFoundError(name)
+    if name == "winget":
+        return [exe, "uninstall", "--exact", "--disable-interactivity", package]
+    return [exe, "uninstall", "-y", package]
+
+
+#: A package id as a manager spells one. `+` is there because Notepad++ is the
+#: one package on this machine whose id is not all lowercase letters, and a
+#: grammar that refuses it would refuse the most obvious request on the desk.
+_PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\- ]{0,127}$")
+PACKAGE_NAME_OK = _PACKAGE_ID
+
+
+def package_installed_version(manager: str, package: str) -> str:
+    """The version a manager reports for a package, or "" if it will not say.
+
+    A separate call from `package_owned_by` rather than a return value of it,
+    because the two answer different questions and the second one is allowed to
+    come back empty: a manager can claim a package and decline to name its
+    version, and an uninstall that guessed the version would put back
+    something that is not what came out.
+    """
+    exe = manager_exe(manager)
+    if not exe:
+        return ""
+    try:
+        probe = run_capture([exe] + _MANAGER_QUERY[manager] + [package],
+                            timeout=120.0)
+    except Exception:                             # noqa: BLE001 - a read
+        return ""
+    if probe.get("exit_code") != 0:
+        return ""
+    for raw in (probe.get("stdout") or "").splitlines():
+        line = raw.strip()
+        if not line or line.lower().startswith("name "):
+            continue
+        if manager == "choco":
+            parts = line.split("|", 1)
+            if parts[0].strip().lower() == package.lower():
+                return parts[1].split()[0] if len(parts) > 1 and parts[1].strip() \
+                    else ""
+        elif manager == "winget":
+            fields = line.split()
+            if fields and fields[0].lower() == package.lower():
+                return fields[1] if len(fields) > 1 else ""
+        elif line.lower() == package.lower():
+            return ""
+    return ""
+
+
+def package_owned_by(manager: str, package: str) -> bool:
+    """Whether *this* manager says it installed the package.
+
+    Not by exit code. Measured on this machine: `choco list <name> --exact
+    --limit-output` exits 0 with empty stdout both for a package that is
+    installed and for one that is not, and `choco info` exits 0 with nothing at
+    all. An exit code cannot distinguish those two, so the *contents* of the
+    listing are the evidence, and the evidence is compared rather than the
+    return value - which is the D55 shape one level up.
+    """
+    exe = manager_exe(manager)
+    if not exe:
+        return False
+    try:
+        probe = run_capture([exe] + _MANAGER_QUERY[manager] + [package],
+                            timeout=120.0)
+    except Exception:                             # noqa: BLE001 - a read
+        return False
+    if probe.get("exit_code") != 0:
+        return False
+    text = (probe.get("stdout") or "")
+    # choco prints "name|version"; winget prints a table whose first column is
+    # the id. Matching on the id as a whole line, or as the text before the
+    # first pipe, keeps "note++" from matching "notepad++".
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.lower().startswith("name "):
+            continue
+        if manager == "choco":
+            if line.split("|", 1)[0].strip().lower() == package.lower():
+                return True
+        elif manager == "winget":
+            if line.split()[0].lower() == package.lower():
+                return True
+        elif line.lower() == package.lower():
+            return True
+    return False
+
+
+# --- services ---------------------------------------------------------------
+
+#: A service name as the SCM registers one. Backslash is allowed because
+#: services genuinely use it for their own grouping, and the dot because
+#: several are named `Foo.Bar`. Everything that could mean "a different
+#: service than the one you named" is refused: a space, a quote, a wildcard,
+#: or a path separator that is not a backslash.
+_SERVICE_NAME = re.compile(r"^[A-Za-z0-9_.\-\\]{1,64}$")
+SERVICE_NAME_OK = _SERVICE_NAME
+
+#: Services this tool will not stop, with the reason attached. Not a blocklist
+#: of "dangerous" names - two categories that are unsafe specifically because
+#: the undo does not restore anything:
+#:
+#: * **boot-critical** - stopping these puts the machine into a state it wants
+#:   to reboot out of, so the undo ("start it") is not available, because the
+#:   machine is already on its way down;
+#: * **security** - stopping these does not break anything visibly, it just
+#:   stops protecting, and the user finds out later from something else.
+SERVICE_NO_STOP: dict[str, str] = {
+    "RpcSs": "RPC - boot-critical; stopping it makes Windows reboot",
+    "DcomLaunch": "DCOM launcher - boot-critical, same",
+    "RpcEptMapper": "RPC endpoint mapper - boot-critical, same",
+    "LSM": "Local session manager - the console session itself",
+    "Power": "the power service; the machine's shutdown depends on it",
+    "PlugPlay": "plug and play; boot-critical on this class of machine",
+    "BFE": "Base Filtering Engine - Windows Firewall depends on it, and a "
+           "machine with no firewall does not know it has no firewall",
+    "MpsSvc": "Windows Defender's firewall service - same",
+    "WinDefend": "Microsoft Defender antivirus",
+    "WdNisSvc": "Defender network inspection",
+    "CryptSvc": "Cryptographic Services - signature checking, TLS, and the "
+                "thing that decrypts the disk",
+    "EventLog": "the event log - stopping it erases the record of what "
+                "happened before the failure",
+    "Schedule": "the Task Scheduler - other services depend on it being up",
+    "Winmgmt": "WMI - a large part of the machine's own diagnostics go quiet",
+    "Dhcp": "DHCP client - stopping it drops the network lease",
+    "Dnscache": "DNS client - name resolution stops working",
+    "Audiodg": "Windows Audio Device Graph - the sound stack",
+    "Themes": "the theme service",
+    "ProfSvc": "user profile service",
+    "NlaSvc": "network location awareness - reported separately so it is a "
+              "deliberate choice rather than a discovery",
+}
+
+
+def service_state(name: str) -> dict[str, Any]:
+    """One service's current state, by name.
+
+    A thin, honest wrapper over `service_status`, which already answers "no
+    such service" with a note rather than an exception - `sc` exits 1060 for
+    that, and 1060 is the answer to the question that was asked.
+    """
+    found = service_status(name)
+    rows = found.get("services") or []
+    if not rows:
+        return {"service": name, "exists": False, "measured": True,
+                "note": found.get("note", f"no service matched {name!r}")}
+    row = rows[0]
+    return {"service": row.get("name", name), "exists": True,
+            "state": row.get("state"), "state_name": row.get("state_name"),
+            "running": row.get("state") == "4", "measured": True,
+            "display_name": row.get("display_name", "")}
+
+
+# --- power ------------------------------------------------------------------
+
+#: The shortest delay this tool will schedule. Below it, `shutdown /s /t 0`
+#: takes effect before the confirmation dialog has finished being read, which
+#: means the confirmation is theatre: the thing the user blessed had already
+#: happened by the time they blessed it.
+POWER_MIN_DELAY_S = 30
+POWER_MAX_DELAY_S = 3600
+POWER_DEFAULT_DELAY_S = 60
+
+#: What cancels a scheduled shutdown, in the exact words a human can type.
+#: Printed in every preview and every result, because the delay is only a
+#: kindness if the way to use it is written down.
+POWER_CANCEL_HINT = r'stop it yourself with:  shutdown /a'
+
+#: The flags for each power action. The program name is *not* here - see
+#: `power_argv`, which is the only place an argv is built, because the flags
+#: without the program are not a command.
+_POWER_FLAGS: dict[str, list[str]] = {
+    "shutdown": ["/s", "/t"],
+    "restart": ["/r", "/t"],
+    "logoff": ["/l"],
+    "cancel": ["/a"],
+}
+
+#: The program itself, resolved once at import rather than at each call. This
+#: is a Windows system binary; if it is not there the machine is in a state
+#: where nothing this module does will work anyway.
+POWER_EXE = str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                / "System32" / "shutdown.exe")
+
+
+def power_argv(action: str, delay_s: int | None = None) -> list[str]:
+    """The exact argv for a power action - program first, then the flags.
+
+    The program name was missing from this for one stretch, so every call
+    returned a bare `['/r', '/t', '120']` and `run_capture` raised
+    `FileNotFoundError` trying to execute `/r` as a program. It is the kind of
+    bug that only appears when something actually runs the list, which is why
+    the test asserts on the argv handed to the runner rather than on the
+    command string shown in the preview.
+
+    `cancel` is deliberately not given a delay: `/t` means nothing to `/a`, and
+    passing it anyway would suggest the cancel is itself a scheduled thing.
+    """
+    if action not in _POWER_FLAGS:
+        raise ValueError(action)
+    flags = list(_POWER_FLAGS[action])
+    if action in ("shutdown", "restart"):
+        flags.append(str(delay_s if delay_s is not None
+                         else POWER_DEFAULT_DELAY_S))
+    return [POWER_EXE] + flags

@@ -455,13 +455,15 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** — the brain writes code when asked; `delegate.*` worker dispatch is the unwired part.
 5. **Pedagogy** — `teach.*`, six T0 tools, entirely unbuilt.
 
-Current state: **630 tests pass, 3 skipped, 47 subtests. Phases 0–5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 16 file/system executors and the whole tool registry are done.
+Current state: **842 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 35 tool executors including the whole of administration, and the whole tool registry are done.
 
-**The real gap is breadth, not depth.** Measured by `probe_surface.py`, not estimated:
+**The real gap is breadth, not depth.** Measured, not estimated:
 
 ```
-registered tools: 61        executors on the Daemon: 24        unimplemented: 37
+registered tools: 61        executors on the Daemon: 35        unimplemented: 26
 ```
+
+**Capability item 3, administration, is complete.** What is left is none of it:
 
 | group | missing | what it would buy |
 |---|---|---|
@@ -469,19 +471,16 @@ registered tools: 61        executors on the Daemon: 24        unimplemented: 37
 | `email` | 6 | IMAP, the one transport besides Telegram in scope |
 | `teach` | 6 | **pedagogy, item 5, nothing built** |
 | `reflect` | 4 | Phase 6 self-improvement |
-| `telegram` | 3 | bridge exists in `telegram.py`; no daemon executors |
-| `file` | 2 | `write_notes`, `empty_recycle_bin` |
-| `app` | 2 | `launch`, `close` |
-| `package` | 2 | `install`, `uninstall` |
-| `shell` | 1 | `shell.run` |
-| `registry` / `service` / `power` | 1 each | T3, and the highest-consequence three in the registry |
+| `file` | 2 | `write_notes` (T1), `empty_recycle_bin` (T3, destructive) |
+
+**Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60). The T3 set took the shape the D58 section above argues for — an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49): persistence registry keys, services whose stopping cannot be undone, and any shutdown delay under 30 seconds.
 
 **Next, in order:**
 
-1. **Administration, T2 first** — `app.launch`, `app.close`, `shell.run`. Tier 2, so each carries a payload-bound confirmation and a preview (D32). Starting at T2 rather than T3 because the T3 set (`registry.write`, `service.start_stop`, `power.shutdown`, `package.*`) is where a bug takes the machine with it, and it should be built on a base that is already proven rather than first.
-2. **`telegram.*` executors** — three tools, the bridge already written, `telegram.send` stays T3. Smallest real gap to a reachable assistant.
-3. **The T3 administration set** — `service.start_stop`, `package.install`/`uninstall`, `registry.write`, `power.shutdown`. Each one gets the same treatment: an explicit preview of the exact effect, a payload-bound confirmation, and a deny-path that does not depend on the model behaving.
-4. **`teach.*`** — item 5, six T0 tools.
+1. **`teach.*`** — item 5, six T0 tools, entirely unbuilt. The largest untouched capability item, and the one the user's ordering names last but not least.
+2. **`delegate.*`** — item 4's unwired half. The brain writes code; what it cannot yet do is hand a unit of work to a worker subprocess and review the result.
+3. **`file.write_notes`** and **`file.empty_recycle_bin`** — two small tools. `empty_recycle_bin` is T3 destructive and deserves the D60 undo journal treatment rather than a bare `Remove-Item`.
+4. **`email.*`** — six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0.
 5. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
 
 ### The machine can now be read (D40–D44)

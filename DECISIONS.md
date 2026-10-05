@@ -1705,3 +1705,139 @@ And the guard that could not have caught it: my first regression test grepped
 the docstring explaining the defect *names* the method it removed. **A grep over
 source cannot tell a sentence about a name from a call to it.** Replaced with an
 assertion on method names, which is the thing that is actually reachable.
+---
+
+## D60 - Tier 3 is called irreversible; the implementation makes it reversible-with-effort
+
+The five Tier 3 administration tools are done: `registry.write`,
+`service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown`.
+The tier name says `IRREVERSIBLE`. The claim being made here is that the tier
+name is wrong about what these do, and that the correct word is
+*reversible-with-effort* - you cannot press one button to undo them, but nothing
+they do is gone.
+
+The mechanism is one thing: **every action appends a row to
+`state/admin_undo.jsonl` before it changes anything**, recording the exact
+inverse. Registry writes export the key to a `.reg` file first, so the undo is
+`reg import`. A stopped service records that it was RUNNING, so the undo is
+`sc start`. An uninstalled package records the version, so the undo is
+`install --version <recorded>`. Every preview shows the undo; every result
+carries it; and the row is written whether the action succeeded or failed, so
+the journal cannot be empty exactly when it is needed.
+
+Three properties of that design were arrived at rather than found:
+
+* **A row is written before, and closed after, rather than rewritten once.**
+  Appending twice beats rewriting: a half-written journal is still a journal,
+  and a rewritten one that fails mid-rewrite is not.
+* **The journal is text.** Its whole job is to be readable by a human, with a
+  text editor, after something has broken. A database that will not open is a
+  poor place to keep the record of whatever made it not open.
+* **A recorded command carries its argv, not only a command string.** A string
+  that has to be re-parsed to be run is a command that can be run differently
+  than it was recorded, and the one thing an undo must not be is approximate.
+  (`shlex.split` on Windows keeps the quotes, which is how the first version of
+  this test failed.)
+
+### What was refused, and why the refusal is in the grammar
+
+**Persistence keys.** `CurrentVersion\Run`, `RunOnce`, `RunServices`, `Winlogon
+\Shell`, `Winlogon\Userinit`, `Winlogon\Notify`, `AppInit_DLLs` and `Image File
+Execution Options` are refused, along with everything beneath them. The rule is
+not "these are dangerous settings" - it is that **an undo journal can undo a
+`Run` write and still have failed**. It knows the previous value; it does not
+know what the new value launched, which by then has run at least once. That is
+the one change whose record and whose consequence diverge, which is why it is
+D49's shape: a rule the model cannot express is not a rule, so the grammar
+enforces it and the preview names it.
+
+**Services that cannot be undone.** `RpcSs`, `DcomLaunch`, `BFE`, `WinDefend`,
+`EventLog`, `Dhcp` and the rest of `SERVICE_NO_STOP` are refused *for stopping
+and restarting only* - starting them is allowed, because a tool that cannot undo
+its own refusal is a tool that has made the situation worse by making it
+permanent. The reason given is never "dangerous": it is that stopping them
+either reboots the machine (so "start it" is unavailable from inside the machine
+that is going down) or silently stops protecting something (so the user finds
+out later, from something else).
+
+**A shutdown you cannot cancel.** The minimum delay is 30 seconds, refused
+under with the workable version spelled out, because `shutdown /s /t 0` acts
+before the confirmation dialog has finished being read - which would make the
+confirmation theatre. Every preview and every result names `shutdown /a`, since
+the delay is only a kindness if the way to use it is written down. And
+`cancel` with nothing pending reports `ok: False` with exit 1116 plainly:
+reporting success for a machine that was never going to shut down is a lie with
+a cheerful shape.
+
+### The measurements that shaped the parsers
+
+* **`choco list <missing> --exact --limit-output` exits 0 with empty output.**
+  So does `choco info` on the same package. **An exit code cannot distinguish
+  "installed" from "not installed"**, which is D55 one level up: the tool's own
+  answer to "is it installed" is the only evidence. Both are asserted.
+* **`choco list --output-format json` returns empty with exit 0.** choco 2.x
+  does not accept it the way the docs imply. A parser written from the
+  documented JSON would have read an empty machine and reported zero packages
+  installed, with a confident shape.
+* **winget is installed and not on PATH** - `...\AppData\Local\Microsoft\
+  WindowsApps\winget.exe`, v1.29.380, while `shutil.which("winget")` is `None`.
+  The notepad++ lesson again, and now the rule is written into the code: which
+  is a fact about PATH, not about the program. Both managers are reported with
+  their resolved path *and* whether PATH knows them, because "winget" in a
+  preview means nothing to someone who has just learned the machine has two.
+* **An installed program is not a manager-owned package.** Notepad++ is
+  installed here and `choco list notepad++ --exact` is empty - but winget's
+  `list` includes programs registered in Add/Remove Programs, so winget *does*
+  claim it. The uninstall refusal says which of these it found, because
+  "uninstalling something this machine did not install is not a package
+  operation, it is a guess" is only half the sentence.
+* **`service_status` was labelling a field wrongly.** The STATE line reads
+  `STATE : 1  STOPPED`, so the second field is the state *name*, not a win32
+  exit code - which has its own line. Every consumer was being handed the word
+  "STOPPED" under the name `win32_exit_code`. It survives any test that only
+  checks the value is truthy, which is the whole of what was checking it.
+
+### Five defects the tests caught, three of which would have shipped broken
+
+1. **`power_argv` returned `['/r', '/t', '120']` with no program name.** Every
+   `power.shutdown` would have raised `FileNotFoundError` trying to execute
+   `/r`. Only a test that checks the argv *handed to the runner* could find it;
+   the command string in the preview looked perfect.
+2. **`daemon.py` used `re` without importing it.** Nine tests failed with
+   `NameError`. The preview's backup-path builder was the caller.
+3. **`registry_data_refusal` rejected the numeric strings `registry_write` was
+   built to convert.** The refusal and the conversion disagreed, so the
+   conversion was unreachable and every DWORD written as `"42"` was refused
+   after the docstring promised otherwise.
+4. **`int(1.5)` is 1**, so a fractional delay was reported as "too short to
+   cancel" - sending the user to look at the delay's *size* rather than its
+   *type*. Two mistakes, two fixes, and the wrong one reported first.
+5. **Two `DeprecationWarning`s from non-raw docstrings** containing `\c` and
+   `` \` `` in the administration section. Cosmetically free, and the second
+   one is a backtick in a docstring - which is the exact hazard the project's
+   own tooling rules exist to avoid.
+
+### One test that was wrong about the user's machine
+
+`test_uninstalling_what_no_manager_claims_is_refused` originally asserted that
+nothing would claim Notepad++ here. It failed, and the reason was interesting
+rather than annoying: winget's `list` reports programs registered in Add/Remove
+Programs, not only the ones winget installed, so winget does claim it and the
+tool would genuinely have uninstalled it. The test was asserting a fact about
+the user's software inventory. Both halves are now stubbed, with a docstring
+saying why - a test that lets the real managers answer is a test of what
+happens to be installed.
+
+A second test failure had the same root and a sharper edge: three package tests
+stubbed `manager_exe` but not `run_capture`, so discovery really tried to
+execute the fake `"winget.exe"`, caught `FileNotFoundError`, marked all three
+managers unusable - and the preview correctly, silently, showed no command at
+all. **A stubbed program name with a real process runner behind it is a test
+that measures the stub.** Pair them.
+
+### Where the gap is now
+
+61 registered, 35 executors, 12 previews, **26 unimplemented**, and none of
+them administrative: `delegate` 8, `email` 6, `teach` 6, `reflect` 4,
+`file.write_notes` and `file.empty_recycle_bin`. Administration - capability
+item 3 - is complete.

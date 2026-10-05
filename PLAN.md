@@ -447,31 +447,42 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 
 ## Immediate next action
 
-**Phase 1 — the model bake-off**, but the *first* thing to do is finish Phase 2's zero-dependency
-surface, because it needs no model and can be finished in a sitting: the Obsidian bridge and the
-daemon wiring that ties the policy gate, the arbiter, the audit log and the manifest store together.
-Then download candidate 1 (`HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive` Q8_0, 4.17 GB) and
-measure it on a quiet machine.
+**Capability priority order, as the user set it — this governs which gap gets built next:**
 
-Current state: **Phase 0 passed. Phase 1 candidate 1 (fast tier) passed. Phase 2 complete and the
-vertical slice closed** — 351 tests green. Tray, hotkey, presence, T3 confirmation, quarantine, the
-grammar-first brain as a disposable leased child process, and the tkinter overlay are all done. Still
-open: the **Telegram bridge**, and only 5 of ~58 registered tools have executors, so the *breadth* of
-the tool surface is deliberately still missing while the *depth* of the one real path is complete.
+1. **System knowledge** — done. Eight `system.*` T0 reads, measured end to end (below).
+2. **Tech support** — carried by the same reads plus `system.diagnose`; nothing further owed.
+3. **Administration** — **the next unimplemented slice.** The assistant must be able to *do*, not only report.
+4. **Coding** — the brain writes code when asked; `delegate.*` worker dispatch is the unwired part.
+5. **Pedagogy** — `teach.*`, six T0 tools, entirely unbuilt.
+
+Current state: **630 tests pass, 3 skipped, 47 subtests. Phases 0–5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 16 file/system executors and the whole tool registry are done.
+
+**The real gap is breadth, not depth.** Measured by `probe_surface.py`, not estimated:
+
+```
+registered tools: 61        executors on the Daemon: 24        unimplemented: 37
+```
+
+| group | missing | what it would buy |
+|---|---|---|
+| `delegate` | 8 | worker dispatch and review — coding item |
+| `email` | 6 | IMAP, the one transport besides Telegram in scope |
+| `teach` | 6 | **pedagogy, item 5, nothing built** |
+| `reflect` | 4 | Phase 6 self-improvement |
+| `telegram` | 3 | bridge exists in `telegram.py`; no daemon executors |
+| `file` | 2 | `write_notes`, `empty_recycle_bin` |
+| `app` | 2 | `launch`, `close` |
+| `package` | 2 | `install`, `uninstall` |
+| `shell` | 1 | `shell.run` |
+| `registry` / `service` / `power` | 1 each | T3, and the highest-consequence three in the registry |
 
 **Next, in order:**
 
-1. **Telegram bridge** — token already in `state/telegram.json`, allowlist `[199251286]`. Long-poll
-   only, no inbound port, `telegram.send` stays T3. This is the last piece of the "24/7, reachable by
-   voice / PC / Telegram" requirement.
-2. **The file tools beyond the five that exist** — copy, move, archive, edit,
-   search, bulk_rename. The `system.*` tools are done; the file surface is the
-   next thing the user will feel the absence of when the assistant is asked to
-   *do* something rather than *report*.
-3. **Candidates 2 and 3** — the 9B deep tier and the Gemma-4 E4B wildcard. The 9B must evict the fast
-   tier; the arbiter already implements that (D22).
-4. **Phase 5 voice** — `openWakeWord` / Silero for the offline wake word (D7), `faster-whisper` in CPU
-   RAM promoted to GPU only while listening (D18), Piper for output.
+1. **Administration, T2 first** — `app.launch`, `app.close`, `shell.run`. Tier 2, so each carries a payload-bound confirmation and a preview (D32). Starting at T2 rather than T3 because the T3 set (`registry.write`, `service.start_stop`, `power.shutdown`, `package.*`) is where a bug takes the machine with it, and it should be built on a base that is already proven rather than first.
+2. **`telegram.*` executors** — three tools, the bridge already written, `telegram.send` stays T3. Smallest real gap to a reachable assistant.
+3. **The T3 administration set** — `service.start_stop`, `package.install`/`uninstall`, `registry.write`, `power.shutdown`. Each one gets the same treatment: an explicit preview of the exact effect, a payload-bound confirmation, and a deny-path that does not depend on the model behaving.
+4. **`teach.*`** — item 5, six T0 tools.
+5. **`reflect.*`** — Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
 
 ### The machine can now be read (D40–D44)
 

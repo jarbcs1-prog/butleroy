@@ -749,7 +749,7 @@ class _Confirm:
 
         self.btn_once = tk.Button(
             buttons, text="Approve once", command=self._approve_once,
-            bg="#2b6cb0", fg="#ffffff", activebackground="#3182ce6",
+            bg="#2b6cb0", fg="#ffffff", activebackground="#3182ce",
             relief="flat", padx=10, pady=5)
         self.btn_once.pack(side="left")
 
@@ -896,6 +896,34 @@ class _Confirm:
             target=self._send, args=(scope,), daemon=True
         )
         self._sender.start()
+        self._release_widgets()
+
+    def _release_widgets(self) -> None:
+        """Drop the widget references, on the thread that created them.
+
+        D67 fixed this exact problem for the Overlay - `transcript`, `entry` and
+        `status` are widget objects, each holds `.tk`, and that is the Tcl
+        interpreter - and a settled `_Confirm` was left holding six of them:
+        `top`, `body`, `clock`, and three buttons. So a dialog that had been
+        answered kept the interpreter alive through attributes on an object the
+        caller may still be holding, and it was finally released at *process*
+        shutdown on the main thread:
+
+            Tcl_AsyncDelete: async handler deleted by the wrong thread
+
+        On Windows that raises a debug break, so the daemon exited -2147483645
+        instead of 0 after a perfectly clean shutdown - which a scheduled task
+        reads as failure. Measured three ways: clearing these references on the
+        Tk thread gives exit 0; holding one past shutdown gives -2147483645;
+        clearing it *before* the caller drops its reference does not.
+
+        That last measurement is why this is a method rather than a line in
+        `_settle`: the order matters, and only the Tk thread can do it. Called
+        after the sender is started, because `_send` reads `self.item` and not the
+        widgets, so the answer path is unaffected by releasing them here.
+        """
+        for name in ("top", "body", "clock", "btn_once", "btn_class", "btn_deny"):
+            setattr(self, name, None)
 
     def _send(self, scope: str) -> None:
         """Ask the daemon, off the Tk thread.

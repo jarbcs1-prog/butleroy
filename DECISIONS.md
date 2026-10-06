@@ -2899,3 +2899,152 @@ silently refuses every later question. No exception, no log line.
   *sequence*.
 
 Suite after: **1090 passed, 3 skipped, 47 subtests** (1080 before, +10 new).
+
+## D69 - The T3 confirmation dialog could not be built, and 24 tests said it was fine
+
+The chain D68 left open was: drive a destructive turn from the window and watch
+propose -> confirm -> dialog -> approve -> run. It fails on the third step, and the
+cause is a colour.
+
+    tk.Button(buttons, ..., activebackground="#3182ce6", ...)
+    _tkinter.TclError: invalid color name "#3182ce6"
+
+Seven hex digits. `#3182ce` is a colour; `#3182ce6` is not, and Tk says so by
+raising. **`_Confirm.__init__` raised while constructing the dialog, so every T3
+confirmation in the product died on that line.**
+
+### Why it is invisible from a unit test
+
+`test_overlay.py`'s `NoButton` ignored every colour it was handed:
+
+```python
+class NoButton:
+    def __init__(self, *a, **kw):
+        self.text = kw.get("text", "")
+        self.command = kw.get("command")
+```
+
+So all 24 tests on the confirmation rules passed against a dialog that cannot be
+constructed at all — the payload-hash binding, the expiry-denies behaviour, the
+absence of an "always allow" button, all of it asserting on objects the fakes
+invented rather than on a widget Tk had ever agreed to create.
+
+This is D67's lesson, applied one level too high. D67 recorded that "fakes must
+fail on behaviour, not on method coverage", and the fix then made `NoRoot` run a
+real event loop. It did not ask whether the *widgets* were real. They were not,
+and the part that was not real happened to be the only part Tk validates.
+
+The general shape, now seen four times: **the fake agreed with the code about
+everything the fake did not check.** `NoButton` recorded `text` and `command` and
+ignored `bg`, `fg`, `activebackground`, `relief` and `padx` — so it agreed with
+`#3182ce6` because it had no opinion about colours.
+
+### And it failed *silently*, which is the part that matters
+
+`_poll` calls `_present` from an `after` callback. A Tk exception in a callback is
+printed to stderr and swallowed — the event loop keeps running. So on a real
+desktop:
+
+- the dialog never appeared,
+- the poll kept firing every second and kept failing every second,
+- the pending confirmation stayed pending forever,
+- and the user was left holding an action they could not approve *or* refuse.
+
+That is D67 defect 2's exact failure mode — "a destructive action queued from
+Telegram would silently never raise a dialog" — reached again by a different
+route, in the same method, two decisions later. The poll that D67 fixed the
+arming of was firing perfectly; what it found could not be displayed.
+
+### The second defect, in the same three lines
+
+With the colour fixed the dialog built, appeared and worked. The probe then exited
+**-2147483645** after a clean shutdown, which is D67's exit-code bug:
+
+    Tcl_AsyncDelete: async handler deleted by the wrong thread
+
+D67 diagnosed this precisely for the Overlay: `transcript`, `entry` and `status` are
+widget objects, each holds `.tk`, and that is the Tcl interpreter, so they are
+cleared in `_tk_main`'s `finally` **on the thread that created them**. The same
+class of attribute was left in `_Confirm`: `top`, `body`, `clock`, `btn_once`,
+`btn_class`, `btn_deny` — six of them, and `_settle` destroyed the Toplevel
+without clearing any.
+
+So a *settled* dialog kept the interpreter alive through attributes on an object
+the caller may still be holding, and it was finally released at process shutdown on
+the main thread. Measured three ways, which is what made the fix obvious:
+
+| variant | result |
+|---|---|
+| references cleared on the Tk thread | exit 0 |
+| dialog held past shutdown | **-2147483645** |
+| references cleared before the caller drops its ref | exit 0 |
+
+The third row is why `_release_widgets` is a method and not a line in `_settle`:
+**order matters**, and only the Tk thread can do it. It runs after `_sender` is
+started, because `_send` reads `self.item` and not the widgets, so the answer path
+is unaffected.
+
+Two wrong hypotheses first, as usual. `destroy()` on the Toplevel was already being
+called, so it is not a missing destroy. And holding the reference alone is not the
+cause — a settled dialog dropped by its owner exits 0 fine. It is specifically a
+*settled* dialog whose widget attributes survive.
+
+### The tests, and the one that is skipped when it matters
+
+`tests/test_overlay_real_dialog.py`, five tests, and the first one is the whole
+defect:
+
+```python
+def test_the_confirmation_dialog_can_actually_be_built(live_overlay):
+    dlg = live_overlay._present(dict(ITEM))
+    assert dlg is not None
+```
+
+There is nothing to assert *about* — the bug was not a wrong colour in a variable,
+it was a dialog that never existed. It fails by raising, which is the honest shape.
+The rest: the armed poll raises a pending confirmation with nobody calling
+`_poll` or `show`; `-topmost` survives (D67 took it off the prompt window to stop
+it covering the desktop, and it would have been easy to sweep it off the dialog in
+the same pass); the dialog is transient against the prompt window; and a settled
+dialog drops all six widget references.
+
+Two changes to existing files:
+
+- `test_overlay.py`'s `NoButton` now rejects a colour Tk would reject, with the
+  reasoning in place. Restoring the seven-digit colour fails 22 of its 24 tests.
+- `test_the_class_grant_is_the_number_the_user_chose` reads `btn_class.text`
+  **before** settling, because `_settle` now clears that attribute. Asserting on a
+  released object would fail with an `AttributeError` that says nothing about the
+  grant — the failure mode this project has now been bitten by three times.
+
+`test_overlay_real_dialog.py` skips without a display. On this machine it runs,
+which is the only place the claim is checked; that is stated in the module
+docstring rather than left for a reader to assume.
+
+### The chain, closed
+
+Re-run after both fixes, on the real model, through the real arbiter, gate and
+executor, against a real file in a real approved workspace:
+
+```
+STEP 1  model commits to file.delete          5.9s
+        | proposing file.delete (path='.../notes.txt')
+        | waiting for your approval as c000001
+STEP 2  gate: T3, "regardless of channel", preview action=quarantine count=1
+        -> the id in the window matches the pending item: OK
+STEP 3  dialog up with nobody driving it      topmost=1  transient=True
+        | Action: move to quarantine (recoverable, not erased)
+        | The model asked for: .../notes.txt
+        | Targets: 1, 34 bytes
+STEP 4  approve via the real button            "approved file.delete (once)"
+        still pending after approval: 0
+STEP 5  notes.txt still exists: False         workspace count: 0
+```
+
+`notes.txt` was 34 bytes of real content in a real directory the gate had approved,
+and it is gone because the user-equivalent clicked the button. The script's exit
+code is 0, which it was not before either fix.
+
+Suite after: **1095 passed, 3 skipped, 47 subtests** (1090 before, +5). Both
+defects were found by driving the chain, and neither was in the set of things the
+handoff expected to be wrong.

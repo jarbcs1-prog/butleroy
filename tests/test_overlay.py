@@ -156,11 +156,38 @@ class NoLabel:
 
 class NoButton:
     def __init__(self, *a, **kw):
+        # D69: a colour the fakes accepted and Tk rejected. `#3182ce6` is seven
+        # hex digits; Tk says `invalid color name` and the whole dialog dies
+        # constructing it - which means every T3 confirmation raised through the
+        # real window failed, silently, on a button's hover colour.
+        #
+        # The check lives here rather than in a dedicated test because this is
+        # the fake's blind spot: `NoButton` ignored every colour the overlay
+        # passed, so 24 tests on the confirmation rules passed against a dialog
+        # that cannot be built. A fake must fail on behaviour, not on method
+        # coverage (D67's lesson, one level down) - and "accepts a colour" is
+        # behaviour Tk has and this fake did not.
+        for key in ("bg", "fg", "activebackground", "activeforeground"):
+            value = kw.get(key)
+            if isinstance(value, str) and value.startswith("#"):
+                assert _valid_tk_colour(value), f"{key}={value!r}"
         self.text = kw.get("text", "")
         self.command = kw.get("command")
 
     def pack(self, *_a, **_kw):
         pass
+
+
+def _valid_tk_colour(value: str) -> bool:
+    """Would Tcl accept this as a colour?
+
+    `#rgb` and `#rrggbb` are the forms Tk guarantees; everything else has to be a
+    named colour or a `?format` spec. Seven digits is neither, and it is the
+    kind of typo that only shows up on a real display.
+    """
+    body = value[1:]
+    return len(body) in (3, 6, 9, 12) and all(c in "0123456789abcdefABCDEF"
+                                             for c in body)
 
 
 class NoText:
@@ -301,11 +328,16 @@ def test_approving_one_call_sends_scope_once_not_class(desk):
 def test_the_class_grant_is_the_number_the_user_chose(desk):
     ov, d, _t = desk
     dlg = ov._present(item())
+    # Read the label BEFORE settling: `_settle` now clears the widget references
+    # on the Tk thread (D69), so `btn_class` is None afterwards. Asserting on it
+    # after the fact would be testing a released object - and would have failed
+    # with an AttributeError that says nothing about the grant.
+    label = dlg.btn_class.text
     dlg._approve_class()
     dlg._sender.join()
     assert d.args_for("confirm_approve")["scope"] == "class"
     assert O.CLASS_GRANT_SECONDS == 600.0
-    assert "10 min" in dlg.btn_class.text, (
+    assert "10 min" in label, (
         "the button must say what it is about to grant"
     )
 

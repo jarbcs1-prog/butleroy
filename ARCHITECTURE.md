@@ -141,6 +141,12 @@ window proposed a tool and dropped it, which is the D36 failure mode one layer u
 - **Deny-path is absolute**: `C:\Windows`, `C:\Program Files`, the assistant's own `policy/` directory, `*/.git/*` internals and any path in a manifest marked `danger_level: critical` requires per-action confirmation regardless of tier.
 - **Unattended cap**: no interactive session → only T0/T1 execute. T2/T3 queue.
 - **Channel rule**: Telegram may request but never authorize T3.
+- **A confirmation is raised by a poll, not a callback**, and it is presented from a
+  Tk `after` job — where an exception is printed and swallowed (D69). So a dialog
+  that fails to build does not error, it just never appears, and the pending action
+  is left with neither approval nor refusal available. The poll is armed from the Tk
+  thread once the root exists, and anything presented from it must be constructible
+  on a real Tk; `tests/test_overlay_real_dialog.py` exists for exactly that reason.
 
 ### Workspace manifest
 

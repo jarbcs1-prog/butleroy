@@ -877,6 +877,238 @@ class WorkspacesSection(Section):
             self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
 
 
+class AuthoritySection(Section):
+    """What the assistant is allowed to do, and what it is waiting on you for.
+
+    The section that makes the safety model *visible* rather than only enforced. Until
+    now the tiers, the session ceiling and the attended flag existed entirely inside
+    the daemon: the user could be refused at T3 and have no way to see why, or to see
+    what the ceiling even was.
+
+    **It cannot approve anything, and that is deliberate.** Confirmations are answered
+    in the chat window and only there - `tray.py` says so about its own window, and the
+    same argument applies here: two windows able to answer the same dialog means one
+    of them is the one the user was not looking at. This section *lists* what is
+    pending and says where to answer it.
+
+    **It can narrow, not widen.** `session_set_attended` is the one op that may change
+    the attended flag and it may only ever narrow - asking for attended=True from a
+    non-present channel is refused by the daemon, not by this window. Dropping to
+    unattended is always allowed, because that is the safe direction.
+    """
+
+    #: The ladder, spelled out for a person. Kept here rather than derived from the
+    #: enum because the point of showing it is the *examples*, and those are a
+    #: judgement about this product rather than a property of the numbers.
+    TIERS = (
+        ("T0", "read", "list, read, search, look at the machine", "verdigris"),
+        ("T1", "reversible write", "drafts, scratch files, edits under git", "sage"),
+        ("T2", "consequential", "move, archive, bulk rename, commit, build", "amber"),
+        ("T3", "irreversible", "delete, send, install, admin change", "rust"),
+    )
+
+    def __init__(self) -> None:
+        super().__init__("authority", "Authority", "shield")
+        self.named = ("listbox", "detail", "status", "pending", "check",
+                      "headline", "attended_button")
+        self.listbox: Any = None
+        self.detail: Any = None
+        self.status: Any = None
+        self.pending: Any = None
+        self.check: Any = None
+        self.headline: Any = None
+        self.attended_button: Any = None
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        self.headline = tk.Label(body, text="", fg=c["bone"], bg=c["slate"],
+                                 anchor="w", font=("Segoe UI", 11, "bold"))
+        self.headline.pack(fill="x", padx=16, pady=(14, 2))
+        self.widgets.append(self.headline)
+
+        note = tk.Label(
+            body,
+            text="Every action is placed on this ladder before it runs, and the "
+                 "highest tier you are attending for is the session ceiling. Nothing "
+                 "the assistant decides can raise either one.",
+            fg=c["sage"], bg=c["slate"], wraplength=660, justify="left",
+            font=("Segoe UI", 9),
+        )
+        note.pack(fill="x", padx=16, pady=(0, 10))
+        self.widgets.append(note)
+
+        ladder = tk.Frame(body, bg=c["slate"])
+        ladder.pack(fill="x", padx=16)
+        self.widgets.append(ladder)
+        for name, label, examples, colour in self.TIERS:
+            row = tk.Frame(ladder, bg=c["slate"])
+            row.pack(fill="x", pady=1)
+            self.widgets.append(row)
+            badge = tk.Label(row, text=f" {name} ", fg=c["obsidian"], bg=c[colour],
+                             font=("Segoe UI", 9, "bold"))
+            badge.pack(side="left")
+            self.widgets.append(badge)
+            tk.Label(row, text=f"  {label}", fg=c["bone"], bg=c["slate"],
+                     font=("Segoe UI", 9), width=18, anchor="w").pack(side="left")
+            self.widgets.append(row.winfo_children()[-1])
+            tk.Label(row, text=examples, fg=c["sage"], bg=c["slate"],
+                     font=("Segoe UI", 9), anchor="w").pack(side="left")
+            self.widgets.append(row.winfo_children()[-1])
+
+        tk.Label(body, text="Waiting on you", fg=c["brass"], bg=c["slate"],
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(
+            fill="x", padx=16, pady=(14, 2))
+        self.widgets.append(body.winfo_children()[-1])
+
+        self.pending = tk.Label(body, text="", fg=c["sage"], bg=c["slate"],
+                                anchor="w", justify="left", wraplength=660,
+                                font=("Segoe UI", 9))
+        self.pending.pack(fill="x", padx=16)
+        self.widgets.append(self.pending)
+
+        # The checker. A prediction, not an action - `tool_check`'s own docstring is
+        # emphatic about that, and so is the label.
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(14, 0))
+        self.widgets.append(row)
+        tk.Label(row, text="What would happen if…", fg=c["brass"], bg=c["slate"],
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.widgets.append(row.winfo_children()[-1])
+        self.check = tk.Entry(row, fg=c["bone"], bg=c["obsidian"],
+                              insertbackground=c["bone"], relief="flat",
+                              font=("Cascadia Code", 9))
+        self.check.pack(side="left", fill="x", expand=True, padx=10, ipady=4, ipadx=6)
+        self.widgets.append(self.check)
+        self.check.bind("<Return>", lambda _e: self._explain())
+
+        actions = tk.Frame(body, bg=c["slate"])
+        actions.pack(fill="x", padx=16, pady=(12, 14))
+        self.widgets.append(actions)
+
+        self.status = tk.Label(actions, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=440,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        self.attended_button = tk.Button(
+            actions, text="Step back (unattended)", command=self._step_back,
+            relief="flat", bd=0, bg=c["slate"], fg=c["brass"],
+            activebackground=c["slate-line"], activeforeground=c["brass-lit"],
+            font=("Segoe UI", 9), padx=10, pady=4, cursor="hand2")
+        self.attended_button.pack(side="right", padx=(6, 0))
+        self.widgets.append(self.attended_button)
+
+        reload_button = tk.Button(
+            actions, text="Reload", command=self._reload, relief="flat", bd=0,
+            bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
+            activeforeground=c["brass-lit"], font=("Segoe UI", 9),
+            padx=10, pady=4, cursor="hand2")
+        reload_button.pack(side="right", padx=(6, 0))
+        self.widgets.append(reload_button)
+
+        self._load(call)
+
+    def _load(self, call: Callable[..., dict]) -> None:
+        try:
+            res = call("status") or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+
+        s = res.get("result") or {}
+        attended = bool(s.get("attended"))
+        ceiling = s.get("session_ceiling", "?")
+        self.headline.configure(
+            text=f"{'Attended' if attended else 'Unattended'}   |   "
+                 f"ceiling {ceiling}",
+            fg=palette()["bone"],
+        )
+        self.attended_button.configure(
+            text="Step back (unattended)" if attended else "Already unattended")
+        self.attended_button.configure(
+            state="normal" if attended else "disabled")
+
+        pending = call("confirm_list") or {}
+        items = (pending.get("result") or {}).get("pending") or []
+        if items:
+            lines = [f"{len(items)} action(s) waiting for a decision:"]
+            for item in items:
+                lines.append(f"  {item.get('tool', '?')} - {item.get('reason', '')}")
+            lines.append("")
+            lines.append("Answer them in the prompt window. This window cannot: two "
+                         "windows able to answer the same dialog means one of them is "
+                         "the one you were not looking at.")
+            self.pending.configure(text="\n".join(lines), fg=palette()["amber"])
+        else:
+            self.pending.configure(text="Nothing is waiting on you.",
+                                   fg=palette()["sage"])
+
+        self._say(f"{s.get('tools_registered', '?')} tools registered, "
+                  f"{s.get('audit_records', '?')} audit records.", "sage")
+
+    def _step_back(self) -> None:
+        """Drop to unattended.
+
+        The only direction this window offers, and the only direction the daemon
+        accepts without a present channel. Going the other way is the presence
+        detector's job: a button that claimed the user was present would be a button
+        that lies about the one fact the whole tier model rests on.
+        """
+        try:
+            res = self._call("session_set_attended", attended=False,
+                             why="stepped back from the settings window") or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        self._load(self._call)
+        self._say("Unattended. T2 and T3 now queue until you are back at the "
+                  "keyboard.", "amber")
+
+    def _explain(self) -> None:
+        """Ask what a tool call would do. Never executes it.
+
+        `tool_check` predicts; it does not act. The label above the box says so, and
+        the reply says so in its own words, because a window that looked like it ran
+        things would be a window people were afraid to type into.
+        """
+        wanted = (self.check.get() or "").strip()
+        if not wanted:
+            self._say("Type a tool name, such as file.delete.", "amber")
+            return
+        try:
+            res = self._call("tool_check", tool=wanted, args={}) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        r = res.get("result") or {}
+        self._say(f"{wanted}: {r.get('would')} at {r.get('tier')} - "
+                  f"{r.get('reason')}", "sage")
+
+    def _reload(self) -> None:
+        self._load(self._call)
+
+    def _say(self, message: str, tone: str) -> None:
+        if self.status is not None:
+            self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
+
+
 class Settings:
     """The window. One Tk thread, one queue, built like `overlay.Overlay`.
 
@@ -1168,11 +1400,12 @@ class Settings:
         # Sections are listed in this order rather than discovered, because a
         # settings window whose navigation depends on a registry lookup is a window
         # that can come up empty with nothing wrong anywhere.
-        self._order = ["models", "voices", "workspaces"]
+        self._order = ["models", "voices", "workspaces", "authority"]
         self._sections = {
             "models": ModelsSection(),
             "voices": VoicesSection(),
             "workspaces": WorkspacesSection(),
+            "authority": AuthoritySection(),
         }
 
         for key in self._order:

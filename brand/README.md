@@ -207,14 +207,15 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **20 of the daemon's 44 ops have a way in; 24 do not.**
+Measured, not remembered: **21 of the daemon's 44 ops have a way in; 23 do not.**
 Reached by `overlay.py` (6), `tray.py` (5, four of which were broken until D77) and
-`settings.py` (11), counting the op names that actually appear as string literals in
+`settings.py` (15), counting the op names that actually appear as string literals in
 those files - and, since D77, asserting that every one of them exists.
 
-The figure was 21 in the first version of this paragraph. It was written from the
-change I had just made rather than from the measurement, which is the same mistake in
-miniature that this whole section is about.
+The figure was 21 in the first version of this paragraph, then 20 after a
+correction, and is 21 again now that Authority exists. Each time it was written from
+the change just made rather than from the measurement - which is the same mistake in
+miniature that this whole section is about, so it is left visible rather than tidied.
 
 | Section | State |
 |---|---|
@@ -222,7 +223,7 @@ miniature that this whole section is about.
 | Voices | **built** (D76) - installed/known, default, whisper model, download, import, remove |
 | Speech | **not built** - push-to-talk, mute, wake word |
 | Workspaces | **built** (D77) - approve/revoke folders, danger level, allowed tiers |
-| Authority | **not built** - tiers, confirmations, session ceiling |
+| Authority | **built** (D78) - the tier ladder, ceiling, attended state, pending list, and a what-would-happen checker |
 | Advanced | **not built** - paths, state dir, hotkey, logs, transcripts |
 
 #### The 27 ops with no way in, grouped
@@ -233,11 +234,12 @@ miniature that this whole section is about.
 | `vault_*` (6) | `append`, `index`, `read_journal`, `role_templates`, `status`, `write_note` | the Obsidian bridge |
 | `brain_*` (5) | `describe`, `load`, `status`, `stream`, `unload` | which model is loaded, force load/unload, free VRAM now |
 | `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | what holds VRAM and for how long. `summary` is reached from the tray |
-| `audit_*` (2) | `note`, `tail` | write a note into the chain; read it back |
+| `audit_tail` (1) | | read the chain back; `audit_verify` is reached from the tray |
+| `audit_note` (1) | | write a note into the chain - a decision that was not a tool call |
 | `mail_status` (1) | | is IMAP configured and reachable |
 | `voice_watch` (1) | | start/stop wake-word listening |
 | `reflect_overlay` (1) | | what the assistant has taught itself, and whether it was promoted |
-| `tool_check` (1) | | "what would happen if I ran this" - a prediction, not an action |
+| `tool_check` | reached, in Authority | "what would happen if I ran this" - a prediction, not an action |
 | `ping` (1) | | liveness |
 
 #### Asked for, and does not exist in the code at all

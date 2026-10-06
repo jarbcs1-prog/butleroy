@@ -644,3 +644,223 @@ def test_the_workspace_pickers_are_released(win) -> None:
     assert section.holds_widgets() == [], (
         f"the section still holds {section.holds_widgets()} after disposal"
     )
+
+# --------------------------------------------------------------------------- #
+# the authority section
+# --------------------------------------------------------------------------- #
+
+
+class FakeAuthorityDaemon(FakeDaemon):
+    """A daemon that answers `status`, `confirm_list`, `tool_check`, set_attended."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attended = True
+        self.ceiling = "T3"
+        self.waiting: list[dict] = []
+        self.checked: list[str] = []
+
+    def __call__(self, op: str, /, **args) -> dict:
+        self.calls.append((op, dict(args)))
+        if op == "status":
+            return {"ok": True, "result": {
+                "attended": self.attended, "session_ceiling": self.ceiling,
+                "tools_registered": 61, "audit_records": 7}}
+        if op == "confirm_list":
+            return {"ok": True, "result": {"pending": list(self.waiting)}}
+        if op == "tool_check":
+            self.checked.append(args.get("tool", ""))
+            return {"ok": True, "result": {
+                "tool": args.get("tool"), "would": "confirm", "tier": "T3",
+                "reason": "file.delete is T3 (destructive)",
+                "executable": True}}
+        if op == "session_set_attended":
+            self.attended = bool(args.get("attended"))
+            return {"ok": True, "result": {"attended": self.attended}}
+        return super().__call__(op, **args)
+
+
+@requires_display
+def test_authority_shows_the_ceiling_and_the_attended_state(win) -> None:
+    """The facts the user could not previously see anywhere.
+
+    Until this section the tiers and the attended flag existed only inside the
+    daemon: someone could be refused at T3 with no way to see why, or what the
+    ceiling even was.
+    """
+    w = win(FakeAuthorityDaemon())
+    w._select("authority")
+
+    headline = w._sections["authority"].headline.cget("text")
+    assert "Attended" in headline, headline
+    assert "T3" in headline, headline
+
+
+@requires_display
+def test_authority_spells_out_every_tier_with_examples(win) -> None:
+    """The ladder is shown as *examples*, not as numbers.
+
+    "T2" means nothing to someone who has not read DECISIONS.md. "move, archive,
+    bulk rename, commit, build" does.
+    """
+    w = win(FakeAuthorityDaemon())
+    w._select("authority")
+
+    section = w._sections["authority"]
+
+    def texts(widget) -> list[str]:
+        """Every label under `widget`, recursively.
+
+        Recursive because the ladder is nested two frames deep - a row per tier,
+        inside a ladder frame. The first version of this test looked one level down,
+        found nothing, and failed for a reason that had nothing to do with the
+        rendering.
+        """
+        out: list[str] = []
+        try:
+            value = widget.cget("text")
+        except Exception:  # noqa: BLE001 - not every widget has text
+            value = ""
+        if value:
+            out.append(str(value))
+        for child in widget.winfo_children():
+            out.extend(texts(child))
+        return out
+
+    rendered = " ".join(texts(w._root))
+    for name, _label, examples, _colour in S.AuthoritySection.TIERS:
+        assert name in rendered, f"{name} is not shown"
+        assert examples.split(",")[0] in rendered, (
+            f"{name}'s examples are not shown; the ladder is numbers without them"
+        )
+
+
+@requires_display
+def test_authority_lists_pending_actions_and_says_where_to_answer(win) -> None:
+    """It lists them; it does not answer them.
+
+    Two windows able to answer the same dialog means one of them is the one the user
+    was not looking at. The section has to say where the answer goes, or a user
+    staring at a pending T3 with no button will reasonably conclude it is stuck.
+    """
+    daemon = FakeAuthorityDaemon()
+    daemon.waiting = [{"id": "c1", "tool": "file.delete",
+                       "reason": "T3 destructive", "payload_hash": "a" * 64}]
+
+    w = win(daemon)
+    w._select("authority")
+
+    text = w._sections["authority"].pending.cget("text")
+    assert "file.delete" in text, text
+    assert "prompt window" in text, (
+        f"the user is not told where to answer it: {text!r}"
+    )
+
+
+@requires_display
+def test_authority_says_plainly_when_nothing_is_waiting(win) -> None:
+    w = win(FakeAuthorityDaemon())
+    w._select("authority")
+    assert "Nothing is waiting" in w._sections["authority"].pending.cget("text")
+
+
+@requires_display
+def test_stepping_back_goes_unattended_and_says_what_that_costs(win) -> None:
+    """The consequence, not the state change.
+
+    "Unattended" alone is a flag. What the user needs is that T2 and T3 now queue
+    until they are back - because that is the thing that will surprise them.
+    """
+    daemon = FakeAuthorityDaemon()
+    w = win(daemon)
+    w._select("authority")
+    section = w._sections["authority"]
+
+    section._step_back()
+
+    assert daemon.attended is False, "the daemon was not told"
+    status = section.status.cget("text")
+    assert "queue" in status, f"the consequence is not stated: {status!r}"
+    assert "Unattended" in section.headline.cget("text")
+
+
+@requires_display
+def test_authority_offers_no_way_to_claim_presence(win) -> None:
+    """The button narrows and never widens.
+
+    Going the other way is the presence detector's job. A button that claimed the
+    user was present would be a button that lies about the one fact the whole tier
+    model rests on - and the daemon refuses it anyway, which is why the window must
+    not offer it.
+    """
+    daemon = FakeAuthorityDaemon()
+    daemon.attended = False
+    w = win(daemon)
+    w._select("authority")
+
+    section = w._sections["authority"]
+    assert section.attended_button.cget("state") == "disabled", (
+        "the button is enabled while already unattended, so it can only be there "
+        "to go the other way"
+    )
+    assert "unattended" in section.attended_button.cget("text").lower()
+
+    # And nothing in the section offers to attend.
+    for op, args in daemon.calls:
+        if op == "session_set_attended":
+            assert args.get("attended") is not True, (
+                "the window asked to become attended"
+            )
+
+
+@requires_display
+def test_the_checker_predicts_and_never_executes(win) -> None:
+    """`tool_check` is a prediction. Nothing may be run from this box.
+
+    Asserted on the ops the window actually called: a `tool_call` here would be the
+    settings window becoming a second execution path, which is D59's defect.
+    """
+    daemon = FakeAuthorityDaemon()
+    w = win(daemon)
+    w._select("authority")
+    section = w._sections["authority"]
+
+    section.check.insert(0, "file.delete")
+    section._explain()
+
+    assert daemon.checked == ["file.delete"], "tool_check was not asked"
+    assert "confirm" in section.status.cget("text")
+    assert "T3" in section.status.cget("text")
+    ops = [op for op, _ in daemon.calls]
+    assert "tool_call" not in ops, (
+        "the settings window called tool_call; it must never be a second way to "
+        "run something (D59)"
+    )
+
+
+@requires_display
+def test_the_checker_says_something_for_an_empty_box(win) -> None:
+    w = win(FakeAuthorityDaemon())
+    w._select("authority")
+    section = w._sections["authority"]
+
+    section._explain()
+
+    assert "tool name" in section.status.cget("text"), (
+        "an empty box produced no guidance"
+    )
+
+
+@requires_display
+def test_the_authority_widgets_are_released(win) -> None:
+    """Including the headline and the button, which are widgets like any other."""
+    w = win()
+    w._select("authority")
+    section = w._sections["authority"]
+    assert section.holds_widgets()
+
+    w.destroy()
+
+    assert section.holds_widgets() == [], (
+        f"the section still holds {section.holds_widgets()} after disposal"
+    )

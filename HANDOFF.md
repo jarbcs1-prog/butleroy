@@ -64,15 +64,15 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1343 passed, 27 skipped, 47 subtests   (~2m44s, no PYTHONPATH needed)
-             24 of the 27 skips are tests/test_settings_real.py, which is run
+tests        1343 passed, 36 skipped, 47 subtests   (~2m50s, no PYTHONPATH needed)
+             33 of the 36 skips are tests/test_settings_real.py, which is run
              by tests/test_settings_isolated.py in a subprocess (see structural
              claim 6 in §5). They are NOT unrun - 19 of them pass in the child.
              The other 3 are the speech slow tests: BUTLEROY_SLOW_TESTS=1.
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D77, contiguous, none missing - and now *tested*
+decisions    D1..D78, contiguous, none missing - and now *tested*
              (tests/test_decisions_log.py), because a hand-kept
              figure was wrong: D74 was cited by a source file and
              did not exist
@@ -83,10 +83,10 @@ name         package/script/pipes/env = butleroy (D73). The DIRECTORY is still
              G:\localaized and must stay - it is a path, not a name, and
              policy.SELF_PATHS protects this checkout by that literal string
 GUI          a separate settings WINDOW (D75), reached from the tray as
-             "Settings...". THREE sections: Models (D74/D75), Voices
-             (D76) and Workspaces (D77). Remaining: speech, authority,
-             advanced - see the inventory in brand/README.md, which is
-             measured (20 of 44 ops reachable) rather than estimated.
+             "Settings...". FOUR sections: Models (D74/D75), Voices
+             (D76), Workspaces (D77), Authority (D78). Remaining:
+             speech and advanced - see the inventory in brand/README.md,
+             which is measured (21 of 44 ops reachable), not estimated.
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed

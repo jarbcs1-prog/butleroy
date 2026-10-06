@@ -3935,3 +3935,56 @@ Suite after D77: **1343 passed, 27 skipped, 47 subtests**, exit 0 (1335 before).
 more: five for the workspaces section, four for the op-name check (one of which is the
 guard on the guard), and two tray tests whose assertions had been pinning the broken
 names.
+
+---
+
+## D78 - Authority, and a screen that can only ever narrow
+
+The fourth section: the tier ladder, the session ceiling, the attended state, what is
+waiting on the user, and a "what would happen if" checker.
+
+The reason it exists is that the whole tier model was **invisible**. Tiers, the
+ceiling and the attended flag lived entirely inside the daemon: a user could be
+refused at T3 and have no way to see why, or to see what the ceiling even was. D13's
+authority model is only worth anything if the person it protects can see it.
+
+### Two things the section deliberately cannot do
+
+**It cannot approve a confirmation.** `confirm_list` is read to *show* what is
+pending, and the section then says where to answer it - the prompt window. Two windows
+able to answer the same dialog means one of them is the one the user was not looking
+at, which is the same argument `tray.py` makes about its own window.
+
+**It cannot claim presence.** The one button narrows: "Step back (unattended)". Going
+the other way is the presence detector's job, and a button that asserted the user was
+present would be a button that lies about the one fact the entire tier model rests on.
+The daemon refuses it anyway - `session_set_attended` may only narrow - so a button
+offering it would be a button that always fails. The test asserts the button is
+disabled when already unattended, which is the shape that makes the claim checkable:
+an enabled button in that state can only exist to go the other way.
+
+**It cannot execute.** The checker calls `tool_check`, which predicts. A `tool_call`
+from this window would make it a second way to run something, which is D59's defect -
+and the test asserts `tool_call` never appears among the ops the section called.
+
+### The ladder is shown as examples, not as numbers
+
+"T2" means nothing to someone who has not read this file. "move, archive, bulk rename,
+commit, build" does. So the four tiers are rendered with their examples, and the test
+asserts the examples are on screen - because a ladder of bare tier names would pass a
+test that only looked for "T0" through "T3".
+
+### The coverage figure, corrected twice and left visible
+
+The count of "ops with no UI" has been written into `brand/README.md` three times:
+21, then 20, now 21 again. Every time it was written from the change just made rather
+than from the measurement. It is left visible in the document rather than tidied,
+because the whole section is about exactly that failure - a number that is a claim
+about a moment, with nothing to tell you when the moment passed.
+
+Reachable now: **21 of 44**. `settings.py` reaches 15, `overlay.py` 6, `tray.py` 5.
+
+Suite after: **1343 passed, 36 skipped, 47 subtests**, exit 0. Nine new tests in the
+window body (33 there now), one of which was wrong on the first attempt: it walked the
+widget tree one level deep to find the tier examples, found nothing, and failed for a
+reason that had nothing to do with the rendering. Made recursive.

@@ -19,7 +19,7 @@ This is encoded as an invariant, not a preference: **the assistant never takes r
 
 ## Hardware (verified 2026-09-30)
 
-RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 3.11.9 · CUDA 13.3 · `opencode` v2.0.19 · Obsidian at `E:\Obsidian_Vault`
+RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 3.11.9 · CUDA 13.3 · `opencode` v2.0.23 · Obsidian at `E:\Obsidian_Vault`
 
 ## What it will and will not do
 

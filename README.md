@@ -62,7 +62,7 @@ verify_install.py              # prove the install actually works
 | Install | `uv pip install -e .` in 2.9 s; `verify_install.py` exits 0 |
 | Restart | The daemon survives restarts (D64) |
 | Launch | One command starts tray + chord + prompt window (D65, D67) |
-| Tools | 61 registered, **51 with executors**, 10 to go |
+| Tools | 61 registered, **57 with executors**, 4 to go (`reflect.*`) |
 | Phases | 0–5 closed. Phase 6 (`reflect.*`) not started |
 
 **Blocking defects found and fixed** — every one of them passed the suite as it
@@ -84,6 +84,13 @@ stood, which is 1,090 tests for the last one:
   traceback and carries on. A pending destructive action could be neither approved
   nor refused. 24 tests on the confirmation rules passed against it, because their
   fake button ignored every colour it was given.
+- **D70** — `email.*`, six tools over stdlib IMAP, **no new dependency**. The
+  credential is configuration and never a tool argument, because an argument reaches
+  the append-only audit chain; the mailbox argument is `mailbox`, not `folder`,
+  because the path screen refuses every real mailbox name under the other spelling;
+  and `email.delete` files a message locally before expunging it, so it can be
+  recovered. A real IMAP server on a real socket then found four bugs no fake could
+  — including that **the client never authenticated at all**.
 
 **Proven end to end, across the whole authority range.** Type a question into the
 window and get an answer back — overlay → `brain_turn` → VRAM lease → the
@@ -93,7 +100,7 @@ the real figures. Asking it to delete a file in an approved workspace produces t
 confirmation dialog on its own, and approving it removes the file. Both measured on
 the 4B through the real arbiter and gate.
 
-**Outstanding:** `email.*` (6 tools, IMAP) and `reflect.*` (4 tools, Phase 6).
-Autostart is documented in `INSTALL.md` §9 but not registered. See
-`HANDOFF.md` for the current state of play and `PLAN.md` → "Immediate next
+**Outstanding:** `reflect.*` (4 tools, Phase 6). Autostart is documented in
+`INSTALL.md` §9 but not registered. Mail is built — `INSTALL.md` §11.
+See `HANDOFF.md` for the current state of play and `PLAN.md` → "Immediate next
 action".

@@ -5,7 +5,7 @@ end of the session that fixed D68.
 
 **If you are resuming from a prompt like** *"inspect `G:\localaized` to determine
 the current progress status, find out where it stopped and resume"* — read this
-whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D69.
+whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D70.
 Do not re-read the other 4,600 lines before starting work.
 
 ---
@@ -38,7 +38,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D68–D69 | the two defects that made a tool turn impossible, and a T3 dialog that could not be built at all |
+| `DECISIONS.md` §D70 | `email.*`, and the four bugs a real IMAP server found that no fake could |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
 | `AI_Assistant_Local.md` | the original brief. **Superseded** — provenance only |
@@ -48,11 +48,11 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1095 passed, 3 skipped, 47 subtests   (~2m34s, no PYTHONPATH needed)
+tests        1138 passed, 3 skipped, 47 subtests   (~2m34s, no PYTHONPATH needed)
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
-tools        61 registered · 51 with executors · 10 unimplemented
-             (6 email.*, 4 reflect.* — the only two groups left)
-decisions    D1..D69, contiguous, none missing
+tools        61 registered · 57 with executors · 4 unimplemented
+             (the 4 reflect.* — the only group left; email.* is built, D70)
+decisions    D1..D70, contiguous, none missing
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed
@@ -209,18 +209,29 @@ nothing checks `relief`, `padx`, `pady`, `wraplength`, `anchor`, `justify` or
 `insertbackground`, and `_Confirm` uses most of them. Expect the same class of
 finding, and treat "the fakes agree with the code" as the thing to distrust.
 
-Then, in order:
+**`email.*` is now built (D70), so both traps in the list below are spent and
+neither needs re-deriving.** What is left is `reflect.*`, and the GUI work the user
+has asked for — both out of scope for this session, deliberately.
 
-1. **`email.*`** — six tools, IMAP, the last transport in scope. Three T0 reads,
-   `draft` as REVERSIBLE_WRITE, `send` T3 external, `delete` T3 destructive.
-   Two traps: `email.delete` is currently the destructive tool two tests use as
-   their *example* of one, so building it makes that example vanish — repoint
-   those deliberately. And D63 applies: an argument name is part of the rule, so
-   check `folder` / `mailbox` against the path screen before shipping.
-2. **`reflect.*`** — four tools, Phase 6. Build it last and on purpose. It is the
+1. **`reflect.*`** — four tools, Phase 6. Build it last and on purpose. It is the
    only place the assistant reasons about improving itself, and D21 forbids it
    writing its own code or policy *permanently, at every phase*. That constraint
    belongs in the tests from the first line, not retrofitted.
+
+### The lesson from D70, which is the one to carry
+
+**Run the real thing as early as you can, not at the end.** `email.*` has a fake
+suite and a live-server suite, and the live server found four bugs the fake suite
+called green — including that the client **never authenticated at all**, and that
+`MailAuthError` was unreachable in production because `imaplib` raises a bare
+`IMAP4.error` where a fake returns a `(status, data)` pair. Every one of them lived
+*at or above the seam*, and every one of them was invisible from below it.
+
+The pattern, now seen five times: **the fake agrees with the code about everything it
+does not check.** In D68 that was colours on a button. In D70 it was everything above
+a socket — the login, the protocol, the literal framing. So when a module has a
+boundary a fake can stand in for, ask what the fake is standing in for, and then go
+find out whether the part it replaced ever worked.
 
 Deliberately **not** done, and why:
 
@@ -253,6 +264,17 @@ cannot find a defect living in the transition between two instances of it.* So:
   and every test that covered either op was green. `tests/test_overlay_turn.py` is
   the pattern — one overlay, one daemon-shaped `call`, both ops, and the
   conversation that comes out.
+- **A fake agrees with the code about everything it does not check.** D69 was this
+  costing a destructive path (`NoButton` ignored colours). D70 was this costing the
+  entire mail client: the fake's `connect` did its own LOGIN, so **production never
+  authenticated at all** and the suite was green. When a fake stands in for a
+  boundary, check whether the part it replaced ever worked. `tests/test_email_live.py`
+  is the pattern — a real IMAP server on a real socket, which found four bugs no fake
+  could.
+- **A default that is wrong for exactly the case you construct it for.** D63's shape,
+  twice more: `dict(messages or {...})` silently turns an empty mailbox into a full
+  one, because an empty dict is falsy. `is None` is the only check that means what it
+  looks like.
 - **Mutate your tests.** If a mutation of the code does not make the test fail,
   the test proves nothing. Twice last session a first mutation only moved a line
   and the test still passed. This session **two of ten new tests passed against
@@ -312,7 +334,7 @@ Local assistant 0.3.0 that is empty white") was the one that cracked it.
 
 **Decisions.** New findings go in `DECISIONS.md` as `## Dn - <title that states
 the finding, not the topic>`. Rationale and evidence, including the wrong
-hypotheses and what they cost. The numbering is load-bearing: all 69 are
+hypotheses and what they cost. The numbering is load-bearing: all 70 are
 contiguous. When a plan line turns out to be wrong on the record, correct the line
 and say so — do not quietly overwrite it.
 

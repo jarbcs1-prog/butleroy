@@ -494,7 +494,7 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
 5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **1095 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
+Current state: **1138 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 57 tool executors covering administration, delegation, teaching, the file tools and mail, and the whole tool registry are done.
 
 **The daemon could not restart until D64, and that outranks everything below.**
 `Daemon.__init__` minted a fresh authkey per construction while `store_authkey`
@@ -558,18 +558,28 @@ deliberately does not. Fixed by `_carry_through`, which does what `_voice_turn` 
 and reports all four of `tool_call`'s outcomes. Verified on the real model through the
 real arbiter, grammar, gate and executor — `vram_used_bytes: 6,390,022,144` on screen.
 
+**Mail is built, and the credential path is the design (D70).** Six `email.*` tools over
+stdlib `imaplib` — no new dependency, which is what keeps Plane A cheap (D66). The
+argument is `mailbox`, never `folder`, because the path screen contains "folder" and
+refuses every real IMAP mailbox name; measured, not assumed. No tool takes a credential
+as an argument, because a password that arrives as a tool argument is a password in the
+append-only audit chain. `email.delete` files the message locally *before* expunging, so
+"delete" means what it means in `file.delete`. And a real IMAP server on a real socket
+found four bugs no fake could: the client never authenticated, `imaplib` raises a bare
+`IMAP4.error` for a rejected LOGIN so `MailAuthError` never fired, `append()` rejects an
+unquoted date, and a `{n}` literal needs a `+ go ahead` continuation first.
+
 **The real gap is breadth, not depth.** Measured, not estimated:
 
 ```
-registered tools: 61        executors on the Daemon: 51        unimplemented: 10
+registered tools: 61        executors on the Daemon: 57        unimplemented: 4
 ```
 
-**Capability items 3, 4 and 5 are complete, and so is every `file.*` tool.** What is left is none of them:
+**Every capability item is complete, and so is every `file.*` and `email.*` tool.** What is left is none of them:
 
 | group | missing | what it would buy |
 |---|---|---|
-| `email` | 6 | IMAP, the one transport besides Telegram in scope |
-| `reflect` | 4 | Phase 6 self-improvement |
+| `reflect` | 4 | Phase 6 self-improvement — the only group left |
 
 **Done since this list was written:** `app.launch`, `app.close`, `shell.run` (T2, D58); `telegram.poll`, `telegram.send_draft`, `telegram.send` (D59); `registry.write`, `service.start_stop`, `package.install`, `package.uninstall`, `power.shutdown` (T3, D60); `delegate.plan`, `.brainstorm`, `.assign`, `.status`, `.intervene`, `.review`, `.accept`, `.audit` (D61); `teach.explain`, `.quiz`, `.recall`, `.summarise`, `.plan_curriculum`, `.progress` (D62); `file.write_notes`, `file.empty_recycle_bin` (D63). The T3 administration set took the shape the D58 section argues for - an explicit preview of the exact argv, a payload-bound confirmation, and a **refusal in the grammar rather than in a warning** (D49). The delegation slice took a third shape: a worker is tracked for its whole life, so it can be stopped along with its process tree, read back afterwards, and audited - and the two reads that would otherwise be a judgement call (`review`, `audit`) return **evidence** rather than an opinion, because judgement belongs to the brain turn and a free read must not cost VRAM. The teaching slice found five of its six tools mislabelled as free, and paid for it with a ~5 GiB model load on every "free" read (D62). The last two tools found that the **name of an argument is part of the rule** (`subdir` contains `dir`, so the gate refused it as a path), and that the recycle bin had to be *asked about* rather than read, because our own policy denies its directory (D63).
 
@@ -582,8 +592,17 @@ registered tools: 61        executors on the Daemon: 51        unimplemented: 10
    previous round's item 0 closed with D68. **The spine is now proven for both a T0
    read and a T3 destructive action, which is the whole authority range.** The
    remaining GUI risk is not the chain but the fakes - see D69's closing note.
-1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later. D63 applies: argument names are part of the rule, and an IMAP argument like `folder` or `mailbox` must be checked against the path screen before it ships.
-2. **`reflect.*`** - Phase 6, last, and deliberately. D21 forbids the assistant writing its own code or policy permanently, at every phase, so that constraint belongs in the tests from the first line rather than retrofitted.
+1. **Done (D70)** - `email.*`: six tools over stdlib `imaplib`, no new dependency. Three
+   T0 reads, `draft` as REVERSIBLE_WRITE, `send` T3 external, `delete` T3 destructive.
+   Both traps PLAN.md predicted fired and were handled deliberately: the `folder`
+   argument would have been refused by the path screen for every real mailbox name, and
+   `email.delete` was the last destructive T3 without an executor, so building it made
+   the example in `test_confirm.py` and `test_daemon.py` vanish. Both tests *looked the
+   example up in the registry*; a lookup is a coincidence that is true today, and
+   building the tool turned both into "the property is now vacuous" failures. They now
+   register a synthetic unrunnable tool, so they cover the property instead of the
+   registry.
+2. **`reflect.*`** - Phase 6, last, and deliberately. D21 forbids the assistant writing its own code or policy permanently, at every phase, so that constraint belongs in the tests from the first line rather than retrofitted. It is also the only remaining unimplemented group: 4 tools.
 
 **Also outstanding, and deliberately not done:**
 

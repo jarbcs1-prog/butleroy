@@ -238,7 +238,66 @@ Either way:
 - Telegram may **never authorise a T3 action** (D13). It is a notification
   channel; confirmation happens at the PC.
 
-## 11. Tests
+## 11. Mail (optional)
+
+The six `email.*` tools speak IMAP and SMTP over stdlib `imaplib`/`smtplib` — no
+extra package is installed and nothing in the resident process opens a connection
+until a mail tool is actually called. It is off unless configured.
+
+Put `state/email.json`:
+
+```json
+{
+  "email_host": "imap.example.com",
+  "email_username": "you@example.com",
+  "email_password": "your-app-specific-password"
+}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `email_host` | yes | IMAP server |
+| `email_username` | yes | the account |
+| `email_password` | yes, unless the variable below is set | credential |
+| `email_port` | no (993) | IMAP port |
+| `email_ssl` | no (`true`) | implicit TLS. `false` means STARTTLS, **not** plaintext — see below |
+| `email_mailbox` | no (`INBOX`) | the default folder |
+
+**Use an app-specific password.** Every mainstream provider asks for one and will
+refuse the account password over IMAP. It is also revocable on its own, which is
+the property worth having in a credential that a 24/7 process holds.
+
+**Prefer the environment variable,** as with Telegram:
+
+```powershell
+$env:LOCALAIZED_EMAIL_PASSWORD = "your-app-specific-password"
+python -m assistant
+```
+
+`LOCALAIZED_EMAIL_PASSWORD` takes precedence, so the credential need never be
+written down. The host, username and default folder always come from the file —
+those are configuration rather than secrets. `mail_status` reports which of the two
+is in use. A password set in the environment to the **empty string** falls back to
+the file, because a cleared variable is a recoverable misconfiguration and
+refusing it would break a machine that was working an hour ago.
+
+Worth knowing before you use it:
+
+- **The password is never a tool argument.** No `email.*` tool takes one, because
+  an argument reaches the append-only audit chain. It is read from configuration
+  and held in memory. `mail_status` and every `email.*` result omit it.
+- **`email.send` is T3 and external** — a real message leaves your machine and
+  cannot be recalled. Its confirmation shows the recipient and the whole body.
+- **`email.delete` is T3 destructive**, and it files the message in
+  `state/quarantine/mail-*` *before* expunging it, so it can be recovered from
+  this machine. It is still gone from the server: another mail client will no
+  longer see it.
+- **`email_ssl: false` is refused if STARTTLS fails.** The password is never sent
+  in the clear, even on a server that offers no way to avoid it.
+- **Rotate by revoking the app password at your provider.** As with Telegram there
+  is deliberately no command that writes a credential.
+
+## 12. Tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q

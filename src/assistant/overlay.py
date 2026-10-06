@@ -56,6 +56,8 @@ import tkinter as tk
 from tkinter import font as tkfont
 from typing import Any, Callable
 
+from . import ipc
+
 __all__ = ["Overlay", "OVERLAY_IDLE_TTL_S"]
 
 # How long a T3 dialog waits before denying. Long enough to read a list of
@@ -102,13 +104,124 @@ class Overlay:
         # (0, "model", text) - the daemon's envelope is unwrapped by the caller.
         self._events: queue.Queue = queue.Queue()
         self._busy = False
+        # --- the Tk thread, and the three things it owns ---------------------
+        # All three were previously created lazily inside `_build`, which meant
+        # they did not exist until a window had been built - and every method
+        # that touched one before then raised AttributeError. `_dlg` was read by
+        # `_poll` on its very first call, `_poll_job` by anything inspecting the
+        # schedule. Present from construction instead.
+        self._dlg: "_Confirm | None" = None
+        self._poll_job: str | None = None
+        self._tk: threading.Thread | None = None
+        self._root_ready = threading.Event()
 
     # --- lifecycle ---------------------------------------------------------
 
+    def _tk_main(self) -> None:
+        """The one thread permitted to touch Tk.
+
+        tkinter binds a root to the thread that created it: every later call from
+        any other thread is undefined, and `root.update()` from the wrong thread
+        raises `RuntimeError: main thread is not in main loop` - measured, not
+        remembered. So the thread that builds the root runs the event loop and
+        every widget call is funnelled here through the queue.
+
+        The event loop is the part that was missing entirely, and its absence is
+        why the window used to open blank. A `Tk()` that is never pumped still
+        maps a window with its title and geometry - `winfo_viewable` is 1 - and
+        paints nothing, because painting *is* event processing. It looks like a
+        working window to every check that is not a screenshot.
+        """
+        try:
+            root = self._build()
+            self._root = root
+            # Set before anything can wait on it, including the failure path
+            # below, so a dead Tk thread cannot leave a caller blocked forever.
+            self._root_ready.set()
+            # Two loops, both on this thread. `_pump` drains the cross-thread
+            # queue (brain output, show/hide requests); `_poll` raises pending T3
+            # confirmations. Both are `after` callbacks, so the event loop is what
+            # drives them and neither needs a thread of its own.
+            root.after(50, self._pump)
+            self._poll()
+            root.mainloop()
+        except BaseException as exc:  # noqa: BLE001 - report, never hang a waiter
+            ipc.note(f"overlay tk thread died: {type(exc).__name__}: {exc}")
+            self._root_ready.set()
+        finally:
+            # Release every Tk object *here*, on the thread that created them.
+            # `self.transcript`, `self.entry`, `self.status` and `_dlg` are widget
+            # objects and each holds `.tk` - the Tcl interpreter - which is why
+            # simply dropping `self._root` was not enough: the interpreter stayed
+            # alive, held by attributes that live on the Overlay, and was finally
+            # released at *process* shutdown, on the main thread. Tcl then deletes
+            # a per-thread async handler from the wrong thread and says so:
+            #   Tcl_AsyncDelete: async handler deleted by the wrong thread
+            # On Windows that raises a debug break, so the daemon exited
+            # -2147483645 instead of 0 after a perfectly clean shutdown - which a
+            # scheduled task or any supervising script reads as failure.
+            self._root = None
+            self.transcript = None      # type: ignore[assignment]
+            self.entry = None           # type: ignore[assignment]
+            self.status = None          # type: ignore[assignment]
+            self._dlg = None
+
+    def _ensure_tk(self) -> bool:
+        """Start the Tk thread if it is not already running. Returns readiness."""
+        thread = self._tk
+        if thread is not None and thread.is_alive() and self._root is not None:
+            return True
+        if self._closing:
+            return False
+        self._root_ready.clear()
+        self._tk = threading.Thread(target=self._tk_main, name="overlay-tk",
+                                   daemon=True)
+        self._tk.start()
+        # Bounded, because "wait forever" here means a dead Tk thread hangs the
+        # hotkey thread, which hangs the tray, which looks like a dead assistant.
+        return self._root_ready.wait(timeout=10.0)
+
+    def _invoke(self, fn: Any, *args: Any, timeout: float = 10.0) -> Any:
+        """Run `fn` on the Tk thread and wait for its result.
+
+        Re-entrant by necessity: `_ask` calls `self.show()` while already on the
+        Tk thread, and an unconditional post-and-wait there would wait for
+        itself forever. That is not hypothetical - it is the path taken every
+        time a prompt arrives from Telegram while the window is already open.
+        """
+        if threading.current_thread() is self._tk:
+            return fn(*args)
+        if self._tk is None or not self._tk.is_alive():
+            return None
+        slot: dict = {}
+        finished = threading.Event()
+
+        def runner() -> None:
+            try:
+                slot["value"] = fn(*args)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+                slot["error"] = exc
+            finally:
+                finished.set()
+
+        self._events.put(("call", runner))
+        if not finished.wait(timeout=timeout):
+            raise RuntimeError(
+                f"the overlay Tk thread did not run {fn!r} within {timeout}s"
+            )
+        if "error" in slot:
+            raise slot["error"]
+        return slot.get("value")
+
     def show(self) -> None:
         """Raise the window. Safe to call from any thread."""
+        if not self._ensure_tk():
+            return
+        self._invoke(self._show_now)
+
+    def _show_now(self) -> None:
         if self._root is None:
-            self._root = self._build()
+            return
         try:
             self._root.deiconify()
             self._root.lift()
@@ -119,39 +232,86 @@ class Overlay:
     def hide(self) -> None:
         if self._root is None:
             return
+        self._invoke(self._hide_now)
+
+    def _hide_now(self) -> None:
+        if self._root is None:
+            return
         try:
             self._root.withdraw()
         except tk.TclError:
             pass
 
     def destroy(self) -> None:
-        self._closing = True
+        """Stop the window and its thread.
+
+        Safe to call more than once, and safe on an overlay that was never shown.
+        The sentinel goes in *before* `_closing` is set, because the pump treats
+        `_closing` as "drop everything queued" - and the sentinel is the one thing
+        it must not drop.
+        """
+        thread = self._tk
+        if self._root is None and (thread is None or not thread.is_alive()):
+            self._closing = True
+            return
         self._events.put(None)
-        if self._root is not None:
-            try:
-                self._root.destroy()
-            except tk.TclError:
-                pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=10.0)
+        self._closing = True
+        self._tk = None
+        # `self._root` is cleared by the Tk thread on its way out, so the Tk object
+        # is finalised by the thread that created it. Only clear it here when no
+        # thread ever owned it - if the join timed out, the thread is still running
+        # and pretending otherwise would leave the window alive with nothing
+        # pointing at it.
+        if thread is None or not thread.is_alive():
             self._root = None
 
     def is_visible(self) -> bool:
         return self._root is not None and bool(self._root.state() != "withdrawn")
 
     def _pump(self) -> None:
-        """Drain events onto the tkinter thread.
+        """Drain queued events. Runs *on* the Tk thread, as an `after` callback.
 
-        tkinter is not thread-safe, so nothing here touches a widget directly;
-        everything arrives through the queue and is applied in `_poll`, which
-        runs on the Tk main loop.
+        tkinter is not thread-safe, so nothing here may touch a widget directly;
+        everything arrives through the queue and is applied here. It used to be a
+        thread of its own, which meant widget calls from a thread that did not own
+        the root - the other half of the blank-window defect, and the one that
+        would have surfaced as soon as the event loop was fixed.
+
+        Re-arms itself through `after` rather than looping and sleeping, so the
+        event loop stays the single scheduler and there is no timer to leak.
         """
-        while not self._closing:
-            try:
-                ev = self._events.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if ev is None:
-                return
-            self._handle_event(*ev)
+        if self._root is None:
+            return
+        try:
+            while True:
+                try:
+                    ev = self._events.get_nowait()
+                except queue.Empty:
+                    break
+                # The sentinel is handled *before* any _closing check. destroy()
+                # has to set _closing, and gating on it here meant the sentinel
+                # was never read: the pump returned at its guard, the root was
+                # never destroyed, mainloop() never returned, and destroy() sat
+                # in its join for the whole timeout on every single shutdown.
+                if ev is None:
+                    self._closing = True
+                    try:
+                        self._root.destroy()
+                    except tk.TclError:
+                        pass
+                    return
+                if self._closing:
+                    # Drop whatever else is queued; we are on the way out.
+                    continue
+                self._handle_event(*ev)
+        finally:
+            if not self._closing and self._root is not None:
+                try:
+                    self._root.after(50, self._pump)
+                except tk.TclError:
+                    pass
 
     def _post(self, *ev: Any) -> None:
         if not self._closing:
@@ -165,9 +325,12 @@ class Overlay:
         root.configure(bg=BG)
         root.geometry("760x520+80+80")
         root.minsize(560, 380)
-        # Always on top, because a confirmation that can be buried behind a
-        # browser is a confirmation the user never sees, and then never made.
-        root.attributes("-topmost", True)
+        # NOT always-on-top, unlike the T3 dialog below. This window is the
+        # conversation, and pinning it above everything means it covers the
+        # desktop for as long as it is open - which on a machine with your own
+        # work on the screen is an obstacle, not a feature. `show()` already
+        # raises it on demand with `lift()` and `focus_force()`, so summoned is
+        # foreground; left alone, it is out of the way.
 
         mono = tkfont.nametofont("TkFixedFont")
 
@@ -201,10 +364,13 @@ class Overlay:
         self.status = tk.Label(root, text="", fg=MUTED, bg=BG, anchor="w")
         self.status.pack(fill="x", padx=18, pady=(0, 10))
 
-        self._poll_job: str | None = None
-        self._poll()
-        self._thread = threading.Thread(target=self._pump, daemon=True)
-        self._thread.start()
+        # Deliberately does NOT start `_poll` or `_pump` here. Both need
+        # `self._root` to exist, and `self._root` is not assigned until `_build`
+        # returns - so calling them from in here ran them against `None`. `_poll`
+        # opens with `if self._closing or self._root is None: return`, so it
+        # returned at once and the one-second confirmation poll was never armed:
+        # a destructive action queued from Telegram would silently never raise a
+        # dialog. `_tk_main` starts them, on this thread, after the root is set.
         return root
 
     def _poll(self) -> None:
@@ -280,6 +446,10 @@ class Overlay:
                     pass
         elif kind == "prompt":
             self._ask(str(rest[0]))
+        elif kind == "call":
+            # A `_invoke` request: run it here, on the Tk thread, so the caller
+            # on another thread can wait for the result.
+            rest[0]()
 
     def _submit(self) -> None:
         prompt = self.entry.get().strip()

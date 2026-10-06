@@ -134,7 +134,7 @@ class Hotkey:
         self._seen = 0
         self._error: Exception | None = None
 
-    def trigger(self) -> bool:
+    def trigger(self, timeout: float = 2.0) -> bool:
         """Synthesise a press of this chord, as if the user had hit the key.
 
         This exists because it is the only *safe* way to test the pump, and because
@@ -148,6 +148,14 @@ class Hotkey:
         in the tray tests, and it is a race, not a flake in the test's logic. Going
         through the instance removes the guesswork: if the thread is gone, this
         returns False instead of misdelivering.
+
+        `timeout` is how long to wait for the pump to actually consume the message.
+        It is a parameter because the two callers want different things. The tray's
+        "Summon" item wants a short one - a menu that hangs for ten seconds is
+        worse than the fallback path it takes when this returns False, which is to
+        set the session attended directly. A test on a loaded machine wants a long
+        one, because what it is asserting is *delivery*, not latency, and a 2s
+        budget measured on an idle desktop is not a fact about delivery.
         """
         if self._thread is None or not self._thread.is_alive():
             return False
@@ -171,7 +179,7 @@ class Hotkey:
         # is not a claim the caller is entitled to make. The counter is
         # incremented on the pump thread inside the same branch that runs the
         # callback, so this cannot report success for a message that was dropped.
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._seen >= target + 1:
                 return True
@@ -535,6 +543,18 @@ class Tray:
         return self
 
     def stop(self) -> None:
+        # The prompt window goes first. `Overlay` owns a Tk thread and a Tcl
+        # interpreter, and nothing else in the process knows about either - so a
+        # tray that stops its icon and leaves the window standing leaves a live
+        # thread and a live interpreter behind, on every shutdown. With the daemon
+        # now restartable (D64) a restart is a routine event rather than a
+        # one-off, which turns that leak from rare to once a day.
+        if self._overlay is not None:
+            try:
+                self._overlay.destroy()
+            except Exception:  # noqa: BLE001 - a window that will not close is not
+                pass             # worth refusing to shut the rest down over
+            self._overlay = None
         if self.icon is not None:
             try:
                 self.icon.stop()

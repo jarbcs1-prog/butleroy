@@ -2574,3 +2574,131 @@ a credential is a feature that can leak one; rotation is @BotFather plus one edi
 Suite after: **1068 passed, 3 skipped, 47 subtests**, with no `PYTHONPATH` set.
 `uv pip install -e .` resolves 4 packages in 2.9 s, leaves the D25 build
 untouched, and produces a working `locala` command.
+
+---
+
+## D67 - The window was mapped, titled, and completely dead
+
+Reported by the user using it, which is the only way this was findable:
+
+```
+$ python -m assistant
+[daemon] listening on \\.\pipe\locala.brain.req
+[daemon] authkey  adopted from G:\localaized\state\authkey.bin
+[daemon] telegram  bridge configured, 1 allowed chat id(s)
+
+Ctrl+Alt+Space: nothing happens.
+Tray icon -> click: a window titled "Local assistant 0.3.0", entirely white.
+And it sat on top of everything, so it had to be closed to see the desktop.
+```
+
+D65 recorded this as the one gate "not closable by a test". It was closable. The
+gate was never closed because **the overlay's lifecycle had no tests at all** -
+24 tests covered what the T3 dialog *says*, and not one of them called `show()`,
+`hide()` or `destroy()`. The three methods a user touches first were the three that
+were broken, and they were the only ones that ever construct a real Tk root.
+
+### Four defects, all in the same three methods
+
+1. **No event loop, anywhere.** No `mainloop()`, no `update()`, no pump. This is
+   the white window, and it is worth stating precisely because every cheap check
+   passes: `winfo_exists` 1, `winfo_ismapped` 1, `winfo_viewable` 1,
+   `state()` `normal`, `title()` correct, `geometry()` honoured. A `Tk()` that is
+   never pumped maps a perfect window and paints nothing, because painting *is*
+   event processing. It looks like a working window to everything short of a
+   screenshot - which is why the unit tests passed and the user saw a
+   white rectangle.
+2. **`_build()` called `_poll()` while `self._root` was still `None`.** `_poll`
+   opens with `if self._closing or self._root is None: return`, so it returned
+   immediately and no `after()` job was ever registered. Instrumented and
+   measured: `_poll` was entered with `self._root = None`, and `_poll_job` was
+   `None` afterwards. So the **one-second poll that raises pending T3
+   confirmations had never once been armed** - a destructive action queued from
+   Telegram would silently never raise a dialog, and nothing would say so. That
+   is the worst shape a bug in this module can take: the safe path quietly stops
+   existing, and the user is left holding a pending deletion with no way to reach
+   it.
+3. **Tk was being touched from two threads.** The root was built on whichever
+   thread called `show()` - the hotkey thread - while `_pump` ran on its own
+   thread and reached `Text.insert` through `_handle_event`. tkinter binds a root
+   to its creating thread and says so: `RuntimeError: main thread is not in main
+   loop`, reproduced by calling `root.update()` from any other thread.
+4. **A leak, and a bad default.** `Tray.stop()` stopped the pystray icon and
+   nothing else, so **no code path anywhere called `overlay.destroy()`** - every
+   shutdown left a live Tk thread and a live Tcl interpreter. And the prompt
+   window was permanently `-topmost`, which is what the user had to close to see
+   their own desktop.
+
+### What the fix is
+
+One Tk thread, named `overlay-tk`, that builds the root, runs `mainloop()`, and
+is the only thread permitted to touch a widget. `_pump` stops being a thread and
+becomes an `after` callback; `_poll` is armed from `_tk_main` once `self._root`
+exists. `show`/`hide`/`destroy` marshal onto that thread through the queue that
+already existed, via `_invoke`, which is **re-entrant** because `_ask` calls
+`show()` from the Tk thread and an unconditional post-and-wait there would hang
+the assistant on every prompt that arrives from Telegram.
+
+The topmost flag came off the prompt window and stayed on the T3 dialog. That is
+not a compromise: a destructive approval that can be buried behind a browser is an
+approval nobody sees, which is the reason `overlay.py` gave for putting it there
+in the first place. The conversation window raises itself on demand anyway, so
+permanently pinning it bought nothing and cost the desktop.
+
+### Two bugs in the fix, caught before shipping
+
+Both were found by running the thing, which is the only reason they are cheap:
+
+- **`destroy()` ate its own sentinel.** It set `_closing = True` and then queued
+  `None`; `_pump` treated `_closing` as "drop everything queued", so the sentinel
+  was never read, the root was never destroyed, `mainloop()` never returned, and
+  every shutdown sat in the full 10-second join. The test file went from 80 s to
+  1.4 s when the sentinel was moved ahead of the `_closing` check.
+- **The exit code was -2147483645 after a perfectly clean shutdown.** The daemon
+  exited with a Windows debug break, which a scheduled task records as failure.
+  Cause: `Overlay` keeps `transcript`, `entry` and `status` as attributes, those
+  are widget objects, each holds `.tk`, and that is the Tcl interpreter. Dropping
+  `self._root` was not enough - the interpreter stayed alive on attributes that
+  belong to the Overlay, and was finally released at *process* shutdown on the
+  main thread, so Tcl deleted a per-thread async handler from the wrong thread.
+  They are now cleared in `_tk_main`'s `finally`, **on the thread that created
+  them**. Exit code 0, no warning. Two wrong hypotheses came first - `tkinter
+  ._default_root` (already `None`) and the widgets cleared on the *main* thread -
+  and both were cheap because they were measured rather than reasoned about.
+
+### The test that was hollow, and had to be rewritten
+
+The first version of `test_overlay_lifecycle.py` used a fake root that only
+*recorded* `after` callbacks and left draining them to the test. That would have
+passed against a Tk whose loop was never started, because **the test supplied the
+pumping that production does not** - it would have "fixed" a blank window by
+building a second blank window. The fake now runs a real loop (due jobs every
+5 ms until destroyed), which is what makes "a queued destructive action appears
+without anyone asking" an assertion about the code rather than about the test.
+
+Eleven tests. The two that matter most:
+
+| Assertion | What it would have caught |
+|---|---|
+| `after()` fires on a real Tk; text from another thread reaches a real widget | defects 1 and 3 |
+| `destroy()` returns in <3 s | the sentinel bug |
+| a T3 request surfaces with nobody calling `show()` or `_poll()` | defect 2 |
+| the T3 dialog is still `-topmost` | trading the safety property for comfort |
+
+Verified on the genuine Tk 8.6, through the real `App`, real `Tray` and the real
+chord: `chord delivered -> True`, `viewable -> True`, `poll armed -> True`,
+transcript rendering, `topmost -> 0`, `destroy() took 0.00 s`, **exit code 0**.
+
+### And a pre-existing flake, fixed while here
+
+`test_posting_a_hotkey_message_reaches_the_callback` failed once in a full-suite
+run and passed in isolation - the exact failure `tray.py`'s own docstring records
+from an earlier round. `Hotkey.trigger()` allowed the pump 2 s to consume the
+message, and on a loaded machine that is not always enough. Raising the product's
+budget would have been wrong: 2 s is a UX budget for the tray's menu item, and
+falling through to the direct path after 10 s of a frozen menu is worse than the
+fallback. So `trigger()` took a `timeout` parameter - production keeps 2.0, the
+tests pass 30.0. What the tests assert is *delivery*, not latency, and a 2 s
+budget measured on an idle desktop is not a fact about delivery.
+
+Suite after: **1080 passed, 3 skipped, 47 subtests**, twice in a row.

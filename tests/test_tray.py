@@ -125,11 +125,17 @@ def _post_hotkey(hk: Hotkey, times: int = 1) -> None:
     passed in isolation. The instance knows whether its own thread is still alive,
     and returns False instead of misdelivering.
 
+    The generous timeout is the other half of that. The default 2 s is a UX budget
+    for the tray's menu item, and it is right there - but these tests assert
+    *delivery*, not latency, and a full-suite run on a loaded machine once left a
+    pump thread un-scheduled for longer than 2 s. That is a fact about the machine,
+    not about the pump, and re-running to catch it is the wrong answer.
+
     The real registration path is covered by the tests above, which do call
     RegisterHotKey.
     """
     for _ in range(times):
-        assert hk.trigger(), "the pump thread is not accepting messages"
+        assert hk.trigger(timeout=30.0), "the pump thread is not accepting messages"
 
 
 def test_posting_a_hotkey_message_reaches_the_callback():

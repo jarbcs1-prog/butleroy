@@ -517,9 +517,16 @@ start leaves no icon, chord, credential or audit record. The chord is registered
 for real and released on stop, measured from a second process
 (`ERROR_HOTKEY_ALREADY_REGISTERED` while running, free again after).
 
-**Open, and not closable by a test:** the tray icon rendering and the tkinter
-window appearing correctly both need eyes on the screen. Recorded in D65 rather
-than asserted as passing.
+**The window works, and D65's open item is closed (D67).** D65 recorded the tray
+and overlay as "not closable by a test" — it was closable, and the reason it was
+not is that **the overlay's lifecycle had no tests at all**: 24 tests covered what
+the T3 dialog says, and none called `show()`, `hide()` or `destroy()`. Using it
+showed four defects — no Tk event loop anywhere (a mapped, titled, blank window),
+the T3 confirmation poll never armed because `_poll()` ran while `_root` was still
+`None`, Tk touched from two threads, and `Tray.stop()` never destroying the
+overlay. Fixed with one named Tk thread that owns the root and runs `mainloop()`.
+The prompt window is no longer permanently always-on-top; the T3 dialog still is,
+because a buried destructive approval is one nobody sees.
 
 **It installs and verifies now (D66).** `pyproject.toml`, `INSTALL.md`, and
 `verify_install.py`, which exits 0 only if all seven checks pass — including one

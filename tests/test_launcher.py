@@ -302,6 +302,57 @@ def test_a_stopped_app_leaves_no_credential_behind(
     assert not (state / "authkey.bin").exists()
 
 
+def test_stopping_the_app_tears_down_the_window_it_opened(
+    tmp_path: Path, tray_factory
+) -> None:
+    """The prompt window must be destroyed on the way out, not merely abandoned.
+
+    `Tray._open_prompt` lazily builds an `Overlay`, and an `Overlay` owns a Tk
+    thread and a Tcl interpreter. `Tray.stop()` stopped the pystray icon and
+    nothing else, so every shutdown - and with D64 fixed, a restart is now a
+    normal event rather than a one-off - left a live Tk thread and a live
+    interpreter behind. Threads that outlive their owner are how a 24/7 daemon
+    accumulates.
+
+    Asserted through the *real* `Tray`, because the leak is in `Tray.stop()` and
+    a stand-in tray would stop having the bug the moment the fixture changed.
+    """
+    from assistant import overlay as overlay_mod
+    from assistant import tray as tray_mod
+
+    built: list = []
+
+    class RecordingOverlay:
+        def __init__(self, call, *, title=""):
+            built.append(self)
+            self.shown = False
+            self.destroyed = False
+
+        def show(self):
+            self.shown = True
+
+        def destroy(self):
+            self.destroyed = True
+
+    # `tray._open_prompt` does `from . import overlay as overlay_mod` at call time,
+    # so the patch has to land on the module itself rather than on tray's namespace.
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(overlay_mod, "Overlay", RecordingOverlay)
+    try:
+        real_tray = tray_mod.Tray(Daemon(state=tmp_path / "state"))
+        real_tray.open_prompt()          # the chord's path
+        assert len(built) == 1 and built[0].shown
+
+        real_tray.stop()
+
+        assert built[0].destroyed, (
+            "the overlay must be destroyed when the tray stops; otherwise its Tk "
+            "thread and Tcl interpreter outlive the daemon"
+        )
+    finally:
+        monkey.undo()
+
+
 def test_the_daemon_serves_its_pipe_while_the_ui_runs(
     tmp_path: Path, tray_factory
 ) -> None:

@@ -494,7 +494,7 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
 5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **1047 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
+Current state: **1090 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
 
 **The daemon could not restart until D64, and that outranks everything below.**
 `Daemon.__init__` minted a fresh authkey per construction while `store_authkey`
@@ -537,6 +537,17 @@ not a plain dependency and a test enforces it. `uv pip install -e .` resolves 4
 packages in 2.9 s because Plane A is pure stdlib. The Telegram token may now come
 from `LOCALAIZED_TELEGRAM_TOKEN` so it need never touch disk.
 
+**The window runs tools now (D68).** Until then it proposed one and stopped: `_run_turn`
+printed `proposing <tool> (<args>)` and returned, never sending the proposal back
+through `tool_call`, so the front door the user is sitting in front of could not run
+*any* tool — including `system.gpu_state`, which is T0 and needs no approval. The
+handoff predicted this turn would fail because the 4B narrates tool calls (D34); the
+4B committed in 1.50 s and the window threw the commit away, and the reason it read
+as a model problem is that *voice* carries its proposal through while *Telegram*
+deliberately does not. Fixed by `_carry_through`, which does what `_voice_turn` does
+and reports all four of `tool_call`'s outcomes. Verified on the real model through the
+real arbiter, grammar, gate and executor — `vram_used_bytes: 6,390,022,144` on screen.
+
 **The real gap is breadth, not depth.** Measured, not estimated:
 
 ```
@@ -554,17 +565,15 @@ registered tools: 61        executors on the Daemon: 51        unimplemented: 10
 
 **Next, in order** - following the capability order the user set, not my own preference for the largest gap:
 
-0. **One turn through the window that requires a *tool*.** The spine is proven —
-   the user typed `Hello` and got an answer, crossing overlay → `brain_turn` →
-   the arbiter's lease → the `brain_server` child → real llama.cpp → streaming →
-   transcript. That was the last real proof since Phase 2 on 2026-10-01, and it
-   survived D64, D65 and D67, each of which had passed the whole suite. What a
-   greeting does **not** exercise is the grammar-constrained decision, and D34
-   makes that omission dangerous: unconstrained, the 4B narrates a tool call in
-   prose and returns none, which renders as a normal-looking answer. Ask it
-   *how much VRAM am I using right now* and require a tool proposal followed by
-   real output. Use a `system.*` read — the policy gate will refuse an unapproved
-   path, which is correct behaviour and will mask the thing being tested.
+0. **A T3 turn driven from the window, end to end.** The spine is proven for a tool
+   turn (D68). The model commits under the decision grammar and the window carries
+   the proposal through `tool_call` to a real executor, with real data on screen —
+   measured on the 4B through the real arbiter, not inferred. What no turn has yet
+   exercised is the *whole* loop: model proposes `file.delete` → the gate returns a
+   confirmation id → the armed poll raises the dialog → the user approves → the tool
+   runs. Every piece is tested; the chain is not, and D67 found this same chain had
+   never been armed. Use an approved workspace so the gate confirms rather than
+   refusing, and check the id in the transcript matches the dialog.
 1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later. D63 applies: argument names are part of the rule, and an IMAP argument like `folder` or `mailbox` must be checked against the path screen before it ships.
 2. **`reflect.*`** - Phase 6, last, and deliberately. D21 forbids the assistant writing its own code or policy permanently, at every phase, so that constraint belongs in the tests from the first line rather than retrofitted.
 

@@ -58,15 +58,15 @@ verify_install.py              # prove the install actually works
 
 | | |
 |---|---|
-| Tests | **1080 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
+| Tests | **1090 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
 | Install | `uv pip install -e .` in 2.9 s; `verify_install.py` exits 0 |
 | Restart | The daemon survives restarts (D64) |
 | Launch | One command starts tray + chord + prompt window (D65, D67) |
 | Tools | 61 registered, **51 with executors**, 10 to go |
 | Phases | 0–5 closed. Phase 6 (`reflect.*`) not started |
 
-**Blocking defects found and fixed in this round** — all three passed the
-previous 1025-test suite:
+**Blocking defects found and fixed** — every one of them passed the suite as it
+stood:
 
 - **D64** — the daemon could start exactly **once**. Every reboot or crash after
   that killed it permanently.
@@ -74,13 +74,18 @@ previous 1025-test suite:
   referenced from zero modules in `src/`.
 - **D67** — the prompt window was mapped, titled, and completely dead. No Tk
   event loop, and the T3 confirmation poll was never armed.
+- **D68** — the window **proposed** a tool and dropped it. `_run_turn` printed
+  `proposing <tool> (<args>)` and never sent it through `tool_call`, so the front
+  door you sit in front of could not run any tool at all — including a T0 read
+  needing no approval. It failed silently: no error, and the audit chain verified.
 
-**Proven end to end:** typing a question into the window and getting an answer
-back — overlay → `brain_turn` → VRAM lease → the `brain_server` child → real
-llama.cpp on the GPU → streamed answer → transcript. **Not yet proven:** a turn
-that requires a *tool call*. A greeting correctly produces none, and D34 says an
-unconstrained tool call fails *silently* — the model narrates it in prose and the
-window looks normal. Ask it *how much VRAM am I using right now*.
+**Proven end to end, including a tool turn:** type a question into the window and
+get an answer back — overlay → `brain_turn` → VRAM lease → the `brain_server`
+child → real llama.cpp on the GPU → streamed answer → transcript. Asking *how much
+VRAM am I using right now* now commits to `system.gpu_state` and shows the real
+figures, measured on the 4B through the real arbiter and gate. **Not yet proven:**
+the full T3 loop — model proposes a delete → confirmation id → dialog → approve →
+it runs. Every piece is tested; the chain is not.
 
 **Outstanding:** `email.*` (6 tools, IMAP) and `reflect.*` (4 tools, Phase 6).
 Autostart is documented in `INSTALL.md` §9 but not registered. See

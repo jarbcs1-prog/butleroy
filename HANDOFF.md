@@ -38,7 +38,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D64–D67 | the four defects fixed in the last session, and their causes |
+| `DECISIONS.md` §D68 | why the window proposed a tool and dropped it, and why that was not the model's fault |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
 | `AI_Assistant_Local.md` | the original brief. **Superseded** — provenance only |
@@ -48,15 +48,14 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1080 passed, 3 skipped, 47 subtests   (~2m35s, no PYTHONPATH needed)
+tests        1090 passed, 3 skipped, 47 subtests   (~2m36s, no PYTHONPATH needed)
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 51 with executors · 10 unimplemented
              (6 email.*, 4 reflect.* — the only two groups left)
-decisions    D1..D67, contiguous, none missing
+decisions    D1..D68, contiguous, none missing
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
-HEAD         2ea267b  D67: the window was mapped, titled, and completely dead
-tree         clean
+tree         clean at the last commit; see §4 for what the last session changed
 ```
 
 The 3 skips are speech tests gated on `LOCALAIZED_SLOW_TESTS=1`. Run the suite
@@ -65,10 +64,45 @@ with plain `.\.venv\Scripts\python.exe -m pytest` from the repo root —
 
 ## 4. What happened last session
 
-Four phases of work. The project's test suite passed 1025 tests while three
-production-blocking defects were live, which is the most important thing to carry
-forward: **this codebase's tests do not cover lifecycle, threading, or the real
-GUI.** See §6.
+The previous session fixed D64–D67 and proved the spine with a `Hello` turn. **This
+session closed the gap that handoff left open, and the gap was not where the
+handoff predicted.**
+
+- **D68 — the window proposed the tool and then dropped it.** The handoff predicted
+  the tool turn would fail because of D34: the 4B narrates the call in prose instead
+  of committing. The model committed — `tool:\n"system.gpu_state"` in 1.50 s, then a
+  clean constrained call. `Overlay._run_turn` printed `proposing system.gpu_state ()`
+  and returned, never sending the proposal back through `tool_call`. Its comment
+  claimed "the daemon has already gated it"; `op_brain_turn` gates nothing and says
+  so in its own docstring. **The window could never run any tool at all**, including
+  a T0 read needing no approval.
+
+  It failed silently in four ways at once: nothing on screen said so, the audit
+  chain verified (the proposal genuinely was audited), `system.gpu_state` needs no
+  approval so no policy edge was near it, and — the trap — *voice carries its
+  proposal through while Telegram deliberately does not*, so "one works, one does
+  not" pointed at the model instead of at a missing line in one method.
+
+  Fixed with one method, `_carry_through`, doing what `_voice_turn` already did, and
+  reporting all four of `tool_call`'s outcomes (ran / needs confirmation / queued /
+  refused-or-unbuilt). Verified on the real model through the real arbiter, real
+  grammar, real gate, real executor: `vram_used_bytes: 6,390,022,144` on screen.
+  **The spine is closed for a tool turn, which `Hello` never was.**
+
+- **Two of the ten new tests passed against broken code first**, both found by
+  trying to break them rather than by reading them: one asserted a flag it never set,
+  one asserted a substring the payload happened to contain. D67's file records the
+  same failure a generation earlier. Seven mutations were run against `overlay.py`
+  to prove the other eight tests are load-bearing.
+
+The project's test suite had passed 1025 tests while three production-blocking
+defects were live, and 1080 while a fourth was. That is the thing to carry forward:
+**this codebase's tests do not cover lifecycle, threading, the real GUI, or call
+sequences between two ops.** See §6.
+
+<details><summary>The previous session, for provenance</summary>
+
+Four phases of work, ending with D64–D67.
 
 - **D64 — the daemon could start exactly once.** `Daemon.__init__` minted a fresh
   authkey per construction, `store_authkey` opened the file `O_EXCL`, and nothing
@@ -116,29 +150,28 @@ GUI.** See §6.
   and a tool turn therefore fail *differently*, and only one of them has been
   tested.
 
+</details>
+
+That gap is now closed — see D68 at the top of this section. The `Hello` turn's
+blind spot was real, and the thing behind it was not D34.
+
 ## 5. Do this next
 
-**Ask the window something that requires a tool.** That is the remaining gap, and
-it is a small, cheap one — but it is the one that can fail *silently*.
+**The tool turn is done — it failed, and it was D68, not D34.** This section used
+to open by asking for a `system.*` read through the window. That check has been run
+on the real model; it found the window was proposing a tool and dropping it. It is
+fixed and verified. Do not re-run it as a manual sanity check expecting a new
+answer — the interesting next steps are the two build gaps below.
 
-A `Hello` turn came back correctly, which proves the spine (see §4). It did not
-exercise the grammar-constrained decision, because a greeting correctly yields no
-tool call. D34 says the 4B cannot be *made* to decide to call a tool under
-`tool_choice="auto"` — it narrates the call in prose and returns nothing, which
-renders as a normal-looking answer. So the failure mode of this next check is a
-window that says "I'll list that directory for you" and then does nothing, with
-every test in the repository still green.
-
-Ask for something concrete — *list the files in C:\Users\Public\Documents*, or
-*how much VRAM am I using* — and check two things:
-
-- the window shows a **tool proposal**, not prose describing one, and
-- the tool actually **runs** and its real output comes back.
-
-Note the policy gate is expected to refuse an unapproved path (§ D30/D33 era), so
-prefer a `system.*` read, which needs no approved workspace. `system.gpu_state`
-over the pipe returns live data today; it has simply never been driven *from the
-window through a model turn*.
+**One thing worth doing first, because it is cheap and it is the kind of thing this
+project keeps being bitten by:** drive a **T3** turn from the window and watch the
+dialog arrive. D68 proved a T0 read carries through and now says it is *waiting for
+your approval as c000001* when the gate returns a confirmation — but no turn has yet
+exercised the full loop: model proposes `file.delete` → `tool_call` returns a
+confirmation id → the armed poll raises the dialog → approve → the tool runs. Every
+piece of that is tested; the chain is not. Ask the window to delete a file inside an
+approved workspace and confirm the dialog appears over the window with the id
+matching. This is exactly the loop D67 found had never been armed.
 
 Then, in order:
 
@@ -171,18 +204,31 @@ Deliberately **not** done, and why:
 
 This is the part that matters most for a new session.
 
-**This suite does not cover lifecycle, threading, or the real GUI.** 1025 tests
-passed while the daemon could start once, the tray was unreachable, and the window
-was blank. The blind spot is consistent: *tests that assert a property of a
-component in isolation cannot find a defect living in the transition between two
-instances of it.* So:
+**This suite does not cover lifecycle, threading, the real GUI, or call sequences.**
+1025 tests passed while the daemon could start once, the tray was unreachable, and
+the window was blank; 1080 passed while the window could not run a tool at all. The
+blind spot is consistent: *tests that assert a property of a component in isolation
+cannot find a defect living in the transition between two instances of it.* So:
 
 - **A lifecycle bug needs a lifecycle test.** Two real things against one piece of
   shared state. `tests/test_authkey_restart.py` is the pattern.
+- **A call-sequence bug needs a call-sequence test.** D68 generalised the same
+  sentence one level down: it lived in the gap between `brain_turn` and `tool_call`,
+  and every test that covered either op was green. `tests/test_overlay_turn.py` is
+  the pattern — one overlay, one daemon-shaped `call`, both ops, and the
+  conversation that comes out.
 - **Mutate your tests.** If a mutation of the code does not make the test fail,
-  the test proves nothing. Twice this session a first mutation only moved a line
-  and the test still passed — which would have left a worthless test behind. Do
-  not trust a green test you have not tried to break.
+  the test proves nothing. Twice last session a first mutation only moved a line
+  and the test still passed. This session **two of ten new tests passed against
+  broken code**, both for the same reason: one asserted a flag it never set, one
+  asserted a substring the payload happened to contain. Seven mutations were run
+  against `overlay.py` to prove the other eight are load-bearing. Do not trust a
+  green test you have not tried to break.
+- **Assert on the payload, not on "it handled it".** The D68 window would have
+  passed a test asserting the turn dealt with a tool. What caught it was asserting
+  that the VRAM figure the user asked for was actually on screen. This has now
+  bitten at four different heights (D36 twice, D67, D68) and is the single most
+  transferable lesson in this file.
 - **Fakes must fail on behaviour, not on method coverage.** The first
   `test_overlay_lifecycle.py` used a fake root that only *recorded* `after()`
   callbacks; it would have passed against a Tk with no event loop, because the
@@ -222,13 +268,24 @@ and say so — do not quietly overwrite it.
 ## 7. Quick commands
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q        # 1080 tests, ~2m35s
+.\.venv\Scripts\python.exe -m pytest -q        # 1090 tests, ~2m36s
 .\.venv\Scripts\python.exe verify_install.py   # exit 0 = install is real
 .\.venv\Scripts\python.exe -m assistant        # start the product
 .\.venv\Scripts\python.exe -m assistant --check # preflight, no display
 .\.venv\Scripts\python.exe phase0_gate.py      # CUDA + Qwen3.5 gate (needs the model)
 .\.venv\Scripts\python.exe probe_isa.py        # D25 standing smoke test: CPU can execute
 ```
+
+Two probes written this session live in the temp dir rather than the repo, because
+they are one-shot diagnostics rather than standing tools like the three above. Both
+are worth re-creating rather than re-deriving if the question comes up again:
+
+- a cheap one that traces which ops the window asks for and compares all three
+  front doors — no model, ~1 s, and it answers "where does a turn stop";
+- a real one that loads the 4B through the real `VramArbiter` and drives a full turn
+  through a real `Overlay`, separating "did the model commit" from "did the window
+  run it". Those two failures are indistinguishable from outside the window, and
+  conflating them is what sent the previous session looking at the model.
 
 If the daemon will not start and reports `FileExistsError: authkey.bin`, another
 daemon owns that state directory — that is by design (D64). Check

@@ -161,7 +161,7 @@ Tray icon, `Ctrl+Alt+Space`, prompt window. `--check` prints the preflight and
 exits without starting anything, which is what to run when something is wrong and
 you do not yet know what.
 
-If you installed the package (`-e .`), `locala` is on PATH and does the same
+If you installed the package (`-e .`), `butleroy` is on PATH and does the same
 thing.
 
 ## 9. Start it at logon
@@ -177,7 +177,7 @@ $action  = New-ScheduledTaskAction `
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName "LocalAssistant" -Action $action `
+Register-ScheduledTask -TaskName "Butleroy" -Action $action `
   -Trigger $trigger -Settings $set
 ```
 
@@ -207,11 +207,13 @@ configured. Put `state/telegram.json`:
 `state/` is gitignored, so the token is never committed. It is still a plaintext
 credential on disk, so there is a way to keep it off disk entirely.
 
-**Prefer the environment variable.** `LOCALAIZED_TELEGRAM_TOKEN` takes precedence
-over the file, so the token need never be written down:
+**Prefer the environment variable.** `BUTLEROY_TELEGRAM_TOKEN` takes precedence
+over the file, so the token need never be written down. (The pre-rename spelling
+`LOCALAIZED_TELEGRAM_TOKEN` still works, with a deprecation warning — nothing you
+already have configured has stopped working.)
 
 ```powershell
-$env:LOCALAIZED_TELEGRAM_TOKEN = "123456:ABC..."
+$env:BUTLEROY_TELEGRAM_TOKEN = "123456:ABC..."
 python -m assistant
 ```
 
@@ -225,7 +227,7 @@ worked, and the old credential would keep being the one in use.
 To have it survive a reboot, set it for your user rather than the session:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("LOCALAIZED_TELEGRAM_TOKEN", "123456:ABC...", "User")
+[Environment]::SetEnvironmentVariable("BUTLEROY_TELEGRAM_TOKEN", "123456:ABC...", "User")
 ```
 
 Either way:
@@ -270,12 +272,13 @@ the property worth having in a credential that a 24/7 process holds.
 **Prefer the environment variable,** as with Telegram:
 
 ```powershell
-$env:LOCALAIZED_EMAIL_PASSWORD = "your-app-specific-password"
+$env:BUTLEROY_EMAIL_PASSWORD = "your-app-specific-password"
 python -m assistant
 ```
 
-`LOCALAIZED_EMAIL_PASSWORD` takes precedence, so the credential need never be
-written down. The host, username and default folder always come from the file —
+`BUTLEROY_EMAIL_PASSWORD` takes precedence, so the credential need never be
+written down. (`LOCALAIZED_EMAIL_PASSWORD` still works, with a deprecation
+warning.) The host, username and default folder always come from the file —
 those are configuration rather than secrets. `mail_status` reports which of the two
 is in use. A password set in the environment to the **empty string** falls back to
 the file, because a cleared variable is a recoverable misconfiguration and
@@ -304,7 +307,7 @@ Worth knowing before you use it:
 ```
 
 1047 tests, ~2.5 minutes. No `PYTHONPATH` needed — `pythonpath = ["src"]` is in
-`pyproject.toml`. Three speech tests are skipped unless `LOCALAIZED_SLOW_TESTS=1`.
+`pyproject.toml`. Three speech tests are skipped unless `BUTLEROY_SLOW_TESTS=1`.
 
 ---
 

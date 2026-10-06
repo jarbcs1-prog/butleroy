@@ -46,6 +46,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -144,7 +145,39 @@ class TelegramConfig:
 
 #: The environment variable that may carry the token instead of the file.
 #: Spelled out in INSTALL.md §10.
-TOKEN_ENV_VAR = "LOCALAIZED_TELEGRAM_TOKEN"
+TOKEN_ENV_VAR = "BUTLEROY_TELEGRAM_TOKEN"
+
+#: The name this variable had before the D73 rename. Still honoured, and still
+#: warned about, for the same reason `email.PASSWORD_ENV_VAR_LEGACY` is: a
+#: Telegram bridge that stops answering because a variable was renamed is a
+#: bridge the user cannot see is broken.
+TOKEN_ENV_VAR_LEGACY = "LOCALAIZED_TELEGRAM_TOKEN"
+
+
+def _token_from_env() -> tuple[str, str]:
+    """The token from the environment, and the variable name it came from.
+
+    New name first, legacy second, warn on legacy. The *name* is returned as well
+    as the value so that `token_source` can report the spelling actually in use -
+    which is what tells a user reading `telegram.*` output that their variable is
+    the deprecated one.
+    """
+    value = os.environ.get(TOKEN_ENV_VAR, "")
+    if value:
+        return value, TOKEN_ENV_VAR
+
+    legacy = os.environ.get(TOKEN_ENV_VAR_LEGACY, "")
+    if legacy:
+        warnings.warn(
+            f"{TOKEN_ENV_VAR_LEGACY} is deprecated; rename it to "
+            f"{TOKEN_ENV_VAR}. It still works, and this warning is the only "
+            "notice there will be.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return legacy, TOKEN_ENV_VAR_LEGACY
+
+    return "", TOKEN_ENV_VAR
 
 
 def load_config(path: Path) -> TelegramConfig:
@@ -166,10 +199,10 @@ def load_config(path: Path) -> TelegramConfig:
     because a cleared variable is a recoverable misconfiguration and refusing it
     would break a machine that had been working an hour ago.
     """
-    env_token = os.environ.get(TOKEN_ENV_VAR, "")
+    env_token, env_name = _token_from_env()
     if env_token and ":" not in env_token:
         raise TelegramError(
-            f"{TOKEN_ENV_VAR} is set but malformed - a Telegram bot token "
+            f"{env_name} is set but malformed - a Telegram bot token "
             f"contains ':'. Refusing rather than silently falling back to "
             f"{path}, so a typo cannot look like it worked."
         )
@@ -179,7 +212,7 @@ def load_config(path: Path) -> TelegramConfig:
             # The allowlist has nowhere to live without the file, and an empty
             # one is refused at construction for a good reason.
             raise TelegramError(
-                f"no telegram configuration at {path}, and {TOKEN_ENV_VAR} "
+                f"no telegram configuration at {path}, and {env_name} "
                 f"carries only the token. The file is still required for "
                 f"telegram_allowed_chat_ids."
             )
@@ -192,12 +225,13 @@ def load_config(path: Path) -> TelegramConfig:
         raise TelegramError(f"{path} is missing {exc.args[0]!r}") from None
 
     if env_token:
-        return TelegramConfig(env_token, tuple(ids), token_source=TOKEN_ENV_VAR)
+        return TelegramConfig(env_token, tuple(ids), token_source=env_name)
     try:
         token = data["telegram_bot_token"]
     except KeyError as exc:
         raise TelegramError(
-            f"{path} is missing {exc.args[0]!r}, and {TOKEN_ENV_VAR} is not set"
+            f"{path} is missing {exc.args[0]!r}, and neither "
+            f"{TOKEN_ENV_VAR} nor the deprecated {TOKEN_ENV_VAR_LEGACY} is set"
         ) from None
     return TelegramConfig(token, tuple(ids),
                           token_source=f"{path} (plaintext on disk)")

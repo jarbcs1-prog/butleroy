@@ -502,8 +502,10 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self._quit),
         )
+        # The name pystray registers the icon under. It is the identity the
+        # platform sees, so it is the product name (D73) - not the package name.
         self.icon = pystray.Icon(
-            "locala", icon=image, title=self.title, menu=menu
+            "butleroy", icon=image, title=self.title, menu=menu
         )
         return self.icon
 

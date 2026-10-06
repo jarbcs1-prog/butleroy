@@ -42,7 +42,7 @@ _COUNTER = iter(range(1, 10_000))
 
 
 def unique_pipe(tag: str = "test") -> str:
-    return rf"\\.\pipe\locala.test.{tag}.{next(_COUNTER)}"
+    return rf"\\.\pipe\butleroy.test.{tag}.{next(_COUNTER)}"
 
 
 @pytest.fixture(autouse=True)

@@ -245,6 +245,10 @@ def test_the_password_may_come_from_the_environment(tmp_path, monkeypatch):
     path.write_text(json.dumps({
         "email_host": "imap.example.com", "email_username": "me@example.com",
     }), encoding="utf-8")
+    # The legacy variable is cleared as well: it takes *lower* precedence, so
+    # leaving it set cannot change this result - but clearing it proves the
+    # precedence rather than assuming it.
+    monkeypatch.delenv(E.PASSWORD_ENV_VAR_LEGACY, raising=False)
     monkeypatch.setenv(E.PASSWORD_ENV_VAR, "from-the-environment")
     config = E.load_config(path)
     assert config.password == "from-the-environment"
@@ -265,11 +269,15 @@ def test_a_missing_configuration_is_refused_not_defaulted(tmp_path):
 def test_a_missing_file_with_only_a_password_is_refused(tmp_path, monkeypatch):
     """Half a configuration is not a configuration.
 
-    `LOCALAIZED_EMAIL_PASSWORD` carries the secret and nothing else. If the host and
+    `BUTLEROY_EMAIL_PASSWORD` carries the secret and nothing else. If the host and
     username could be guessed the result would be a client that looks configured
     and cannot connect, and the user would check the password first — which is the
     one thing that is already correct.
     """
+    # The legacy variable is cleared as well: it takes *lower* precedence, so
+    # leaving it set cannot change this result - but clearing it proves the
+    # precedence rather than assuming it.
+    monkeypatch.delenv(E.PASSWORD_ENV_VAR_LEGACY, raising=False)
     monkeypatch.setenv(E.PASSWORD_ENV_VAR, "from-the-environment")
     with pytest.raises(E.MailNotConfigured) as exc:
         E.load_config(tmp_path / "nope.json")
@@ -283,12 +291,18 @@ def test_a_cleared_environment_password_falls_back_to_the_file(tmp_path, monkeyp
     sin is a variable someone cleared — the least useful possible failure.
     """
     path = write_config(tmp_path)
+    monkeypatch.delenv(E.PASSWORD_ENV_VAR_LEGACY, raising=False)
     monkeypatch.setenv(E.PASSWORD_ENV_VAR, "")
     assert E.load_config(path).password == "app-specific-secret"
 
 
 def test_an_empty_password_is_refused(tmp_path, monkeypatch):
+    # BOTH names. The legacy variable still supplies a password, so clearing only
+    # the new one would let a set legacy variable make this pass on one machine
+    # and fail on another - which is exactly the ambient-environment dependency
+    # the comment at line 75 warns about.
     monkeypatch.delenv(E.PASSWORD_ENV_VAR, raising=False)
+    monkeypatch.delenv(E.PASSWORD_ENV_VAR_LEGACY, raising=False)
     path = tmp_path / "email.json"
     path.write_text(json.dumps({
         "email_host": "imap.example.com", "email_username": "me@example.com",

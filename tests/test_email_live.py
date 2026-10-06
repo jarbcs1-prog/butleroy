@@ -104,7 +104,7 @@ class IMAPServer:
     def _session(self, conn: socket.socket) -> None:
         f = conn.makefile("rwb")
         try:
-            self._line(f, b"* OK [CAPABILITY IMAP4rev1] locala test server ready")
+            self._line(f, b"* OK [CAPABILITY IMAP4rev1] butleroy test server ready")
             while True:
                 raw = f.readline()
                 if not raw:

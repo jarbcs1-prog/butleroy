@@ -8,7 +8,7 @@ promise that an action the tier calls irreversible is reversible in fact.
 Two rules shape the tests.
 
 **The registry half is real.** A registry write goes to
-`HKCU\Software\LocalaizedTest`, a key these tests create and delete, because the
+`HKCU\Software\ButleroyTest`, a key these tests create and delete, because the
 only way to check that a value really landed *with the type it was asked for* is
 to read it back with the same API that wrote it. A fake would be testing the
 fake. Everything else - `sc`, `shutdown`, the package managers - is faked,
@@ -35,7 +35,7 @@ from assistant.manifest import Workspace
 from assistant.policy import Tier
 
 TEST_HIVE = winreg.HKEY_CURRENT_USER
-TEST_ROOT = r"Software\LocalaizedTest"
+TEST_ROOT = r"Software\ButleroyTest"
 
 TOOLS = ("registry.write", "service.start_stop", "package.install",
          "package.uninstall", "power.shutdown")
@@ -356,7 +356,7 @@ class TestRegistryWrite:
         with pytest.raises(Refused):
             desk._exec_registry_write({
                 "key": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "name": "LocalaizedTest", "type": "REG_SZ", "data": "x.exe"})
+                "name": "ButleroyTest", "type": "REG_SZ", "data": "x.exe"})
         assert journal(desk) == []
         run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
         try:
@@ -365,7 +365,7 @@ class TestRegistryWrite:
                          range(winreg.QueryInfoKey(key)[1])]
         except FileNotFoundError:
             return                      # the key does not exist at all
-        assert "LocalaizedTest" not in names
+        assert "ButleroyTest" not in names
 
     def test_the_preview_shows_what_is_there_now(self, desk):
         """A preview showing only the proposed value makes it impossible to
@@ -463,7 +463,7 @@ class TestServiceActions:
 
     def test_a_service_that_does_not_exist_is_an_answer(self, desk):
         with pytest.raises(Refused) as caught:
-            desk._exec_service_start_stop({"service": "LocalaizedNoSuch",
+            desk._exec_service_start_stop({"service": "ButleroyNoSuch",
                                            "action": "start"})
         assert "no service named" in str(caught.value)
 

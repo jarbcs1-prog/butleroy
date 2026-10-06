@@ -1,4 +1,4 @@
-"""IMAP. The last transport in scope, and the first one that carries a credential.
+r"""IMAP. The last transport in scope, and the first one that carries a credential.
 
 What this is
 ------------
@@ -79,6 +79,7 @@ import imaplib
 import json
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -97,7 +98,14 @@ __all__ = [
 
 #: The environment variable that may carry the password instead of the file.
 #: Spelled out in INSTALL.md alongside the Telegram token.
-PASSWORD_ENV_VAR = "LOCALAIZED_EMAIL_PASSWORD"
+PASSWORD_ENV_VAR = "BUTLEROY_EMAIL_PASSWORD"
+
+#: The name this variable had before the D73 rename. Still read, and still
+#: honoured, because the alternative is a mail client that silently loses its
+#: credential at 3am with no error anywhere - the failure mode D70 was about.
+#: `password_from_env` warns when this one is the source, so the deprecation is
+#: visible rather than permanent.
+PASSWORD_ENV_VAR_LEGACY = "LOCALAIZED_EMAIL_PASSWORD"
 
 #: Where a deleted message is filed. Same tree `file.delete` uses, deliberately:
 #: one place to look for "what did the assistant remove", not two.
@@ -196,6 +204,36 @@ class EmailConfig:
         )
 
 
+def _password_from_env() -> tuple[str, str]:
+    """The password from the environment, and the variable name it came from.
+
+    New name first, legacy second, and a warning when the legacy one is the
+    source. Both are read because the alternative to keeping the old name alive is
+    a mail client that stops authenticating on a machine that was working
+    yesterday - with no error, just an empty inbox and a confusing report.
+
+    Returning the *name* as well is what makes the deprecation visible: the
+    resolved source is reported back to the caller, so a user reading `mail_status`
+    sees the old spelling and knows to rename it.
+    """
+    value = os.environ.get(PASSWORD_ENV_VAR, "")
+    if value:
+        return value, PASSWORD_ENV_VAR
+
+    legacy = os.environ.get(PASSWORD_ENV_VAR_LEGACY, "")
+    if legacy:
+        warnings.warn(
+            f"{PASSWORD_ENV_VAR_LEGACY} is deprecated; rename it to "
+            f"{PASSWORD_ENV_VAR}. It still works, and this warning is the only "
+            "notice there will be.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return legacy, PASSWORD_ENV_VAR_LEGACY
+
+    return "", PASSWORD_ENV_VAR
+
+
 def load_config(path: Path) -> EmailConfig:
     """Read the mail configuration. Raises rather than defaulting.
 
@@ -213,7 +251,7 @@ def load_config(path: Path) -> EmailConfig:
     * and an environment password that is set but missing the file's other keys is
       refused, not half-honoured.
     """
-    env_password = os.environ.get(PASSWORD_ENV_VAR, "")
+    env_password, env_name = _password_from_env()
     if not path.exists():
         if env_password:
             raise MailNotConfigured(
@@ -242,10 +280,10 @@ def load_config(path: Path) -> EmailConfig:
         raise MailNotConfigured(
             f"{path} has no email_password, and {PASSWORD_ENV_VAR} is not set"
         )
-    source = (
-        PASSWORD_ENV_VAR if env_password
-        else f"{path} (plaintext on disk)"
-    )
+    # The name that actually supplied the value, not the new one. A report that
+    # says `BUTLEROY_EMAIL_PASSWORD` when the machine is set up with the old name
+    # is how a credential gets "fixed" twice and still not read.
+    source = env_name if env_password else f"{path} (plaintext on disk)"
 
     return EmailConfig(
         host=str(data["email_host"]),

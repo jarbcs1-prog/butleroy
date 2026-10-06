@@ -2,7 +2,16 @@
 
 A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative work that needs doing, and orchestrates software projects by delegating to a team of agents - with all reasoning and all memory on-device.
 
-> **Naming.** The product is **Butleroy**. The Python package, the wheel and the named pipes are still `locala` / `\\.\pipe\locala.*`, because renaming the import path and the IPC namespace would touch every module and break running installs for no user-visible gain. The brand, the tray, the window title and the icon are Butleroy; the plumbing is not. See `brand/README.md` for the identity and DECISIONS.md D72 for why the icon geometry lives in `src/assistant/brand.py`.
+> **Naming.** The product, the package (`butleroy`), the console script
+> (`butleroy`), the named pipes (`\\.\pipe\butleroy.*`) and the credential
+> variables (`BUTLEROY_*`) are all Butleroy — see DECISIONS.md D73. Two things
+> are deliberately **not**: the project directory is still `G:\localaized`,
+> because a filesystem path is not a product name and moving the checkout would
+> invalidate the venv and every relative path; and `LOCALAIZED_*_PASSWORD` /
+> `LOCALAIZED_*_TOKEN` still work with a deprecation warning, because a rename
+> that silently drops a configured credential is worse than a stale name. The
+> mark geometry the product draws lives in `src/assistant/brand.py`; see
+> DECISIONS.md D72 and `brand/README.md`.
 
 ## Read in this order
 
@@ -53,7 +62,7 @@ RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 
 ```
 python -m assistant            # tray icon, Ctrl+Alt+Space, prompt window
 python -m assistant --check    # preflight only, no display needed
-locala --check                 # same, once installed
+butleroy --check              # same, once installed
 verify_install.py              # prove the install actually works
 ```
 

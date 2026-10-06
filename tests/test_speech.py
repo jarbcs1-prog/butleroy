@@ -6,7 +6,7 @@ test suite that does that on every run is a test suite nobody runs. What is alwa
 checked is the part that costs nothing and is easy to get wrong - paths, refusals,
 the memory probe actually working - because those are the parts that fail silently.
 
-Run the slow ones with `LOCALAIZED_SLOW_TESTS=1`.
+Run the slow ones with `BUTLEROY_SLOW_TESTS=1`.
 """
 
 import os
@@ -18,8 +18,8 @@ import pytest
 
 from assistant import speech
 
-SLOW = os.environ.get("LOCALAIZED_SLOW_TESTS") == "1"
-slow = pytest.mark.skipif(not SLOW, reason="set LOCALAIZED_SLOW_TESTS=1 to run")
+SLOW = os.environ.get("BUTLEROY_SLOW_TESTS") == "1"
+slow = pytest.mark.skipif(not SLOW, reason="set BUTLEROY_SLOW_TESTS=1 to run")
 
 
 # --- paths and refusals ------------------------------------------------------

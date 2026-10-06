@@ -54,7 +54,7 @@ def test_a_token_in_the_environment_means_no_token_on_disk(
     than a secret and belongs somewhere a human can edit it.
     """
     path = write_config(tmp_path / "telegram.json", token="", ids=(42,))
-    monkeypatch.setenv("LOCALAIZED_TELEGRAM_TOKEN", TOKEN)
+    monkeypatch.setenv("BUTLEROY_TELEGRAM_TOKEN", TOKEN)
 
     cfg = T.load_config(path)
 
@@ -70,7 +70,7 @@ def test_the_environment_wins_over_a_stale_file(
     """A rotated token must take effect without editing a file that is easy to
     forget exists - and the stale one must not quietly win."""
     path = write_config(tmp_path / "telegram.json", token="999:OLD-and-rotated")
-    monkeypatch.setenv("LOCALAIZED_TELEGRAM_TOKEN", TOKEN)
+    monkeypatch.setenv("BUTLEROY_TELEGRAM_TOKEN", TOKEN)
 
     cfg = T.load_config(path)
 
@@ -82,7 +82,11 @@ def test_a_file_token_still_works_when_the_environment_is_empty(
 ) -> None:
     """Unchanged behaviour for the common case. This must not become a breaking
     change for the machine that already works."""
-    monkeypatch.delenv("LOCALAIZED_TELEGRAM_TOKEN", raising=False)
+    # BOTH names, not one. After the rename there are two variables that can
+    # carry a token, so deleting only the legacy one would let the ambient
+    # environment decide whether a "there is no token set" test passes.
+    monkeypatch.delenv(T.TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(T.TOKEN_ENV_VAR_LEGACY, raising=False)
     path = write_config(tmp_path / "telegram.json")
 
     cfg = T.load_config(path)
@@ -98,7 +102,7 @@ def test_an_empty_environment_token_is_ignored_not_treated_as_a_token(
     Falling through to the file is the recoverable reading; refusing would break a
     machine where someone exported the variable and then cleared it.
     """
-    monkeypatch.setenv("LOCALAIZED_TELEGRAM_TOKEN", "")
+    monkeypatch.setenv("BUTLEROY_TELEGRAM_TOKEN", "")
     path = write_config(tmp_path / "telegram.json")
 
     cfg = T.load_config(path)
@@ -111,10 +115,10 @@ def test_a_malformed_environment_token_is_refused_loudly(
 ) -> None:
     """A token without a ":" is not a Telegram token. Silently using the file's
     instead would mean a typo in a variable looks like it worked."""
-    monkeypatch.setenv("LOCALAIZED_TELEGRAM_TOKEN", "not-a-token")
+    monkeypatch.setenv("BUTLEROY_TELEGRAM_TOKEN", "not-a-token")
     path = write_config(tmp_path / "telegram.json")
 
-    with pytest.raises(T.TelegramError, match="LOCALAIZED_TELEGRAM_TOKEN"):
+    with pytest.raises(T.TelegramError, match="BUTLEROY_TELEGRAM_TOKEN"):
         T.load_config(path)
 
 
@@ -132,7 +136,11 @@ def test_a_token_on_disk_is_reported_as_such(
     the token. Where it came from is not a secret, and it is the difference
     between "this machine holds a credential in plaintext" and "it does not".
     """
-    monkeypatch.delenv("LOCALAIZED_TELEGRAM_TOKEN", raising=False)
+    # BOTH names, not one. After the rename there are two variables that can
+    # carry a token, so deleting only the legacy one would let the ambient
+    # environment decide whether a "there is no token set" test passes.
+    monkeypatch.delenv(T.TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(T.TOKEN_ENV_VAR_LEGACY, raising=False)
     path = write_config(tmp_path / "telegram.json")
 
     described = T.load_config(path).describe()
@@ -147,12 +155,18 @@ def test_a_token_on_disk_is_reported_as_such(
 def test_a_token_from_the_environment_is_reported_as_such(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LOCALAIZED_TELEGRAM_TOKEN", TOKEN)
+    monkeypatch.setenv(T.TOKEN_ENV_VAR, TOKEN)
     path = write_config(tmp_path / "telegram.json", token="")
 
     described = T.load_config(path).describe()
 
-    assert described["token_source"] == "LOCALAIZED_TELEGRAM_TOKEN"
+    # The constant, not a literal. This assertion used to spell the name out, and
+    # so kept passing against the *old* variable while the code had moved on -
+    # which is only visible as a failure here, and only because the rename
+    # changed what the source reports. The report has to name the variable that
+    # actually supplied the token, so it is compared against the constant that
+    # names it.
+    assert described["token_source"] == T.TOKEN_ENV_VAR
 
 
 def test_describe_never_includes_the_token_itself(
@@ -164,7 +178,11 @@ def test_describe_never_includes_the_token_itself(
     Checked against the whole rendered object, not one field, because a token
     leaking through `__repr__` is the version that actually happens.
     """
-    monkeypatch.delenv("LOCALAIZED_TELEGRAM_TOKEN", raising=False)
+    # BOTH names, not one. After the rename there are two variables that can
+    # carry a token, so deleting only the legacy one would let the ambient
+    # environment decide whether a "there is no token set" test passes.
+    monkeypatch.delenv(T.TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(T.TOKEN_ENV_VAR_LEGACY, raising=False)
     path = write_config(tmp_path / "telegram.json")
 
     cfg = T.load_config(path)

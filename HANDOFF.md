@@ -5,14 +5,23 @@ end of the session that built the brand kit (D72).
 
 **If you are resuming from a prompt like** *"inspect `G:\localaized` to determine
 the current progress status, find out where it stopped and resume"* — read this
-whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D72.
+whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D73.
 Do not re-read the other 4,600 lines before starting work.
 
-**The product is Butleroy** (LocalAIzed Concierge for Windows). The brand kit is
-`brand/`; the mark geometry the product actually draws is `src/assistant/brand.py`,
-and the tray renders from it at runtime rather than loading a file. The Python
-package, wheel and named pipes are still `locala` — deliberately; see
-`brand/README.md` and D72.
+**The product is Butleroy** (LocalAIzed Concierge for Windows), and as of D73 so
+is everything a user can type or see: the package (`butleroy`), the console script
+(`butleroy`), the four pipes (`\\.\pipe\butleroy.*`), and the credential variables
+(`BUTLEROY_*`). The brand kit is `brand/`; the mark geometry the product actually
+draws is `src/assistant/brand.py`, and the tray renders from it at runtime rather
+than loading a file.
+
+**The directory is still `G:\localaized`, and that is not an oversight.** It is a
+filesystem path, not a product name: `policy.SELF_PATHS` protects this checkout by
+that literal string, ~15 tests reference it, and moving the tree would invalidate
+the venv and the editable install. D73's tests assert the path specifically,
+because the obvious mistake — a blanket find-and-replace — fails *silently*: the
+path stops naming a directory that exists, and every test that compares a string to
+a string stays green.
 
 ---
 
@@ -44,7 +53,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D70-D72 | `email.*`, `reflect.*`, and the brand kit - the last tool groups plus the most recent session |
+| `DECISIONS.md` §D70-D73 | `email.*`, `reflect.*`, the brand kit, and the rename |
 | `brand/README.md` | the Butleroy brand kit: mark, palette, glyphs, voice, widget rules |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
@@ -55,20 +64,23 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1221 passed, 3 skipped, 47 subtests   (~2m43s, no PYTHONPATH needed)
+tests        1236 passed, 3 skipped, 47 subtests   (~2m37s, no PYTHONPATH needed)
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D72, contiguous, none missing
+decisions    D1..D73, contiguous, none missing
 brand        Butleroy. `brand/` = spec, tokens, SVGs, 27 glyphs, rasters.
              Geometry the product draws lives in `src/assistant/brand.py`,
              NOT `brand/` - see D72 and structural claim 4 in §5
+name         package/script/pipes/env = butleroy (D73). The DIRECTORY is still
+             G:\localaized and must stay - it is a path, not a name, and
+             policy.SELF_PATHS protects this checkout by that literal string
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed
 ```
 
-The 3 skips are speech tests gated on `LOCALAIZED_SLOW_TESTS=1`. Run the suite
+The 3 skips are speech tests gated on `BUTLEROY_SLOW_TESTS=1`. Run the suite
 with plain `.\.venv\Scripts\python.exe -m pytest` from the repo root —
 `pythonpath = ["src"]` in `pyproject.toml` means no environment setup is needed.
 
@@ -274,6 +286,14 @@ future edit could quietly undo:
    is a thin CLI over the package module. If someone "tidies" the geometry back into
    `brand/`, the tray keeps working in a checkout and fails on install — and no test
    here will run against an installed copy. Read `brand/README.md` before moving it.
+5. **`G:\localaized` is a path, not a name — do not "tidy" it.** D73 renamed the
+   product everywhere a user can reach it and deliberately left the directory. The
+   reason is not caution: `policy.SELF_PATHS` names this checkout by that literal
+   string, so renaming it makes the assistant's self-protection stop applying to
+   its own code — and **nothing fails**, because the tests that assert the refusal
+   compare a string to the same string. `test_the_project_directory_is_still_called_localaized`
+   is the one guard; if you move the tree, that test is what must change first, and
+   it must change to the *new real path*, not to a placeholder.
 
 ### The lesson from D70 and D71, which is the one to carry
 
@@ -305,7 +325,7 @@ Deliberately **not** done, and why:
 - **Autostart** is documented (`INSTALL.md` §9) but not registered. Registering a
   scheduled task is a persistent change to the user's machine — ask first.
 - **The Telegram token** is still plaintext at `state/telegram.json`.
-  `LOCALAIZED_TELEGRAM_TOKEN` works if moved; rotation is @BotFather plus one edit.
+  `BUTLEROY_TELEGRAM_TOKEN` works if moved; rotation is @BotFather plus one edit.
 
 ## 6. How to work in this repo
 
@@ -364,6 +384,21 @@ cannot find a defect living in the transition between two instances of it.* So:
   decision log, write the run it came from**, and re-check it if anything moved
   afterwards. A log whose figures are right only while nothing changes is worthless,
   and it is the most seductive kind of wrong: it looks like diligence.
+- **A rename finds its own bugs, and not where you were looking.** D73 changed the
+  product name and ran the full suite, which caught two defects in *existing* tests:
+  `test_a_token_from_the_environment_is_reported_as_such` asserted the literal
+  `"LOCALAIZED_TELEGRAM_TOKEN"`, so it **kept passing against the old variable while
+  the code had already moved on** — green and wrong, the worst combination — and
+  three `delenv` sites cleared only the old name, so after the rename the *new*
+  variable could leak in from the developer's own environment. Neither would have
+  been found by reading the diff. **After a mechanical change, run the whole suite**;
+  the failures are not where you were looking.
+- **Six mutations for D73, and two of my first three attempts did not apply.**
+  Proving a test bites means checking that the mutation actually *changed the file*
+  — printing `delenv` counts, not trusting that a regex matched. The ambient-leak
+  mutation "passed" twice against unmutated code, which would have been recorded as
+  a weak test when the truth was a broken regex. When a mutation passes
+  unexpectedly, suspect the mutation before you blame the test.
 - **Know your shell before you blame the code.** Two post-refactor suite runs
   reported `Exited with code 1` with output cut off at `[96%]`, and I diagnosed that
   as my own file edits racing the tests. Wrong. The cause was
@@ -372,6 +407,10 @@ cannot find a defect living in the transition between two instances of it.* So:
   suite runs looked like failures and were not. **Redirect to a file and read it**,
   or drop the pipe; never infer a test result from a truncated stream. This is §5's
   anti-loop rule in a new costume — I nearly went looking for bugs that did not exist.
+- **`uv pip`, not `pip`.** This venv has no `pip` module at all; the project is
+  installed with `uv pip install --python .venv\Scripts\python.exe -e .`. A `pip`
+  command fails with `No module named pip`, which reads like a broken venv rather
+  than a deliberate choice.
 - **You cannot test what you cannot run.** There is no SVG rasteriser in this
   project (`cairosvg`, `svglib`, `magick` all absent, and adding one would breach
   D66). So the SVGs are only ever parsed, never rendered. One test asserting the

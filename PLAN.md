@@ -535,7 +535,7 @@ imports cleanly and only faults on execution, so a verifier that stopped at the
 import would call a broken install healthy. `llama-cpp-python` is deliberately
 not a plain dependency and a test enforces it. `uv pip install -e .` resolves 4
 packages in 2.9 s because Plane A is pure stdlib. The Telegram token may now come
-from `LOCALAIZED_TELEGRAM_TOKEN` so it need never touch disk.
+from `BUTLEROY_TELEGRAM_TOKEN` so it need never touch disk.
 
 **And the confirmation dialog can be built at all (D69).** `activebackground="#3182ce6"`
 is seven hex digits, so `tk.Button` raised `TclError: invalid color name` while
@@ -622,7 +622,7 @@ registered tools: 61        executors on the Daemon: 61        unimplemented: 0
   scheduled task is a persistent change to the user's machine and has not been
   done without asking.
 - **The Telegram token is still in plaintext** at `state/telegram.json`.
-  `LOCALAIZED_TELEGRAM_TOKEN` now works if it is moved, and rotation is
+  `BUTLEROY_TELEGRAM_TOKEN` now works if it is moved, and rotation is
   @BotFather plus one edit.
 
 ### The machine can now be read (D40–D44)

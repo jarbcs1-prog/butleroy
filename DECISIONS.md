@@ -2491,7 +2491,7 @@ single line:
 | `speech` | `faster_whisper`, `piper`, `numpy` |
 | `audio` | `openwakeword`, `sounddevice`, `numpy` |
 
-So `locala` installs in **2.9 s**, resolves 4 packages, and cannot quietly become
+So `butleroy` installs in **2.9 s**, resolves 4 packages, and cannot quietly become
 a multi-gigabyte download for a tray icon. The heavy planes are extras (`brain`,
 `voice`, `wakeword`), each independently skippable, and the tests assert
 torch/faster-whisper/onnxruntime/librosa stay out of the core - because an
@@ -2542,7 +2542,7 @@ Three things in there are decisions rather than code:
 ### The credential, reduced rather than excused
 
 `state/telegram.json` held a live bot token in plaintext. It was gitignored, which
-is not the same as secret. Now `LOCALAIZED_TELEGRAM_TOKEN` may carry it, so it
+is not the same as secret. Now `BUTLEROY_TELEGRAM_TOKEN` may carry it, so it
 need never exist on disk; the allowlist stays in the file, because it is
 configuration rather than a credential and belongs somewhere a human edits it.
 And `describe()` reports *where the token came from* - naming the location, never
@@ -2573,7 +2573,7 @@ a credential is a feature that can leak one; rotation is @BotFather plus one edi
 
 Suite after: **1068 passed, 3 skipped, 47 subtests**, with no `PYTHONPATH` set.
 `uv pip install -e .` resolves 4 packages in 2.9 s, leaves the D25 build
-untouched, and produces a working `locala` command.
+untouched, and produces a working `butleroy` command.
 
 ---
 
@@ -3100,7 +3100,7 @@ other tool in the project. A password that arrives as a tool argument is a passw
 that reaches the audit chain — append-only, hash-chained, the most-read file here.
 `_redact` would catch a key containing "password", but the answer is that the
 credential is never an argument: it lives in `state/email.json` or
-`LOCALAIZED_EMAIL_PASSWORD`, is held in `EmailConfig`, and `describe()`/`__repr__` omit
+`BUTLEROY_EMAIL_PASSWORD`, is held in `EmailConfig`, and `describe()`/`__repr__` omit
 it. Three tests assert this in layers — the declaration, the log, and the repr — because
 "no tool declares a credential" is invisible everywhere else.
 
@@ -3424,3 +3424,80 @@ written down twice, and let drift. The error is exactly this project's recurring
 one: a value quoted from memory of an earlier run rather than from the run that
 matters. Recorded here rather than quietly corrected, because a decision log whose
 numbers are only right when nothing moved is worth nothing.
+
+---
+
+## D73 - Butleroy everywhere a user can type it, and not on the filesystem
+
+The product is renamed from `locala` to **Butleroy** in every place a user can
+reach: the package, the console script, the four named pipes, the pystray
+identity, and the two credential variables. Fifteen new tests in
+`tests/test_rename.py`.
+
+### The part that is easy to get wrong
+
+**A product name and a filesystem path are not the same string.** The project
+lives in `G:\localaized`, and that path appears in `policy.SELF_PATHS` (which is
+what stops the assistant editing its own code), in the model paths, and in
+roughly fifteen tests. A blanket `locala` -> `butleroy` would repoint all of them
+at a directory that does not exist.
+
+Worse, it would have **looked correct**. Most of those tests assert a string
+against another string, so renaming the constant renames both sides and they stay
+green - while the thing they were protecting stops being protected. So:
+
+- `policy.SELF_PATHS` still contains `G:\localaized`.
+- `test_the_project_directory_is_still_called_localaized` asserts that a
+  `SELF_PATH` resolves inside the actual checkout, and that `DECISIONS.md`,
+  `ARCHITECTURE.md` and `PLAN.md` are each still covered. This is the test that
+  would have caught it, and mutating the path to `G:\butleroy` fails exactly it.
+- `test_windows_environment_variables_are_untouched` exists because
+  **`LOCALAPPDATA` is Microsoft's**. It matches the rename pattern, sits next to
+  project code, and a global replace takes it without asking. Renaming it would
+  be catastrophic and silent. Mutating it fails exactly that test.
+
+### A rename that breaks a credential is silent
+
+`LOCALAIZED_EMAIL_PASSWORD` and `LOCALAIZED_TELEGRAM_TOKEN` were real, documented,
+and quite possibly set on the machine that is running this. Renaming them without
+a fallback gives a user an empty inbox and an unresponsive Telegram bridge, with
+no error anywhere - which is the D70 shape in a different medium.
+
+Both are kept working. New name first, legacy second, `DeprecationWarning` when
+the legacy one is the source. The helper returns **the name it used** as well as
+the value, so `token_source` / `password_source` report the spelling actually in
+use - otherwise a user reading `mail_status` sees `BUTLEROY_EMAIL_PASSWORD` while
+their machine is set up with the old one, and "fixes" it twice.
+
+Two details that were only found by writing the tests:
+
+- **Both names must be cleared in a test that means "no credential is set".**
+  Three such tests deleted only the old variable, so after the rename the *new*
+  one could leak in from the developer's own environment. Fixed by deleting both.
+- **The new variable must win silently.** Warning when both are set would train
+  the user to ignore the warning, which is how a deprecation stops being noticed.
+
+### Two defects the rename tests found in existing tests
+
+1. `test_a_token_from_the_environment_is_reported_as_such` asserted the literal
+   `"LOCALAIZED_TELEGRAM_TOKEN"`. It therefore **kept passing against the old
+   variable while the code had already moved on** - green, and wrong, which is the
+   worst combination. Now compared against the constant, so it asserts *which
+   variable supplied the token* rather than *which string the file once said*.
+2. Three `delenv` sites, above.
+
+Both were caught by running the full suite, which is the only reason to run it
+after a rename: the change is mechanical, so the failures are not where you were
+looking.
+
+### What the rename is not
+
+The **install is not the package name**. `uv pip install -e .` produced
+`butleroy-0.3.0.dist-info` and `butleroy.exe`; verified by running
+`butleroy.exe --help`, not by reading the entry point. `uv` left the old
+`locala-0.3.0.dist-info` behind, which is harmless (importlib resolves the new
+name) and is now reported rather than asserted against - a test that fails
+because a package manager left a file is a test that will be "fixed" by deleting
+evidence.
+
+Suite after: **1236 passed, 3 skipped, 47 subtests** (1221 before, +15).

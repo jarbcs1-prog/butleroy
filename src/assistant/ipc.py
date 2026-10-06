@@ -40,12 +40,19 @@ from multiprocessing.connection import Client, Listener
 #: holds delete tools is not a recoverable situation.
 PROTOCOL = 1
 
-#: Canonical pipe names, matching ARCHITECTURE.md. Five pipes, fixed, so that
+#: Canonical pipe names, matching ARCHITECTURE.md. Four pipes, fixed, so that
 #: every component's contract is written down somewhere other than its code.
-PIPE_BRAIN_REQ = r"\\.\pipe\locala.brain.req"
-PIPE_BRAIN_RESP = r"\\.\pipe\locala.brain.resp"
-PIPE_SUP_REQ = r"\\.\pipe\locala.sup.req"
-PIPE_SUP_EVT = r"\\.\pipe\locala.sup.evt"
+#:
+#: Renamed `locala.*` -> `butleroy.*` in D73. Note what this did *not* change: the
+#: project directory is still `G:\localaized`, and `policy.SELF_PATHS` still
+#: contains that literal path, because a filesystem path is not a product name.
+#: A blanket find-and-replace over `locala` would have repointed every one of
+#: those at a directory that does not exist - and would have looked correct,
+#: because a test asserting a string matches a string is green either way.
+PIPE_BRAIN_REQ = r"\\.\pipe\butleroy.brain.req"
+PIPE_BRAIN_RESP = r"\\.\pipe\butleroy.brain.resp"
+PIPE_SUP_REQ = r"\\.\pipe\butleroy.sup.req"
+PIPE_SUP_EVT = r"\\.\pipe\butleroy.sup.evt"
 
 ALL_PIPES = (PIPE_BRAIN_REQ, PIPE_BRAIN_RESP, PIPE_SUP_REQ, PIPE_SUP_EVT)
 

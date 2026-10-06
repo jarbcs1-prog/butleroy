@@ -37,7 +37,7 @@ _COUNTER = iter(range(1, 10_000))
 
 
 def unique_pipe(tag: str) -> str:
-    return rf"\\.\pipe\locala.test.launcher.{tag}.{next(_COUNTER)}"
+    return rf"\\.\pipe\butleroy.test.launcher.{tag}.{next(_COUNTER)}"
 
 
 # --------------------------------------------------------------------------- #

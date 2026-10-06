@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "locala"
+name = "butleroy"
 version = "0.3.0"
 description = "Butleroy - LocalAIzed Concierge for Windows. A 24/7 assistant that lives on one Windows machine, with all reasoning and all memory on-device."
 readme = "README.md"
@@ -20,7 +20,7 @@ license = { text = "Proprietary" }
 # runtime would break that argument at install time, long before anyone noticed.
 #
 # So the only third-party things the always-on process needs are the tray icon
-# and the image it draws itself. `pip install locala` is small and instant, and
+# and the image it draws itself. `pip install butleroy` is small and instant, and
 # it cannot silently become a multi-gigabyte download.
 #
 # *** llama-cpp-python is NOT here, and must not be added. ***
@@ -59,7 +59,7 @@ test = [
 ]
 
 [project.scripts]
-locala = "assistant.launcher:main"
+butleroy = "assistant.launcher:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

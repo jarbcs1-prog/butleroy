@@ -62,10 +62,10 @@ All inter-plane IPC is **Windows named pipes** via `multiprocessing.connection` 
 
 | From → To | Pipe | Payload |
 |-----------|------|---------|
-| A → B | `\\.\pipe\locala.brain.req` | request JSON, cancellable |
-| B → A | `\\.\pipe\locala.brain.resp` | streaming deltas, tool-calls |
-| A → C | `\\.\pipe\locala.sup.req` | assignTask, cancelTask, intervene, checkpoints |
-| C → A | `\\.\pipe\locala.sup.evt` | heartbeat, loop, breaker, recovery, audit events |
+| A → B | `\\.\pipe\butleroy.brain.req` | request JSON, cancellable |
+| B → A | `\\.\pipe\butleroy.brain.resp` | streaming deltas, tool-calls |
+| A → C | `\\.\pipe\butleroy.sup.req` | assignTask, cancelTask, intervene, checkpoints |
+| C → A | `\\.\pipe\butleroy.sup.evt` | heartbeat, loop, breaker, recovery, audit events |
 | A → UI  | local UI thread/in-process | overlay render (never a socket) |
 
 ---

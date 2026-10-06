@@ -161,9 +161,9 @@ grammar that lives in a `return` statement is a grammar nobody can read. See
 def _delegate_int(raw: Any, fallback: int) -> int:
     """An integer argument that a caller may have sent as anything at all.
 
-    Coerces, and falls back on anything it cannot read rather than refusing: a
+    Coerces and falls back on anything it cannot read rather than refusing: a
     read tool that raises because `limit` arrived as a string would make the
-    read unavailable exactly when the caller most wants it, and the fallback is
+    read unavailable exactly when the caller most wants it and the fallback is
     the documented default rather than an invented number.
     """
     if raw is None or isinstance(raw, bool):
@@ -219,8 +219,13 @@ def _redact(args: dict | None) -> dict:
 
 #: Named in a refusal so the user knows where a credential may come from. Spelled
 #: out here and imported nowhere else, for the same reason the Telegram token
-#: constant is: one copy, and INSTALL.md §10 documents the same name.
-PASSWORD_ENV_VAR_HINT = "LOCALAIZED_EMAIL_PASSWORD"
+#: constant is: one copy, and INSTALL.md §11 documents the same name.
+#:
+#: Names the *new* variable. A refusal that lists only the new spelling would
+#: leave a user who set the old one with nothing to grep for - and `email.py`
+#: still honours the old name, so the credential would be working while the
+#: refusal implied it was not.
+PASSWORD_ENV_VAR_HINT = "BUTLEROY_EMAIL_PASSWORD"
 
 #: A plausibly-shaped address. Deliberately not RFC 5322 — the full grammar accepts
 #: `a@b` with no dot, quoted local parts and comments, and every one of those is a

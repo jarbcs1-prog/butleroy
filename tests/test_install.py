@@ -82,7 +82,7 @@ def test_the_core_dependency_set_stays_stdlib_plus_the_tray(pyproject: dict) -> 
     no model runtime, so the resident process stays at a few hundred MB and no
     VRAM (D1). A core dependency on torch or faster-whisper would break that
     property at install time even though the imports are lazy, and would make
-    `pip install locala` a multi-gigabyte download for a tray icon.
+    `pip install butleroy` a multi-gigabyte download for a tray icon.
     """
     deps = " ".join(pyproject["project"].get("dependencies", [])).lower()
     for heavy in ("torch", "faster-whisper", "faster_whisper", "transformers",
@@ -101,14 +101,14 @@ def test_the_tray_dependencies_are_declared(pyproject: dict) -> None:
 
 
 def test_there_is_a_console_script_and_it_resolves(pyproject: dict) -> None:
-    """`locala` must be a real command, and its target must actually exist.
+    """`butleroy` must be a real command, and its target must actually exist.
 
     A console script pointing at a function that was renamed is the packaging
     equivalent of a door that opens onto a wall, and it fails only at the moment
     a user types the command.
     """
     scripts = pyproject["project"].get("scripts", {})
-    assert "locala" in scripts, "the assistant needs one command to start it"
+    assert "butleroy" in scripts, "the assistant needs one command to start it"
     for name, target in scripts.items():
         module_name, _, attr = target.partition(":")
         module = __import__(module_name, fromlist=[attr])
@@ -122,7 +122,7 @@ def test_the_brain_extra_is_where_llama_cpp_python_lives(pyproject: dict) -> Non
     a new machine ends up unable to run inference with no error to trace."""
     extras = pyproject["project"].get("optional-dependencies", {})
     assert "brain" in extras, (
-        "the brain extra must exist and carry llama-cpp-python, so `locala[brain]` "
+        "the brain extra must exist and carry llama-cpp-python, so `butleroy[brain]` "
         "is a documented, correct instruction"
     )
     assert "llama-cpp-python" in " ".join(extras["brain"]).lower()

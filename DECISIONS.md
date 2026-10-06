@@ -3743,3 +3743,94 @@ speech slow tests. New tests: 29 for the config module, 21 for the ops, 19 for t
 window (run out of process), 6 for the decision log, and 2 for the isolation itself.
 
 ---
+
+---
+
+## D76 - Voices, and the one op that reads a path you chose
+
+The voices surface: `src/assistant/voiceconfig.py`, five ops, and a second section in
+the settings window. `speech.py` had three voices in a `VOICE_PATHS` dict and a
+`DEFAULT_VOICE` constant - the same shape the models had before D74, and the same
+consequence: nothing could be chosen and nothing could be added.
+
+### Three sources of truth, and why discovery rather than a registry
+
+A voice can arrive three ways, and all three have to be visible:
+
+  1. **Known** - the piper voices in `speech.VOICE_PATHS`, downloadable on demand.
+     `speech.py` stays the authority on where each one lives in the Hugging Face repo,
+     because that nesting is not uniform and the comment there records that the first
+     version assumed it was and got a confident 404.
+  2. **Installed** - a `.onnx` and `.onnx.json` pair in `models/voices/`, found by
+     **reading the directory**. That is how an imported voice appears, and how one
+     dropped in by hand appears, without being registered anywhere.
+  3. **Chosen** - the default, in `state/voices.json`.
+
+Reading the directory rather than a manifest is D74's argument again: a manifest is a
+second place for the truth to live, and the copy that goes stale is the manifest.
+
+The pair is matched **by suffix, not by stem**: `foo.onnx` goes with
+`foo.onnx.json`. The first version used `Path.with_suffix`, which looks for
+`foo.json`; every voice then read as incomplete, and it presented as a download
+problem rather than a naming one.
+
+### A voice that is not downloaded may still be chosen
+
+Deliberately unlike the model config, where a missing model is refused. By the time a
+model load fails the user has a lease outstanding and a turn in flight. Choosing a
+voice you have not downloaded is the *normal* state on a fresh machine, and it is how
+you say "this is the one I want" before spending 63 MB. Refusing would make the
+download button unreachable. `provenance` says `not downloaded yet` instead, so the
+window has something to warn with.
+
+That check was wrong on the first pass in a way worth recording: it tested
+membership of the catalogue, and every *known* voice is in the catalogue whether or
+not it is on disk - so a chosen voice that had never been downloaded reported a clean
+`file` and the window had nothing to say. The question is whether it is **here**, not
+whether it is known.
+
+### `voice_import` reads a path, and that is a real difference
+
+Every other op in this project names a file inside a directory it owns. This one
+takes a path the user picked in a Tk file dialog. That deserves more than "it is only
+an op".
+
+**What protects it is reachability, not a path check.** Ops are not tools, so
+`brain.turn` cannot propose one. A model that could call `voice_import` would have an
+arbitrary-file-read with no gate in front of it - D59's second door exactly. Only a
+process holding the authkey can call it, and that is the local user.
+
+On top of that: the source must be a file and end in `.onnx`; the matching
+`.onnx.json` must exist beside it, because a lone model is a chipmunk-voiced
+half-voice; the destination name is checked against the same `_SAFE_NAME` pattern the
+model config uses, so the copy cannot escape `models/voices/`; the copy goes to a
+`.part` name and renames; and the whole thing is audited **with the source path**,
+because "where did this voice come from" is the question asked after something sounds
+wrong, and an unrecorded import is an unanswerable one.
+
+**Considered and rejected: routing the copy through the gated `file.copy` tool.** It
+would put a T3 confirmation in front of "add my voice" - a dialog asking the user to
+confirm the thing they just asked for, on their own machine, in their own settings
+window. D60 already records where that leads: a confirmation that cannot be
+meaningfully refused trains people to click through confirmations.
+
+### Seven mutations, and one of them was refused by a guard that predates this work
+
+Each mutation was caught by the intended test, and the mutation was **verified to have
+actually changed the file** - a lesson from D73, where two attempts silently did not
+apply and "passed".
+
+The interesting one is registering `voice.import` as a tool. It does not fail a test;
+it fails **at import time**, from the daemon's own table check:
+
+    RuntimeError: executors with no registry entry: ['voice.import']
+                  - these would run without a tier, which D5 does not permit
+
+So the D21 boundary is not merely asserted by a test in this file. The daemon refuses
+to start if an executor has no registered tool, which means the mistake cannot be made
+by accident at all. That is what the table check was for, and this is the first time
+something has tried to violate it.
+
+Suite after: **1335 passed, 22 skipped, 47 subtests**, exit 0 (1294 before).
+41 new tests in `tests/test_voice_config.py`. Seven mutations, each caught by
+the intended test, each verified to have actually changed the file.

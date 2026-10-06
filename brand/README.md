@@ -205,6 +205,17 @@ once. What they must obey:
   `currentColor`. Never the brass gradient — a gradient inside a 16 px list row is
   mush.
 
+### What is built, as of D76
+
+| Section | State |
+|---|---|
+| Models | **built** - tiers, models on disk, leases, import by choosing a file |
+| Voices | **built** - installed/known voices, default, whisper model, download, import, remove |
+| Speech | not built - push-to-talk, wake word, mute |
+| Workspaces | not built - approved roots, manifests |
+| Authority | not built - tiers, confirmations, session ceiling |
+| Advanced | not built - paths, state dir, hotkeys, logs |
+
 ### Widgets to build, in priority order
 
 1. `Button` — primary (brass fill, `obsidian` text), secondary (`slate` fill), ghost

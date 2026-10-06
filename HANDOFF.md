@@ -64,7 +64,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1294 passed, 22 skipped, 47 subtests   (~2m45s, no PYTHONPATH needed)
+tests        1335 passed, 22 skipped, 47 subtests   (~2m43s, no PYTHONPATH needed)
              19 of the 22 skips are tests/test_settings_real.py, which is run
              by tests/test_settings_isolated.py in a subprocess (see structural
              claim 6 in §5). They are NOT unrun - 19 of them pass in the child.
@@ -72,7 +72,7 @@ tests        1294 passed, 22 skipped, 47 subtests   (~2m45s, no PYTHONPATH neede
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D75, contiguous, none missing - and now *tested*
+decisions    D1..D76, contiguous, none missing - and now *tested*
              (tests/test_decisions_log.py), because a hand-kept
              figure was wrong: D74 was cited by a source file and
              did not exist
@@ -83,9 +83,11 @@ name         package/script/pipes/env = butleroy (D73). The DIRECTORY is still
              G:\localaized and must stay - it is a path, not a name, and
              policy.SELF_PATHS protects this checkout by that literal string
 GUI          a separate settings WINDOW (D75), reached from the tray as
-             "Settings...". One section exists: Models. It edits
-             state/models.json through two daemon ops. The other five
-             sections in brand/README.md are specification only, no code.
+             "Settings...". TWO sections exist: Models (D74/D75) and
+             Voices (D76). Voices edits state/voices.json and can
+             download, import and remove voices. Remaining sections
+             (speech, workspaces, authority, advanced) are still only
+             specification in brand/README.md.
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed

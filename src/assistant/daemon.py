@@ -4717,6 +4717,194 @@ class Daemon:
             "brain_running": self._brain_alive(),
         }
 
+    # -- the voices and speech surface (D76) --------------------------------
+    #
+    # The same split as the model ops, for the same reasons: ops not tools, so the
+    # *assistant* cannot reach them, and audited on write. See the block above.
+    #
+    # One of these - `voice_import` - accepts a path the user chose. That is a real
+    # difference from every other op here, and `voiceconfig.import_voice`'s docstring
+    # is where the reasoning lives; the short version is that reachability is the
+    # safeguard rather than a path check, because a tool that could read an arbitrary
+    # file would be D59's second door.
+
+    def op_voice_config(self, args: dict) -> Any:
+        """Which voice speaks, what is installed, and what could be downloaded."""
+        from . import speech, voiceconfig
+
+        config = voiceconfig.load()
+        return {
+            "default": config.default,
+            "whisper": config.whisper,
+            "provenance": config.provenance,
+            "config_path": str(config.path) if config.path else None,
+            "voices_dir": str(voiceconfig.VOICES_DIR),
+            "voices": {
+                name: {
+                    "installed": v.installed,
+                    "complete": v.complete,
+                    "source": v.source,
+                    "model_bytes": v.model_bytes,
+                    "config_bytes": v.config_bytes,
+                    "note": v.note,
+                }
+                for name, v in sorted(config.voices.items())
+            },
+            "whisper_models": list(voiceconfig.WHISPER_MODELS),
+            "builtin_default": speech.DEFAULT_VOICE,
+        }
+
+    def op_voice_config_set(self, args: dict) -> Any:
+        """Choose the default voice and the transcription model.
+
+        The voice is **not** required to be installed. Choosing one you have not
+        downloaded is how you say "this is the one I want" before spending 63 MB, and
+        the window offers to fetch it immediately afterwards - so refusing here would
+        make the download button unreachable.
+        """
+        from . import voiceconfig
+
+        config = voiceconfig.load()
+        config.default = str(args.get("default") or config.default)
+        config.whisper = str(args.get("whisper") or config.whisper)
+
+        try:
+            saved = voiceconfig.save(config)
+        except voiceconfig.VoiceConfigError as exc:
+            raise Refused(str(exc)) from None
+        except OSError as exc:
+            raise DaemonError(f"could not write {saved}: {exc}") from None
+
+        self._audit(
+            actor=str(args.get("actor", "local-user")),
+            channel=self._channel(args),
+            tool="voice_config.set",
+            tier=str(Tier.REVERSIBLE_WRITE),
+            decision="allow",
+            reason=f"default={config.default} whisper={config.whisper}",
+            args={"default": config.default, "whisper": config.whisper},
+        )
+        installed = config.voices.get(config.default)
+        return {
+            "saved": str(saved),
+            "default": config.default,
+            "whisper": config.whisper,
+            "installed": bool(installed and installed.complete),
+            "note": (
+                ""
+                if installed and installed.complete
+                else f"{config.default!r} is not downloaded yet; install it to "
+                     "hear anything"
+            ),
+        }
+
+    def op_voice_install(self, args: dict) -> Any:
+        """Download a known voice. Blocks for the length of the download.
+
+        Blocks deliberately: the caller is a settings window with a button and a
+        status line, and a background download whose progress nobody can see is
+        indistinguishable from one that failed. It is a few seconds on a home
+        connection for a 60 MB voice.
+        """
+        from . import speech, voiceconfig
+
+        name = str(args.get("voice") or "")
+        if not voiceconfig.is_safe_name(name):
+            raise Refused(f"{name!r} is not a usable voice name")
+        if name not in voiceconfig.known_voices():
+            raise Refused(
+                f"{name!r} is not a known piper voice; known are "
+                f"{sorted(voiceconfig.known_voices())}"
+            )
+
+        try:
+            model, config = speech.ensure_voice(name)
+        except Exception as exc:  # noqa: BLE001 - network failure is the user's to see
+            raise DaemonError(f"could not download {name}: {exc}") from None
+
+        self._audit(
+            actor=str(args.get("actor", "local-user")),
+            channel=self._channel(args),
+            tool="voice_install",
+            tier=str(Tier.REVERSIBLE_WRITE),
+            decision="allow",
+            reason=f"downloaded {name}",
+            args={"voice": name},
+        )
+        return {
+            "voice": name,
+            "model": str(model),
+            "config": str(config),
+            "bytes": model.stat().st_size if model.is_file() else 0,
+        }
+
+    def op_voice_import(self, args: dict) -> Any:
+        """Copy a user's `.onnx` + `.onnx.json` pair into `models/voices/`.
+
+        The only op here that reads a path the caller supplied. See
+        `voiceconfig.import_voice` for why that is acceptable and what actually
+        protects it - it is not the path check, it is that the assistant cannot
+        reach an op at all.
+        """
+        from . import voiceconfig
+
+        source = args.get("source")
+        if not source:
+            raise Refused("voice_import needs a 'source' path")
+
+        try:
+            voice = voiceconfig.import_voice(
+                str(source), name=args.get("name") or None,
+            )
+        except voiceconfig.VoiceConfigError as exc:
+            raise Refused(str(exc)) from None
+        except OSError as exc:
+            raise DaemonError(f"could not copy {source}: {exc}") from None
+
+        self._audit(
+            actor=str(args.get("actor", "local-user")),
+            channel=self._channel(args),
+            tool="voice_import",
+            tier=str(Tier.REVERSIBLE_WRITE),
+            decision="allow",
+            reason=f"imported {voice.name} from {source}",
+            # The source path is recorded. "Where did this voice come from" is the
+            # question asked after something sounds wrong, and an unrecorded import
+            # is an unanswerable one.
+            args={"voice": voice.name, "source": str(source)},
+        )
+        return {
+            "voice": voice.name,
+            "installed": voice.installed,
+            "complete": voice.complete,
+            "model_bytes": voice.model_bytes,
+            "config_bytes": voice.config_bytes,
+            "note": voice.note,
+        }
+
+    def op_voice_remove(self, args: dict) -> Any:
+        """Delete an installed voice's files. Refuses the built-in fallback."""
+        from . import voiceconfig
+
+        name = str(args.get("voice") or "")
+        try:
+            removed = voiceconfig.remove_voice(name)
+        except voiceconfig.VoiceConfigError as exc:
+            raise Refused(str(exc)) from None
+        except OSError as exc:
+            raise DaemonError(f"could not remove {name}: {exc}") from None
+
+        self._audit(
+            actor=str(args.get("actor", "local-user")),
+            channel=self._channel(args),
+            tool="voice_remove",
+            tier=str(Tier.REVERSIBLE_WRITE),
+            decision="allow",
+            reason=f"removed {name}",
+            args={"voice": name, "files": removed},
+        )
+        return {"voice": name, "removed": removed}
+
     def op_brain_describe(self, args: dict) -> Any:
         """What the brain can see, from the child that would use it.
 

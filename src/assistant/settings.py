@@ -340,6 +340,301 @@ class ModelsSection(Section):
         self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
 
 
+class VoicesSection(Section):
+    """Which voice speaks, what is installed, and importing your own.
+
+    The second surface, and the first with a *file* in it. Three groups: the
+    installed voices, the default, and the transcription model. Import is a Tk file
+    dialog feeding an op, which is the one place the window hands the daemon a path
+    the user chose - see `voiceconfig.import_voice`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("voices", "Voices", "voices")
+        self.named = ("listbox", "detail", "status", "whisper", "whisper_picker")
+        self.listbox: Any = None
+        self.detail: Any = None
+        self.status: Any = None
+        self.whisper: Any = None
+        self.whisper_picker: Any = None
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        note = tk.Label(
+            body,
+            text="The voice speaks your replies. Transcription turns your speech "
+                 "into text, and runs on the CPU - it finishes before you do, so it "
+                 "never touches the graphics card.",
+            fg=c["sage"], bg=c["slate"], wraplength=640, justify="left",
+            font=("Segoe UI", 9),
+        )
+        note.pack(fill="x", padx=16, pady=(14, 10))
+        self.widgets.append(note)
+
+        self.listbox = tk.Listbox(
+            body, fg=c["bone"], bg=c["obsidian"], selectbackground=c["brass"],
+            selectforeground=c["obsidian"], relief="flat", highlightthickness=0,
+            font=("Cascadia Code", 9), activestyle="none", height=8,
+        )
+        self.listbox.pack(fill="both", expand=True, padx=16)
+        self.widgets.append(self.listbox)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+
+        self.detail = tk.Label(body, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", font=("Segoe UI", 9))
+        self.detail.pack(fill="x", padx=16, pady=(10, 0))
+        self.widgets.append(self.detail)
+
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(10, 0))
+        self.widgets.append(row)
+
+        tk.Label(row, text="Transcription model", fg=c["sage"], bg=c["slate"],
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.widgets.append(row.winfo_children()[-1])
+
+        self.whisper = tk.StringVar()
+        self.whisper_picker = tk.OptionMenu(row, self.whisper, "")
+        self.whisper_picker.configure(
+            bg=c["obsidian"], fg=c["bone"], relief="flat", bd=0,
+            highlightthickness=0, activebackground=c["slate-line"],
+            font=("Cascadia Code", 9))
+        self.whisper_picker["menu"].configure(bg=c["obsidian"], fg=c["bone"])
+        self.whisper_picker.pack(side="left", padx=10)
+        self.widgets.append(self.whisper_picker)
+
+        actions = tk.Frame(body, bg=c["slate"])
+        actions.pack(fill="x", padx=16, pady=(12, 14))
+        self.widgets.append(actions)
+
+        self.status = tk.Label(actions, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=420,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        for label, command in (
+            ("Remove", self._remove),
+            ("Import…", self._import),
+            ("Download", self._download),
+            ("Use this voice", self._make_default),
+            ("Save", self._save),
+        ):
+            button = tk.Button(
+                actions, text=label, command=command, relief="flat", bd=0,
+                bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
+                activeforeground=c["brass-lit"], font=("Segoe UI", 9),
+                padx=10, pady=4, cursor="hand2",
+            )
+            button.pack(side="right", padx=(6, 0))
+            self.widgets.append(button)
+
+        self._data: dict[str, Any] = {}
+        self._load(call)
+
+    # -- data ---------------------------------------------------------------
+
+    def _load(self, call: Callable[..., dict]) -> None:
+        try:
+            res = call("voice_config") or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+
+        self._data = res.get("result") or {}
+        voices = self._data.get("voices") or {}
+        default = self._data.get("default")
+
+        self.listbox.delete(0, "end")
+        self._names = sorted(voices)
+        for name in self._names:
+            v = voices[name]
+            mark = "*" if name == default else " "
+            state = "installed" if v.get("complete") else (
+                "incomplete" if v.get("installed") else "not downloaded")
+            size = v.get("model_bytes", 0) / 1024 ** 2
+            self.listbox.insert(
+                "end",
+                f"{mark} {name}\n      {state}"
+                + (f"   {size:.0f} MB" if size else ""),
+            )
+
+        models = [m["name"] for m in (self._data.get("whisper_models") or [])]
+        # The OptionMenu's own `menu`, held directly. The first version reached for
+        # `self.widgets[-2]["menu"]`, which is both the wrong widget (a Label) and
+        # the wrong accessor (`["menu"]` is `cget`, which raises for a widget that
+        # has no such option). It raised *mid-`_load`*, after the list was populated
+        # and before the status line was set - so the pane looked half-built and the
+        # status looked empty, two symptoms from one wrong lookup.
+        menu = self.whisper_picker["menu"]
+        menu.delete(0, "end")
+        for m in models:
+            menu.add_command(label=m, command=lambda v=m: self.whisper.set(v))
+        self.whisper.set(self._data.get("whisper") or "")
+
+        provenance = self._data.get("provenance", "")
+        if provenance == "file":
+            self._say(f"* marks the voice that speaks. Read from "
+                      f"state/voices.json.", "sage")
+        elif provenance == "defaults":
+            self._say("No voices.json yet - using the built-in default. Save to "
+                      "create one.", "amber")
+        else:
+            self._say(f"Built-in default in use. {provenance}", "amber")
+
+    def _selected(self) -> str | None:
+        selection = self.listbox.curselection()
+        if not selection:
+            return None
+        return self._names[selection[0]]
+
+    def _on_select(self, _event: Any = None) -> None:
+        name = self._selected()
+        if name is None:
+            return
+        v = (self._data.get("voices") or {}).get(name) or {}
+        self.detail.configure(text=(
+            f"{name}\n"
+            f"  {v.get('source', '?')}   model "
+            f"{v.get('model_bytes', 0) / 1024 ** 2:.1f} MB, config "
+            f"{v.get('config_bytes', 0) / 1024} KB\n"
+            f"  {v.get('note') or 'ready'}"
+        ))
+
+    # -- actions ------------------------------------------------------------
+
+    def _make_default(self) -> None:
+        """Mark the selected voice, and save immediately.
+
+        Saving on this button rather than only on Save is deliberate: choosing a
+        voice is a single, reversible decision with an obvious result, and making the
+        user choose *and then* remember to press Save is how someone ends up
+        believing they changed something they did not.
+        """
+        name = self._selected()
+        if name is None:
+            self._say("Select a voice first.", "amber")
+            return
+        self._data["default"] = name
+        self._save(message=f"{name} is now the voice that speaks.")
+
+    def _save(self, message: str | None = None) -> None:
+        try:
+            res = self._call(
+                "voice_config_set",
+                default=self._data.get("default"),
+                whisper=self.whisper.get(),
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+
+        result = res.get("result") or {}
+        self._load(self._call)
+        if message:
+            self._say(f"{message} {result.get('note', '')}".strip(), "verdigris")
+        elif result.get("note"):
+            self._say(f"Saved. {result['note']}", "amber")
+        else:
+            self._say(f"Saved. {result.get('default')} speaks, "
+                      f"{result.get('whisper')} transcribes.", "verdigris")
+
+    def _download(self) -> None:
+        """Fetch a known voice. Blocks, and says so first.
+
+        The status is set *before* the call, because a 60 MB download with no
+        message on screen for several seconds reads as a hung window.
+        """
+        name = self._selected()
+        if name is None:
+            self._say("Select a voice first.", "amber")
+            return
+        self._say(f"Downloading {name}…", "amber")
+        try:
+            res = self._call("voice_install", voice=name) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        size = (res.get("result") or {}).get("bytes", 0) / 1024 ** 2
+        self._load(self._call)
+        self._say(f"Downloaded {name} ({size:.0f} MB).", "verdigris")
+
+    def _import(self) -> None:
+        """Pick a `.onnx` with a Tk dialog, and hand the path to the daemon.
+
+        The dialog is Tk's, so the *user* chooses; the window never enumerates the
+        filesystem. The daemon validates and copies, and audits the source path.
+        """
+        import tkinter as tk
+        from tkinter import filedialog
+
+        # Parented to the root so the dialog is modal to this window rather than
+        # floating free behind it.
+        parent = self.listbox.winfo_toplevel() if self.listbox is not None else None
+        chosen = filedialog.askopenfilename(
+            parent=parent,
+            title="Choose a piper voice model",
+            filetypes=[("piper voice", "*.onnx"), ("all files", "*.*")],
+        )
+        if not chosen:
+            self._say("Import cancelled.", "sage")
+            return
+
+        try:
+            res = self._call("voice_import", source=chosen) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        self._load(self._call)
+        self._say(f"Imported {(res.get('result') or {}).get('voice', '?')}.",
+                  "verdigris")
+
+    def _remove(self) -> None:
+        name = self._selected()
+        if name is None:
+            self._say("Select a voice first.", "amber")
+            return
+        try:
+            res = self._call("voice_remove", voice=name) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        removed = (res.get("result") or {}).get("removed") or []
+        self._load(self._call)
+        self._say(f"Removed {name} ({len(removed)} file(s)). It can be downloaded "
+                  f"again.", "verdigris")
+
+    def _say(self, message: str, tone: str) -> None:
+        if self.status is not None:
+            self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
+
+
 class Settings:
     """The window. One Tk thread, one queue, built like `overlay.Overlay`.
 
@@ -631,8 +926,8 @@ class Settings:
         # Sections are listed in this order rather than discovered, because a
         # settings window whose navigation depends on a registry lookup is a window
         # that can come up empty with nothing wrong anywhere.
-        self._order = ["models"]
-        self._sections = {"models": ModelsSection()}
+        self._order = ["models", "voices"]
+        self._sections = {"models": ModelsSection(), "voices": VoicesSection()}
 
         for key in self._order:
             section = self._sections[key]

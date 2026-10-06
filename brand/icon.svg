@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BUTLEROY - app icon.
+
+  A rounded square in obsidian with the brass bell. This is the window icon, the
+  installer icon and the .ico source. The tray uses mark-mono instead: Windows
+  composes tray icons against an unpredictable background, and a filled shape
+  with a hard edge survives that where a lit gradient does not.
+
+  Corner radius is 22.5% of the side, which is the Windows 11 "rounded rect"
+  proportion and matches what the OS does to a .ico at medium sizes.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-label="Butleroy">
+  <title>Butleroy</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0"   stop-color="#1B2019"/>
+      <stop offset="1"   stop-color="#0C0F0B"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#E8CE86"/>
+      <stop offset="0.42" stop-color="#C8A951"/>
+      <stop offset="0.78" stop-color="#9C7F35"/>
+      <stop offset="1"    stop-color="#7E6528"/>
+    </linearGradient>
+    <linearGradient id="brassRim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#D9BC6C"/>
+      <stop offset="0.55" stop-color="#B08F3C"/>
+      <stop offset="1"    stop-color="#6F5822"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="58" fill="url(#plate)"/>
+  <!-- hairline: gives the plate an edge against a dark taskbar -->
+  <rect x="0.75" y="0.75" width="254.5" height="254.5" rx="57.25"
+        fill="none" stroke="#C8A951" stroke-opacity="0.18" stroke-width="1.5"/>
+
+  <!-- the mark, inset: 40/256 margin reads as "centred" better than 32 -->
+  <g transform="translate(128 132) scale(2.6) translate(-32 -32)">
+    <circle cx="32" cy="12.4" r="4.3" fill="url(#brass)"/>
+    <path d="M 17 40 C 17 25.6, 23.6 17.6, 32 17.6 C 40.4 17.6, 47 25.6, 47 40 Z"
+          fill="url(#brass)"/>
+    <rect x="10.5" y="38.2" width="43" height="8.4" rx="4.2" fill="url(#brassRim)"/>
+    <rect x="15" y="48.6" width="34" height="6" rx="3" fill="url(#brassRim)"/>
+    <path d="M 21.5 35.5 C 21.5 26.5, 25.8 21.5, 30 20.6"
+          fill="none" stroke="#F6E7BC" stroke-width="2.6"
+          stroke-linecap="round" opacity="0.5"/>
+  </g>
+</svg>

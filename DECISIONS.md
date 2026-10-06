@@ -3304,3 +3304,115 @@ be discovered: `test_daemon.py` and `test_confirm.py` both asserted "registered 
 outnumber executable ones", which was a coincidence that has now stopped carrying
 information. They register a synthetic unbuildable tool instead, which is the
 condition rather than an instance of it.
+
+---
+
+## D72 - Butleroy: a brand kit, and the bug only measuring pixels could find
+
+The name is **Butleroy - LocalAIzed Concierge for Windows**, from the reference term
+*butleraized*. The kit is `brand/`: a spec (`README.md`), `tokens.json`, four SVGs
+(`mark`, `mark-mono`, `icon`, `logo`), a 27-glyph UI set, and a generated raster set
+(3 families x 10 sizes, plus a 9-frame `.ico`).
+
+**The concept.** Butleraized is a *state*, not a service: everything handled, nothing
+asked twice. A good butler is invisible - the room is simply ready. So the brand is
+about absence of friction, not presence of a servant, and the mark is a **hotel
+concierge bell**, low and wide with a heavy rim. A bow tie would have read as costume;
+a bell reads as *handled*. Sound waves were drawn and cut: they push the silhouette
+outward, which costs legibility at 16 px, and a confident mark does not need to
+announce that it makes a noise.
+
+Palette is private-members'-club green-black with brass. It reads as service rather
+than as utility, and it sits on the dark UI the project already had.
+
+### The geometry lives in `src/assistant/brand.py`, not in `brand/`
+
+This is the load-bearing decision, and it was nearly got wrong. The obvious layout is
+to keep the renderer in `brand/tools/render_icons.py` - and then the tray cannot use
+it, because **`pyproject.toml` packages `src/` only**. A tray importing from
+`brand/tools/` works from a checkout and fails with `ImportError` for anyone who
+actually installed the thing, which is the failure mode INSTALL.md's install-of-record
+is supposed to make impossible.
+
+So the geometry moved into the package. `render_icons.py` is now a thin CLI over it,
+and `tray.py`'s `_icon_image` renders from it at runtime. One copy of the shape in
+code. The tray's previous hand-drawn three-node icon is gone - it was reasoned, not
+accidental (`"an .ico in the repo would be an opaque asset nobody can review"`), but
+that reasoning is satisfied better by code in the package than by a PNG in a directory
+that does not ship.
+
+`import assistant.brand` pulls in **no third-party module**; Pillow is imported inside
+the functions, so D1's stdlib-only daemon import survives. Checked in a subprocess,
+because an in-process `sys.modules` assertion can only ever pass once pytest has
+imported Pillow for something else.
+
+### Three copies of the geometry, and the test that makes three safe
+
+`mark.svg` is a third copy, deliberately: a designer needs a file they can open in a
+vector editor, and parsing SVG would mean depending on a rasteriser this project
+deliberately does not have (D66). Three copies is only safe because
+`test_the_svg_the_tokens_and_the_generator_state_one_geometry` parses the SVG and
+compares it to both - it does **not** restate the numbers, because a test comparing a
+copy of itself against the file it was copied from keeps passing after either one
+changes.
+
+### Four bugs, and every one of them rendered perfectly
+
+This is the part worth recording. **All four bugs in the icon generator produced
+output that looked fine and was wrong.** None was found by looking; every one was
+found by measuring the rendered pixels.
+
+1. **The highlight rendered as a dark arc, not a light one.** The stroke is 50% alpha.
+   `ImageDraw` *overwrites* pixels; it does not blend them. So drawing it straight
+   onto the dome punched a semi-transparent hole and the obsidian plate showed
+   through - while the identical stroke in `mark.svg`, where `opacity` genuinely
+   blends, was light. **The two assets disagreed about the same mark.** Fixed by
+   drawing on a separate layer and `alpha_composite`-ing it. This is precisely the
+   drift the geometry cross-check *cannot* see, because opacity is not geometry.
+   `test_the_highlight_is_lighter_than_the_dome_not_darker` now measures it, and it is
+   the **only** one of the 53 brand tests that catches it - reverting the fix leaves the
+   other 52 passing.
+2. **The bell sat in the top-left corner of the plate.** `alpha_composite(im, (x, y))`
+   passes the tuple as `source`, not `dest`. `dest=` is now named.
+3. **Then it was clipped off the bottom-right.** `draw_icon` works in supersampled
+   space and the mark was sized in final-pixel space, so a 128 px mark landed in a
+   1024 px canvas at a final-scale offset - an 11 px bell, measured by finding the brass
+   pixels. Both this and the previous one are the same class: two coordinate systems,
+   neither named.
+4. **`Path.replace()` is a move, not a copy**, so `tray.png` consumed
+   `butleroy-tray-32.png` and the set lost its 32 px tray.
+
+A fifth defect was in the *palette*, found by a contrast assertion rather than by
+rendering: `rust` was `#C4553F` at **4.24:1** on obsidian, below WCAG AA. Corrected to
+`#D9694F` (5.47:1). A colour reserved for *"this is destructive"* cannot be the one
+that is hardest to read.
+
+### What the tests are for
+
+An icon set is the easiest thing in a repository to rot, because nothing breaks. So
+the assertions are **cross-checks between files**, not checks of any single file:
+three copies of one geometry must agree; the committed rasters must be byte-identical
+to what the module draws now (`test_the_committed_rasters_are_not_stale`, which catches
+both a stale set and a hand-edited PNG); the tray must draw the brand mark, compared as
+pixels; every state colour must clear 4.5:1 on both grounds.
+
+Deliberately **no** test asserts a colour *looks* right, nor that the lockup is
+optically balanced. Judgement about whether brass reads as brass cannot be automated,
+and a test that pretended to would be theatre - the D36 shape.
+
+There is also **no SVG rasteriser in this project** - `cairosvg`, `svglib` and
+`magick` are all absent, and adding one would breach D66 for a build step. So the
+SVG assets cannot be measured at all, only parsed. This bounds what is checkable:
+every statement above about the *rasters* is measured on real rendered pixels,
+while the SVGs are only checked for internal consistency. One test that tried to
+assert the lockup's optical balance was written and then deleted, because it
+would have been asserting a number invented to match a file nobody could render.
+
+What *is* checked is that the palette is internally consistent, legible on the
+grounds it is used on, and not defined twice with different values.
+
+Five mutations were run against the suite to prove the new tests bite. Each was caught
+by exactly the test meant to catch it, and by nothing else.
+
+Suite after: **1217 passed, 3 skipped, 47 subtests** (1167 before, +50 in
+`test_brand.py`).

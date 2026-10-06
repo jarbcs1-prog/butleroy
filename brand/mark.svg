@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BUTLEROY - the mark.
+
+  A concierge's bell, low and wide with a heavy rim, because that is the
+  proportion of a hotel desk bell and it is what reads as "handled" rather
+  than "servant". A bow tie would read as costume; a bell reads as service.
+
+  Drawn on a 64-unit grid with a 10-unit margin so the mark sits optically
+  centred rather than mathematically centred - the plinth is heavier than the
+  knob, so the true centre of mass is above the geometric centre and the whole
+  thing is nudged down 1 unit.
+
+  Sound waves were tried and cut. They push the silhouette outward, which
+  matters at 16px, and a confident mark does not need to announce that it
+  makes a noise.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="Butleroy">
+  <title>Butleroy</title>
+  <defs>
+    <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
+      <!-- Lit from above, as a polished bell would be. -->
+      <stop offset="0"    stop-color="#E8CE86"/>
+      <stop offset="0.42" stop-color="#C8A951"/>
+      <stop offset="0.78" stop-color="#9C7F35"/>
+      <stop offset="1"    stop-color="#7E6528"/>
+    </linearGradient>
+    <linearGradient id="brassRim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#D9BC6C"/>
+      <stop offset="0.55" stop-color="#B08F3C"/>
+      <stop offset="1"    stop-color="#6F5822"/>
+    </linearGradient>
+  </defs>
+
+  <!-- knob -->
+  <circle cx="32" cy="12.4" r="4.3" fill="url(#brass)"/>
+
+  <!-- dome -->
+  <path d="M 17 40
+           C 17 25.6, 23.6 17.6, 32 17.6
+           C 40.4 17.6, 47 25.6, 47 40 Z"
+        fill="url(#brass)"/>
+
+  <!-- rim: the heavy lip that makes it a desk bell and not a cloche -->
+  <rect x="10.5" y="38.2" width="43" height="8.4" rx="4.2" fill="url(#brassRim)"/>
+
+  <!-- plinth -->
+  <rect x="15" y="48.6" width="34" height="6" rx="3" fill="url(#brassRim)"/>
+
+  <!-- the one highlight. Without it the bell is a silhouette; with it, metal. -->
+  <path d="M 21.5 35.5 C 21.5 26.5, 25.8 21.5, 30 20.6"
+        fill="none" stroke="#F6E7BC" stroke-width="2.6"
+        stroke-linecap="round" opacity="0.5"/>
+</svg>

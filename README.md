@@ -1,6 +1,8 @@
-# Local AI Assistant
+# Butleroy — LocalAIzed Concierge for Windows
 
-A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative work that needs doing, and orchestrates software projects by delegating to a team of agents — with all reasoning and all memory on-device.
+A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative work that needs doing, and orchestrates software projects by delegating to a team of agents - with all reasoning and all memory on-device.
+
+> **Naming.** The product is **Butleroy**. The Python package, the wheel and the named pipes are still `locala` / `\\.\pipe\locala.*`, because renaming the import path and the IPC namespace would touch every module and break running installs for no user-visible gain. The brand, the tray, the window title and the icon are Butleroy; the plumbing is not. See `brand/README.md` for the identity and DECISIONS.md D72 for why the icon geometry lives in `src/assistant/brand.py`.
 
 ## Read in this order
 
@@ -11,6 +13,7 @@ A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs 
 | **PLAN.md** | Seven phases with measurable gates |
 | **INSTALL.md** | How to install it. **Read §3 first** — one step is mandatory and counter-intuitive |
 | **HANDOFF.md** | Where the work stands and how to resume it |
+| `brand/README.md` | The brand kit: mark, palette, glyphs, voice, widget rules |
 | `AI_Assistant_Local.md` | The original source document. **Superseded** — retained for provenance only |
 
 ## The governing constraint

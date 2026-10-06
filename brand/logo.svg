@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BUTLEROY - the lockup.
+
+  Mark, wordmark, rule, descriptor. The only place the two faces meet.
+
+  Proportions, and why they are these: the wordmark cap-height is set equal to the
+  mark's dome height, so the two shapes are the same size rather than merely
+  adjacent - which is what makes a lockup read as one thing. The descriptor sits
+  under a 1px brass rule at 60% tracking, and the rule is as wide as the
+  wordmark, so the block has a shared edge instead of a ragged one.
+
+  Set on obsidian. For a light ground, swap the three fills.
+
+  PRODUCTION: the wordmark here is live text in a serif stack. Convert to outlines
+  against a licensed cut before anything ships - see brand/README.md §2.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 168" width="560" height="168"
+     role="img" aria-label="Butleroy, LocalAIzed Concierge">
+  <title>Butleroy — LocalAIzed Concierge</title>
+  <defs>
+    <linearGradient id="b" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#E8CE86"/>
+      <stop offset="0.42" stop-color="#C8A951"/>
+      <stop offset="0.78" stop-color="#9C7F35"/>
+      <stop offset="1"    stop-color="#7E6528"/>
+    </linearGradient>
+    <linearGradient id="br" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#D9BC6C"/>
+      <stop offset="0.55" stop-color="#B08F3C"/>
+      <stop offset="1"    stop-color="#6F5822"/>
+    </linearGradient>
+  </defs>
+
+  <!-- the mark, at 1:1 -->
+  <g transform="translate(8 44) scale(1.25)">
+    <circle cx="32" cy="12.4" r="4.3" fill="url(#b)"/>
+    <path d="M 17 40 C 17 25.6, 23.6 17.6, 32 17.6 C 40.4 17.6, 47 25.6, 47 40 Z"
+          fill="url(#b)"/>
+    <rect x="10.5" y="38.2" width="43" height="8.4" rx="4.2" fill="url(#br)"/>
+    <rect x="15" y="48.6" width="34" height="6" rx="3" fill="url(#br)"/>
+    <path d="M 21.5 35.5 C 21.5 26.5, 25.8 21.5, 30 20.6" fill="none"
+          stroke="#F6E7BC" stroke-width="2.6" stroke-linecap="round" opacity="0.5"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="112" y="92"
+        font-family="'Hoefler Text','Playfair Display',Georgia,'Times New Roman',serif"
+        font-size="62" letter-spacing="0.5" fill="#EDE8DC">Butleroy</text>
+
+  <!-- the shared edge -->
+  <rect x="114" y="112" width="404" height="1" fill="#C8A951" opacity="0.55"/>
+
+  <!-- descriptor -->
+  <text x="114" y="140"
+        font-family="'Inter','Segoe UI',system-ui,sans-serif"
+        font-size="15" letter-spacing="2.7" fill="#7C8A7C">LOCALAIZED CONCIERGE</text>
+</svg>

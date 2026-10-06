@@ -1,12 +1,18 @@
 # HANDOFF
 
 **Purpose:** resume this project without re-deriving anything. Last rewritten at the
-end of the session that fixed D68.
+end of the session that built the brand kit (D72).
 
 **If you are resuming from a prompt like** *"inspect `G:\localaized` to determine
 the current progress status, find out where it stopped and resume"* — read this
-whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D71.
+whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D72.
 Do not re-read the other 4,600 lines before starting work.
+
+**The product is Butleroy** (LocalAIzed Concierge for Windows). The brand kit is
+`brand/`; the mark geometry the product actually draws is `src/assistant/brand.py`,
+and the tray renders from it at runtime rather than loading a file. The Python
+package, wheel and named pipes are still `locala` — deliberately; see
+`brand/README.md` and D72.
 
 ---
 
@@ -38,7 +44,8 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D70–D71 | `email.*` and `reflect.*` — the last two tool groups, and what the real thing found that fakes could not |
+| `DECISIONS.md` §D70-D72 | `email.*`, `reflect.*`, and the brand kit - the last tool groups plus the most recent session |
+| `brand/README.md` | the Butleroy brand kit: mark, palette, glyphs, voice, widget rules |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
 | `AI_Assistant_Local.md` | the original brief. **Superseded** — provenance only |
@@ -241,12 +248,12 @@ finding, and treat "the fakes agree with the code" as the thing to distrust.
 
 **Every tool group is built. `email.*` closed with D70, `reflect.*` with D71, and
 `reflect.*` was the last one: 61 registered, 61 with executors, nothing half-built.**
-There is no build queue left. What remains is the GUI work the user has asked for,
-which was deliberately left alone this session, plus the four things listed as
-"deliberately not done" below.
+There is no build queue left. D72 built the brand kit. What remains is the GUI
+work the user has asked for, plus the four things listed as "deliberately not done"
+below.
 
 So this section no longer tells you what to build. What it does instead is name the
-three claims that are now *structural* and worth knowing, because they are the ones a
+four claims that are now *structural* and worth knowing, because they are the ones a
 future edit could quietly undo:
 
 1. **No `reflect.*` tool takes a path.** That is what makes D21's "may not modify its
@@ -258,6 +265,12 @@ future edit could quietly undo:
 3. **The gate records its own refusals.** That is the evidence the promotion gate
    runs on. If `_note_friction` stops being called, reflection does not get more
    permissive — it stops being able to promote *anything*, silently.
+4. **The mark geometry lives in `src/assistant/brand.py`, not `brand/`.** This is
+   because `pyproject.toml` packages `src/` only, so the tray *cannot* import from
+   `brand/tools/` without breaking every installed user. `brand/tools/render_icons.py`
+   is a thin CLI over the package module. If someone "tidies" the geometry back into
+   `brand/`, the tray keeps working in a checkout and fails on install — and no test
+   here will run against an installed copy. Read `brand/README.md` before moving it.
 
 ### The lesson from D70 and D71, which is the one to carry
 
@@ -329,8 +342,24 @@ cannot find a defect living in the transition between two instances of it.* So:
 - **Assert on the payload, not on "it handled it".** The D68 window would have
   passed a test asserting the turn dealt with a tool. What caught it was asserting
   that the VRAM figure the user asked for was actually on screen. This has now
-  bitten at four different heights (D36 twice, D67, D68) and is the single most
-  transferable lesson in this file.
+  bitten at five different heights (D36 twice, D67, D68, D72) and is the single most
+  transferable lesson in this file. **All four bugs in the D72 icon generator
+  produced output that looked correct.** None was found by looking at it: each was
+  found by measuring the rendered pixels — where the brass is, whether a highlight
+  is brighter than the surface beside it, whether the mark is centred. When the
+  output is an image, the test has to look at the image.
+- **A renderer and the thing it renders are two implementations. Check they
+  agree.** The 50% highlight blended correctly in `mark.svg` and rendered as a
+  dark hole in the PNG, because `ImageDraw` overwrites pixels and SVG `opacity`
+  blends. Same source, opposite result. This is D70's "the fake did its own
+  LOGIN" in a new medium: the generator agreed with the design about everything
+  neither of them checked.
+- **You cannot test what you cannot run.** There is no SVG rasteriser in this
+  project (`cairosvg`, `svglib`, `magick` all absent, and adding one would breach
+  D66). So the SVGs are only ever parsed, never rendered. One test asserting the
+  lockup's optical balance was written and then **deleted** because it would have
+  been asserting a number invented to match a file nobody here can look at. State
+  the bound instead of inventing a check.
 - **Fakes must fail on behaviour, not on method coverage.** The first
   `test_overlay_lifecycle.py` used a fake root that only *recorded* `after()`
   callbacks; it would have passed against a Tk with no event loop, because the

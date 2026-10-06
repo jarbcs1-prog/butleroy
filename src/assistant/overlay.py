@@ -90,7 +90,7 @@ class Overlay:
         self,
         call: Callable[..., dict],
         *,
-        title: str = "Assistant",
+        title: str = "Butleroy",
         ttl_s: float = OVERLAY_IDLE_TTL_S,
     ) -> None:
         self._call = call

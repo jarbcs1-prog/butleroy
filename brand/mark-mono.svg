@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BUTLEROY - the mark, single colour.
+
+  For the system tray, the Windows taskbar, a monochrome toolbar and anywhere a
+  gradient cannot survive. Same silhouette as mark.svg, flattened, because a mark
+  that needs a gradient to work is not a mark.
+
+  Fill is left as currentColor so the consumer decides: on a dark tray, bone;
+  on a light surface, obsidian.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="Butleroy">
+  <title>Butleroy</title>
+  <g fill="currentColor">
+    <circle cx="32" cy="12.4" r="4.3"/>
+    <path d="M 17 40 C 17 25.6, 23.6 17.6, 32 17.6 C 40.4 17.6, 47 25.6, 47 40 Z"/>
+    <rect x="10.5" y="38.2" width="43" height="8.4" rx="4.2"/>
+    <rect x="15" y="48.6" width="34" height="6" rx="3"/>
+  </g>
+</svg>

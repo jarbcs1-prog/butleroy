@@ -338,29 +338,22 @@ class Presence:
 
 
 def _icon_image(size: int = 64):
-    """A tray icon drawn here rather than shipped as a binary.
+    """The tray icon: the Butleroy bell, drawn rather than shipped as a binary.
 
-    An .ico in the repo would be an opaque asset nobody can review. Three
-    ellipses and two connecting lines is the whole idea - the assistant, linking
-    the planes - and it is inspectable in a diff.
+    Drawn rather than loaded from `brand/icons/tray.png`, and that is not a
+    preference for reviewability over convenience - it is that `src/` is the only
+    directory that gets packaged, so a PNG in `brand/` would simply not exist for
+    an installed user and the tray would fall over or silently show nothing. The
+    geometry is therefore `assistant.brand`, in the package, and this file and
+    `brand/tools/render_icons.py` are two views of one shape.
+
+    Mono, because Windows composes tray icons against an unpredictable
+    background and a filled shape with a hard edge survives that where a lit
+    gradient turns to mud.
     """
-    from PIL import Image, ImageDraw
+    from .brand import tray_image
 
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    line = max(2, size // 16)
-    r = size // 6
-    nodes = [
-        (size // 2, r + 2),                      # the brain
-        (r + 2, size - r - 2),                   # tools
-        (size - r - 2, size - r - 2),            # supervisor
-    ]
-    d.line([nodes[1], nodes[0]], fill=(120, 200, 255, 255), width=line)
-    d.line([nodes[2], nodes[0]], fill=(120, 200, 255, 255), width=line)
-    colours = [(235, 235, 245, 255), (255, 170, 60, 255), (120, 220, 140, 255)]
-    for (cx, cy), c in zip(nodes, colours):
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=c)
-    return img
+    return tray_image(size)
 
 
 class Tray:
@@ -373,7 +366,7 @@ class Tray:
     audits.
     """
 
-    def __init__(self, daemon, *, title=f"Local assistant {__version__}",
+    def __init__(self, daemon, *, title=f"Butleroy {__version__}",
                  hotkey=None):
         self.daemon = daemon
         self.title = title

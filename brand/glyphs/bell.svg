@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Bell - the mark, at glyph scale.
+
+  Same silhouette as brand/mark.svg on a 24-unit grid instead of a 64-unit one:
+  stroke 2 instead of gradient, and the proportions kept. It is not a scaled-down
+  copy of the app icon; it is the mark redrawn for the size it will actually be
+  used at, which is 16-20px in a list row.
+
+  A filled bell at 16px is a solid blob. This has holes, so it still reads as a
+  bell once it is 16px tall.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Bell">
+  <path d="M 6 17 C 6 11 8.5 7 12 7 C 15.5 7 18 11 18 17"/>
+  <path d="M 4.5 17 H 19.5 A 1.5 1.5 0 0 1 19.5 20 H 4.5 A 1.5 1.5 0 0 1 4.5 17 Z"/>
+  <path d="M 8 21.5 H 16"/>
+  <path d="M 12 4.5 V 7"/>
+</svg>

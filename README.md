@@ -58,12 +58,12 @@ verify_install.py              # prove the install actually works
 
 | | |
 |---|---|
-| Tests | **1095 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
+| Tests | **1167 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
 | Install | `uv pip install -e .` in 2.9 s; `verify_install.py` exits 0 |
 | Restart | The daemon survives restarts (D64) |
 | Launch | One command starts tray + chord + prompt window (D65, D67) |
-| Tools | 61 registered, **57 with executors**, 4 to go (`reflect.*`) |
-| Phases | 0–5 closed. Phase 6 (`reflect.*`) not started |
+| Tools | 61 registered, **61 with executors** — every tool can run |
+| Phases | **0–6 closed.** Every registered tool has an executor |
 
 **Blocking defects found and fixed** — every one of them passed the suite as it
 stood, which is 1,090 tests for the last one:
@@ -91,16 +91,23 @@ stood, which is 1,090 tests for the last one:
   and `email.delete` files a message locally before expunging it, so it can be
   recovered. A real IMAP server on a real socket then found four bugs no fake could
   — including that **the client never authenticated at all**.
+- **D71** — `reflect.*`, self-improvement that *cannot* do damage. **No tool in the
+  group takes a path argument**, so every file is derived from the state directory
+  and "the assistant modified its own code" is an operation with no representation;
+  the gate denies `src/` independently, and the promoted overlay reaches the system
+  prompt and nothing else — a lesson can change how the assistant behaves, never
+  what it may do. The daemon records its own refusals, so a lesson rests on what
+  happened rather than on what the model says happened.
 
 **Proven end to end, across the whole authority range.** Type a question into the
 window and get an answer back — overlay → `brain_turn` → VRAM lease → the
 `brain_server` child → real llama.cpp on the GPU → streamed answer → transcript.
 Asking *how much VRAM am I using right now* commits to `system.gpu_state` and shows
 the real figures. Asking it to delete a file in an approved workspace produces the
-confirmation dialog on its own, and approving it removes the file. Both measured on
-the 4B through the real arbiter and gate.
+confirmation dialog on its own, and approving it removes the file. A lesson promoted
+from repeated refusals reaches a **resident** model's prompt with no reload. All
+measured on the 4B through the real arbiter and gate.
 
-**Outstanding:** `reflect.*` (4 tools, Phase 6). Autostart is documented in
-`INSTALL.md` §9 but not registered. Mail is built — `INSTALL.md` §11.
-See `HANDOFF.md` for the current state of play and `PLAN.md` → "Immediate next
-action".
+**Outstanding:** autostart is documented in `INSTALL.md` §9 but not registered —
+it is a persistent change to the machine, so it asks first. See `HANDOFF.md` for the
+current state of play and `PLAN.md` → "Immediate next action".

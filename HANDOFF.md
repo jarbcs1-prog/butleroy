@@ -5,7 +5,7 @@ end of the session that fixed D68.
 
 **If you are resuming from a prompt like** *"inspect `G:\localaized` to determine
 the current progress status, find out where it stopped and resume"* — read this
-whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D70.
+whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D71.
 Do not re-read the other 4,600 lines before starting work.
 
 ---
@@ -38,7 +38,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D70 | `email.*`, and the four bugs a real IMAP server found that no fake could |
+| `DECISIONS.md` §D70–D71 | `email.*` and `reflect.*` — the last two tool groups, and what the real thing found that fakes could not |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
 | `AI_Assistant_Local.md` | the original brief. **Superseded** — provenance only |
@@ -48,11 +48,11 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1138 passed, 3 skipped, 47 subtests   (~2m34s, no PYTHONPATH needed)
+tests        1167 passed, 3 skipped, 47 subtests   (~2m52s, no PYTHONPATH needed)
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
-tools        61 registered · 57 with executors · 4 unimplemented
-             (the 4 reflect.* — the only group left; email.* is built, D70)
-decisions    D1..D70, contiguous, none missing
+tools        61 registered · 61 with executors · 0 unimplemented
+             (every registered tool can run; reflect.* closed it, D71)
+decisions    D1..D71, contiguous, none missing
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed
@@ -124,11 +124,41 @@ handoff predicted.**
   and nothing is left pending. D69 would have made every step after the second
   impossible.
 
+- **D71 — `reflect.*`, and self-improvement that cannot do damage.** The last tool
+  group, and the one D21 says to build last and on purpose. The interesting question
+  was never how to make reflection work but how to make it *unable* to hurt anything,
+  and the answer was structural rather than promised: **no `reflect.*` tool accepts a
+  path**, so every file is derived from the state directory and "the assistant
+  modified its own code" is an operation with no representation. The gate denies
+  `src/` independently, and the overlay reaches the system prompt and nothing else —
+  measured, not asserted: the probe promoted a lesson, then asked the gate to
+  overwrite `daemon.py`, and watched it refuse.
+
+  The gate now **records its own refusals**, which is what makes reflection possible
+  rather than merely safe — a lesson the model derived from its own account of a
+  conversation is a lesson about what it thinks happened. And the four anti-patterns
+  D21 names each got a rule and each rule got a mutation: one observation is never a
+  pattern, a proposal without a falsifiable `check` is refused, a candidate the daemon
+  did not witness is never promoted, and one change per cycle.
+
+  Twelve mutations, twelve caught — after the run found **two defects in my own
+  gate**: a threshold of 60 on a 0–10,000 scale, so every candidate passed it, and a
+  score term that no mutation could detect because the gate already refused every
+  candidate it applied to.
+
+  **Two bugs only loading the real 4B could find**: every unit test constructs a
+  `Brain` with a roots reader, so the branch that never refreshed the overlay was one
+  nobody took — the whole feature was inert for every construction that did not — and
+  the constructor then raised `AttributeError` because it read the overlay before
+  assigning it. Proven end to end: 4 real refusals → a candidate → promoted → the
+  overlay present in a **resident** model's prompt with no reload, and the gate still
+  refusing `src/`.
+
 The project's test suite had passed 1025 tests while three production-blocking
 defects were live, 1080 while a fourth was, and 1090 while a fifth was. That is the
 thing to carry forward: **this codebase's tests do not cover lifecycle, threading,
-the real GUI, call sequences between two ops, or whether its widgets can be
-constructed.** See §6.
+the real GUI, call sequences between two ops, whether its widgets can be
+constructed, or how its objects are constructed in practice.** See §6.
 
 <details><summary>The previous session, for provenance</summary>
 
@@ -209,16 +239,27 @@ nothing checks `relief`, `padx`, `pady`, `wraplength`, `anchor`, `justify` or
 `insertbackground`, and `_Confirm` uses most of them. Expect the same class of
 finding, and treat "the fakes agree with the code" as the thing to distrust.
 
-**`email.*` is now built (D70), so both traps in the list below are spent and
-neither needs re-deriving.** What is left is `reflect.*`, and the GUI work the user
-has asked for — both out of scope for this session, deliberately.
+**Every tool group is built. `email.*` closed with D70, `reflect.*` with D71, and
+`reflect.*` was the last one: 61 registered, 61 with executors, nothing half-built.**
+There is no build queue left. What remains is the GUI work the user has asked for,
+which was deliberately left alone this session, plus the four things listed as
+"deliberately not done" below.
 
-1. **`reflect.*`** — four tools, Phase 6. Build it last and on purpose. It is the
-   only place the assistant reasons about improving itself, and D21 forbids it
-   writing its own code or policy *permanently, at every phase*. That constraint
-   belongs in the tests from the first line, not retrofitted.
+So this section no longer tells you what to build. What it does instead is name the
+three claims that are now *structural* and worth knowing, because they are the ones a
+future edit could quietly undo:
 
-### The lesson from D70, which is the one to carry
+1. **No `reflect.*` tool takes a path.** That is what makes D21's "may not modify its
+   own code or policy" impossible rather than enforced. A future argument called
+   `target` or `file` in that group would reopen it.
+2. **The reflection overlay reaches the system prompt and nothing else.** It cannot
+   widen authority — a promoted lesson cannot make the gate permit anything, and the
+   probe in D71 asks the gate to overwrite `daemon.py` and watches it refuse.
+3. **The gate records its own refusals.** That is the evidence the promotion gate
+   runs on. If `_note_friction` stops being called, reflection does not get more
+   permissive — it stops being able to promote *anything*, silently.
+
+### The lesson from D70 and D71, which is the one to carry
 
 **Run the real thing as early as you can, not at the end.** `email.*` has a fake
 suite and a live-server suite, and the live server found four bugs the fake suite
@@ -227,19 +268,22 @@ called green — including that the client **never authenticated at all**, and t
 `IMAP4.error` where a fake returns a `(status, data)` pair. Every one of them lived
 *at or above the seam*, and every one of them was invisible from below it.
 
-The pattern, now seen five times: **the fake agrees with the code about everything it
+The pattern, now seen six times: **the fake agrees with the code about everything it
 does not check.** In D68 that was colours on a button. In D70 it was everything above
-a socket — the login, the protocol, the literal framing. So when a module has a
-boundary a fake can stand in for, ask what the fake is standing in for, and then go
-find out whether the part it replaced ever worked.
+a socket — the login, the protocol, the literal framing. In D71 it was the *other*
+direction: every unit test constructs a `Brain` with a roots reader, so the branch
+that never refreshed the overlay was one nobody took, and loading the real model was
+the only thing that found it. So when a module has a boundary a fake can stand in
+for — or a construction the tests all happen to take one way — ask what it is standing
+in for, and then go find out whether the part it replaced ever worked.
 
 Deliberately **not** done, and why:
 
 - **The 9B deep tier** is downloaded (5.96 GB) and has never been measured;
   `phase1_measure.py` does not reference it. Kill criterion already written: if it
   misses the gate, drop the deep tier and let Plane D do heavy reasoning.
-- **`daemon.py`** is 4,667 lines in one class — the largest single point of
-  failure left. It absorbed three changes without complaint, which is a good sign.
+- **`daemon.py`** is now ~5,000 lines in one class — still the largest single point
+  of failure left. It absorbed five changes without complaint, which is a good sign.
   Split only along the `_OPS` seams, only opportunistically, never as a standalone
   refactor with no behaviour change to justify it.
 - **Autostart** is documented (`INSTALL.md` §9) but not registered. Registering a
@@ -334,7 +378,7 @@ Local assistant 0.3.0 that is empty white") was the one that cracked it.
 
 **Decisions.** New findings go in `DECISIONS.md` as `## Dn - <title that states
 the finding, not the topic>`. Rationale and evidence, including the wrong
-hypotheses and what they cost. The numbering is load-bearing: all 70 are
+hypotheses and what they cost. The numbering is load-bearing: all 71 are
 contiguous. When a plan line turns out to be wrong on the record, correct the line
 and say so — do not quietly overwrite it.
 

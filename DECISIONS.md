@@ -2245,3 +2245,101 @@ under test, so the test should ask for whatever currently has it. The count of
 times a stand-in had to be moved is the evidence - and the first assertion in this
 project that failed three times for one reason was found by running the suite, not
 by reading the test.
+
+---
+
+## D64 - The daemon could start exactly once, and 1025 tests agreed it worked
+
+Found by launching the daemon rather than running its tests, on the way to
+shipping it. It is the most consequential defect in this file, and the least
+visible: the project is specified as a 24/7 resident service and the code could
+serve one process lifetime.
+
+### The measurement
+
+```
+$ python -m assistant.daemon            # second ever start, real state/ directory
+  File "src\assistant\daemon.py", line 508, in serve_forever
+    ipc.store_authkey(self.authkey_path, self.authkey)
+FileExistsError: [Errno 17] File exists: 'G:\localaized\state\authkey.bin'
+```
+
+Not a stale-file nuisance. Three facts, each measured:
+
+- `Daemon.__init__` mints a **fresh** key on every construction (`daemon.py:305`).
+- `store_authkey` opens the file `O_WRONLY|O_CREAT|O_EXCL` (`ipc.py:108`).
+- **Nothing removes that file.** Not `shutdown()`, not an exit path.
+
+So the second start raised `FileExistsError`, and every restart after it - reboot,
+crash, service restart - died identically until a human deleted
+`state\authkey.bin` by hand. The failure is *silent about its own cause*: the
+traceback names a file, not the fact that the daemon is single-use.
+
+### O_EXCL was right, and half of it was missing
+
+The `O_EXCL` was a deliberate decision with a correct reason, written down at the
+call site: never silently overwrite a key a **live** daemon is using, because two
+daemons on one machine is a bug we want to hear about. That intent survives this
+fix intact - `test_authkey_is_never_silently_overwritten` still passes and
+`acquire_authkey` still refuses by default.
+
+What was wrong is that one flag was being asked to answer **two** questions:
+
+| Question | Answered by |
+|---|---|
+| *May I write this file?* | owning the state directory |
+| *Is a key already there?* | reading it |
+
+Ownership is not a property of the file; it is a property of the **machine**, and
+the pipe is where that is decided. Windows fails a second `bind()` of a live pipe
+name with `PermissionError [WinError 5]` - verified before relying on it, not
+assumed. So binding the pipe *is* the proof of ownership, and once it has
+succeeded, a key on disk is simply a fact: either ours from a previous run, or
+nothing.
+
+Adopting the existing key rather than minting a new one is what makes the restart
+seamless. Rotating on every start would work for the daemon and fail for every
+component that read the key earlier - the same shape as D38's grammar bug, where
+the new value is right for the writer and wrong for the reader.
+
+A clean shutdown now removes the credential, which restores an invariant worth
+having: **a key on disk means a daemon is running.** That is also why a crashed
+daemon (no `shutdown()`, key left behind) restarts correctly while a cleanly
+stopped one mints a fresh key - the difference is real, and it is the difference
+between a stale file and an absent one.
+
+### The second defect, found by the first fix
+
+`start_serving` originally wrote its `daemon.start` audit record **before**
+binding the pipe. The docstring said "bind first"; the code did not. So a second
+daemon contending for the same state directory appended a record to the shared
+hash-chained `audit.jsonl` and *then* raised on the bind. Its record committed to
+the losing daemon's in-memory chain state, so the incumbent's chain stopped
+verifying - and per ARCHITECTURE.md a broken chain refuses startup, which meant
+**one refused daemon turned a working service into a permanently broken one.**
+
+The rule, which is the general part: **prove ownership before writing, never
+after.** A process that fails to start must leave the state directory
+byte-identical to how it found it. Startup now reads the key, binds the pipe, and
+only then writes - and if `preflight()` refuses a broken chain, it hands back the
+pipe and the credential on the way out rather than leaving either behind.
+
+### Why 1025 tests passed
+
+Because no test ever started **two** daemons against **one** state directory.
+`test_authkey_is_never_silently_overwritten` asserts the refusal in isolation -
+correct, and silent about the consequence. `test_tiers.py` writes a key by hand to
+*reproduce* production state, so the state was always prepared rather than
+reached by starting a daemon twice.
+
+This is D61's exact shape, and the generalisation is worth stating: **a test that
+asserts a property of a component in isolation cannot find a defect that lives in
+the transition between two instances of it.** Lifecycle bugs need a lifecycle test
+- a second real daemon on a real state directory, against a real pipe. That is
+now `tests/test_authkey_restart.py`, 11 tests, no mocks: a mock of the key file
+would have passed against the broken implementation, which is the entire reason
+the bug survived a suite this large.
+
+Suite after the fix: **1036 passed, 3 skipped, 47 subtests**, and two sequential
+starts of the real daemon on the real `state/` both report `authkey adopted from`
+with the chain still verifying at 21 records.

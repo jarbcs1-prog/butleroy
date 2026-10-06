@@ -43,4 +43,4 @@ RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 
 - llama.cpp 0.3.35 understands **Qwen3.5**, so D9's open architecture risk is closed.
 - 106 tests green inside the venv.
 
-**Next:** finish Phase 2's zero-dependency surface (Obsidian bridge, daemon wiring), then Phase 1 — the model bake-off, gated on the 4B being competent. See `PLAN.md` → "Immediate next action".
+**Next:** Phase 2's daemon wiring and the Obsidian bridge are built. The daemon now survives restarts (D64). Outstanding before it is production-ready: one launcher that owns daemon + tray + hotkey + overlay, an install path and `INSTALL.md`, then `email.*` (6 tools) and `reflect.*` (4). See `PLAN.md` → "Immediate next action".

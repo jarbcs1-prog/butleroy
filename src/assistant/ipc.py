@@ -116,6 +116,96 @@ def store_authkey(path: Path, authkey: bytes) -> None:
         os.close(fd)
 
 
+def read_or_mint_authkey(path: Path) -> tuple[bytes, bool]:
+    """Return ``(authkey, minted)`` **without writing anything**.
+
+    This is the read-only half of startup, split out deliberately (D64). The
+    daemon must be able to learn its key *before* it has proved it owns the state
+    directory, because proving that means binding the pipe, and binding the pipe
+    needs a key. Minting here is in memory only; nothing reaches disk until
+    `commit_authkey`.
+
+    Adopting rather than always minting is what makes a restart seamless: a child
+    process or second component that read the key before a crash can still
+    authenticate afterwards. Rotating on every start would work for the daemon
+    and fail for exactly those callers.
+
+    A corrupt or truncated key raises rather than being replaced. Quietly minting
+    over it would hide real misconfiguration behind an unauthenticated-connection
+    symptom much later.
+    """
+    try:
+        return load_authkey(path), False
+    except FileNotFoundError:
+        return generate_authkey(), True
+
+
+def commit_authkey(path: Path, authkey: bytes) -> None:
+    """Write a key minted by `read_or_mint_authkey`. Call only once you own the
+    state directory.
+
+    Kept as `store_authkey` under ``os.O_EXCL`` on purpose, so that racing this
+    from two processes is still an error rather than a silent last-writer-wins on
+    a credential.
+    """
+    store_authkey(path, authkey)
+
+
+def acquire_authkey(path: Path, *, owned: bool = False) -> tuple[bytes, bool]:
+    """One-shot form of `read_or_mint_authkey` + `commit_authkey`.
+
+    ``store_authkey`` opened the file with ``os.O_EXCL`` and nothing ever removed
+    it, so a second daemon on the same state directory died with
+    ``FileExistsError``. The intent behind ``O_EXCL`` was right - never silently
+    overwrite a key a *live* daemon is using - but it was being asked to answer
+    two questions at once, and only one of them was its job (D64):
+
+    * *May I write this file?* is answered by binding the pipe, which the OS
+      makes atomic and which fails on rebind. ``owned=True`` says "I hold it".
+    * *Is a key already there?* is then only a fact to read.
+
+    So the refusing default is preserved - an unproven caller still gets
+    ``FileExistsError`` - and a caller that has proven ownership adopts what it
+    finds instead of dying.
+
+    The daemon does not use this: it needs the key *before* the bind, so it uses
+    the two halves directly. This remains the honest single-call API for anything
+    that already knows it owns the directory.
+    """
+    key, minted = read_or_mint_authkey(path)
+    if not minted:
+        if not owned:
+            # The original O_EXCL behaviour, kept as the default: a caller that
+            # has not proven it owns this state directory does not get to decide
+            # that a key on disk is stale.
+            raise FileExistsError(
+                f"authkey already exists at {path} and ownership of the state "
+                f"directory was not established"
+            )
+        return key, False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        commit_authkey(path, key)
+    except FileExistsError:
+        # Lost a race with a concurrent writer. The key that appeared is
+        # authoritative, and adopting it is correct rather than an error.
+        return load_authkey(path), False
+    return key, True
+
+
+def remove_authkey(path: Path) -> None:
+    """Delete the authkey file if it is there. Absent is not an error.
+
+    Called on clean shutdown so that *a key on disk means a daemon is running*.
+    Without it, every crash leaves a credential behind and the next start has to
+    reason about staleness, which is the complexity this whole change removes.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def load_authkey(path: Path) -> bytes:
     key = path.read_bytes()
     # Deliberately no .strip(). The key is 32 random bytes and roughly 7% of

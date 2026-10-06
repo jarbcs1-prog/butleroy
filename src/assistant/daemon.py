@@ -304,6 +304,11 @@ class Daemon:
         self.queue: list[dict] = []
         self.authkey = ipc.generate_authkey()
         self.authkey_path = state / "authkey.bin"
+        # Whether *this* process wrote that file. Set only in start_serving, once
+        # the pipe is bound and the key claimed, so shutdown() can never delete a
+        # credential it did not create - a daemon built for --check or for a test
+        # shares the state directory path but owns nothing in it (D64).
+        self._owns_authkey = False
         self.server: ipc.PipeServer | None = None
         # RLock, not Lock. op_confirm_approve calls _new_confirmation *while it
         # holds this lock* (requeueing a confirmation whose payload changed), and
@@ -494,8 +499,67 @@ class Daemon:
         )
         self._halt.set()
 
-    def serve_forever(self, pipe: str = ipc.PIPE_BRAIN_REQ) -> None:
-        checks = self.preflight()
+    def start_serving(self, pipe: str = ipc.PIPE_BRAIN_REQ) -> None:
+        """Bind the pipe, claim the authkey, and start the background threads.
+
+        Split out of `serve_forever` so that starting a daemon is a thing that
+        can be done, observed and undone - which is what makes the restart path
+        testable at all. The ordering in here is load-bearing (D64):
+
+        1. **Resolve the key without writing anything.** An existing key is read;
+           if there is none, a fresh one is minted in memory only.
+        2. **Bind the pipe.** On Windows a second bind of the same name fails with
+           `PermissionError`, so holding the pipe is proof that no other daemon
+           owns this state directory.
+        3. **Only now write.** The key file and the audit record are ours to touch
+           because we have just proven nobody else is here.
+
+        Steps 1 and 2 are in that order because of a real failure found while
+        writing this: doing the audit record first meant a *refused* second daemon
+        had already appended to the shared, hash-chained `audit.jsonl`. It then
+        raised on the pipe, leaving a record with a `prev_hash` from a chain state
+        that was not the one on disk - so the incumbent's audit chain no longer
+        verified and the incumbent could not restart either. One refused daemon
+        turned a working 24/7 service into a permanently broken one.
+
+        So the rule is: **prove ownership before writing, never after.** A daemon
+        that fails to start must leave the state directory byte-identical to how
+        it found it.
+        """
+        # Step 1: read-only. Nothing here mutates the state directory, so it is
+        # safe to do before we know the directory is ours.
+        key, minted = ipc.read_or_mint_authkey(self.authkey_path)
+        self.authkey = key
+        self.server = ipc.PipeServer(pipe, self.handle, authkey=self.authkey)
+        # The child must call back on the pipe we actually bound. If --pipe moved
+        # us, a child told to call the default would reach nothing, and the lease
+        # denial would be the only symptom.
+        self.daemon_pipe = pipe
+        try:
+            # Step 2. Raises PermissionError if another daemon holds this pipe,
+            # in which case nothing has been written and we raise straight out.
+            self.server.start()
+        except OSError:
+            self.server = None
+            raise
+        # Step 3. From here the state directory is ours.
+        if minted:
+            ipc.commit_authkey(self.authkey_path, self.authkey)
+        # Only once we own the file may shutdown remove it.
+        self._owns_authkey = True
+        try:
+            checks = self.preflight()
+        except BaseException:
+            # Preflight refusing to start is a legitimate outcome (a broken audit
+            # chain must stop the daemon - see ARCHITECTURE.md). Having bound the
+            # pipe and claimed the key, we now have to give both back or the next
+            # start finds a held pipe and a credential with no daemon behind it.
+            self.server.stop()
+            self.server = None
+            if minted:
+                ipc.remove_authkey(self.authkey_path)
+            self._owns_authkey = False
+            raise
         self._audit(
             actor="daemon",
             channel=CHANNEL_SCHEDULED,
@@ -505,16 +569,13 @@ class Daemon:
             reason=f"preflight ok: {len(checks['workspaces'])} workspaces, "
             f"audit {checks['audit_records']} records verified",
         )
-        ipc.store_authkey(self.authkey_path, self.authkey)
-        self.server = ipc.PipeServer(pipe, self.handle, authkey=self.authkey)
-        # The child must call back on the pipe we actually bound. If --pipe moved
-        # us, a child told to call the default would reach nothing, and the lease
-        # denial would be the only symptom.
-        self.daemon_pipe = pipe
-        self.server.start()
         print(f"[daemon] listening on {pipe}", flush=True)
         print(f"[daemon] state    {self.state}", flush=True)
         print(f"[daemon] version  {__version__}", flush=True)
+        print(
+            f"[daemon] authkey  {'minted' if minted else 'adopted from'} {self.authkey_path}",
+            flush=True,
+        )
         # Start the idle sweeper only when actually serving. A Daemon built in a
         # test, or in --check, must not gain a background thread that outlives the
         # assertion that produced it.
@@ -536,6 +597,9 @@ class Daemon:
             )
         elif self.telegram_error:
             print(f"[daemon] telegram  not available: {self.telegram_error}", flush=True)
+
+    def serve_forever(self, pipe: str = ipc.PIPE_BRAIN_REQ) -> None:
+        self.start_serving(pipe)
         try:
             while not self._halt.wait(3600):
                 pass
@@ -571,6 +635,15 @@ class Daemon:
             decision="allow",
             reason="clean shutdown",
         )
+        # Remove the credential we wrote, so that *a key on disk means a daemon is
+        # running*. Last, because it is the step that gives up our claim on the
+        # state directory: until it runs, a restarted daemon must not believe
+        # this one is gone (D64). Guarded by _owns_authkey so a Daemon that never
+        # bound the pipe - --check, or a test - cannot delete a key belonging to
+        # the process that actually owns this directory.
+        if self._owns_authkey:
+            ipc.remove_authkey(self.authkey_path)
+            self._owns_authkey = False
 
     def client(self) -> ipc.PipeClient:
         with self._lock:

@@ -55,11 +55,14 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1167 passed, 3 skipped, 47 subtests   (~2m52s, no PYTHONPATH needed)
+tests        1221 passed, 3 skipped, 47 subtests   (~2m43s, no PYTHONPATH needed)
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D71, contiguous, none missing
+decisions    D1..D72, contiguous, none missing
+brand        Butleroy. `brand/` = spec, tokens, SVGs, 27 glyphs, rasters.
+             Geometry the product draws lives in `src/assistant/brand.py`,
+             NOT `brand/` - see D72 and structural claim 4 in §5
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed
@@ -354,6 +357,21 @@ cannot find a defect living in the transition between two instances of it.* So:
   blends. Same source, opposite result. This is D70's "the fake did its own
   LOGIN" in a new medium: the generator agreed with the design about everything
   neither of them checked.
+- **A quoted number decays, and nothing tells you.** D72 committed
+  "`1217 passed`" measured at the *start* of the session, after the refactor and
+  the last four tests had made it 1221. It was a number I had genuinely run — just
+  not the run that mattered. **When you write a count into a commit message or a
+  decision log, write the run it came from**, and re-check it if anything moved
+  afterwards. A log whose figures are right only while nothing changes is worthless,
+  and it is the most seductive kind of wrong: it looks like diligence.
+- **Know your shell before you blame the code.** Two post-refactor suite runs
+  reported `Exited with code 1` with output cut off at `[96%]`, and I diagnosed that
+  as my own file edits racing the tests. Wrong. The cause was
+  `pytest ... | Select-Object -Last 6`: terminating the pipeline early truncates
+  pytest's stdout and makes the exit code report the *pipeline*, not pytest. Two
+  suite runs looked like failures and were not. **Redirect to a file and read it**,
+  or drop the pipe; never infer a test result from a truncated stream. This is §5's
+  anti-loop rule in a new costume — I nearly went looking for bugs that did not exist.
 - **You cannot test what you cannot run.** There is no SVG rasteriser in this
   project (`cairosvg`, `svglib`, `magick` all absent, and adding one would breach
   D66). So the SVGs are only ever parsed, never rendered. One test asserting the

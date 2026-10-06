@@ -3414,5 +3414,13 @@ grounds it is used on, and not defined twice with different values.
 Five mutations were run against the suite to prove the new tests bite. Each was caught
 by exactly the test meant to catch it, and by nothing else.
 
-Suite after: **1217 passed, 3 skipped, 47 subtests** (1167 before, +50 in
+Suite after: **1221 passed, 3 skipped, 47 subtests** (1167 before, +54 in
 `test_brand.py`).
+
+A correction, because the first version of this paragraph said 1217 and +50. That
+figure was the count from the *start* of the session, before the `brand.py`
+refactor and before the last four tests — so it was a number I had measured once,
+written down twice, and let drift. The error is exactly this project's recurring
+one: a value quoted from memory of an earlier run rather than from the run that
+matters. Recorded here rather than quietly corrected, because a decision log whose
+numbers are only right when nothing moved is worth nothing.

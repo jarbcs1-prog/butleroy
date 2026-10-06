@@ -3501,3 +3501,245 @@ because a package manager left a file is a test that will be "fixed" by deleting
 evidence.
 
 Suite after: **1236 passed, 3 skipped, 47 subtests** (1221 before, +15).
+
+---
+
+## D74 - Model configuration, and a promise that nothing here can stop the daemon
+
+`state/models.json` is the file that makes the models surface possible. Before it,
+the two tiers were literals at `brain_server.py:43-72` and the only thing that could
+change one was a programmer with a text editor.
+
+Four properties, each of which was a bug somewhere in this project's history:
+
+1. **A missing file is not an error.** A machine that has never opened a settings
+   window behaves exactly as it did before. `load()` returns the built-in defaults
+   with `provenance="defaults"`.
+2. **A corrupt file is not an error either, but it is *visible*.** `load()` degrades
+   to the defaults and puts the reason in `provenance`, which reaches the window and
+   becomes a sentence on screen. A settings window that silently discards what the
+   user typed is worse than one that refuses to save, because the user believes it
+   took. Nine malformed shapes are tested, each asserting the *reason* survives and
+   not merely that the defaults came back.
+3. **A model that is not on disk is refused at save time, not at load time.** By the
+   time a load fails the user has a lease outstanding and a turn in flight. So the
+   existence check is in `save()`, and it is what lets the window refuse the save
+   while the user is still looking at the form.
+4. **Per-tier degradation.** One bad tier falls back to itself; it does not cost the
+   user the other one. Wholesale fallback is the easy implementation and the wrong
+   one — a typo in `deep` silently resetting `fast` changes the user's model choice
+   for a reason they cannot see.
+
+Three more, from the code that exists:
+
+- **The stored model is a filename relative to `models/`.** Never an absolute path.
+  A config that hard-codes `G:\localaized` breaks when the tree moves, and D73
+  established the tree may. A test asserts no `G:` appears in the written file.
+- **`mmproj-*` is never offered as a model.** It is projector weights; picking it
+  gives a child that leases several gigabytes, loads successfully, and then cannot
+  speak, which is much harder to diagnose than a missing row.
+- **The write is atomic** — temp file plus `replace()`. `replace()` rather than
+  `rename()`, because on Windows `rename()` fails if the destination exists and this
+  file always exists after the first save. A test asserts no `.tmp` is left behind,
+  because a half-written `models.json` is one of the unreadable states `load()` has
+  to degrade from, and not producing it is cheaper than recovering from it.
+
+**D1 is why this is a separate module.** It is read by the daemon, so it imports
+nothing but the standard library at module level, and the check is in a subprocess
+because an in-process `sys.modules` assertion can only pass once pytest has already
+imported `llama_cpp` for something else.
+
+**The defaults are duplicated from `brain_server.TIERS` on purpose**, because
+importing that module can pull a model runtime in. The cost is two sets of numbers,
+and `test_the_defaults_match_the_literals_the_child_already_had` is what makes the
+cost acceptable — it *imports* `brain_server` rather than restating the filenames,
+which is the whole point. A restated copy compares a copy of itself with the file it
+came from and passes forever after either changes.
+
+Six mutations run against the module. Each was caught by exactly the intended test:
+the traversal filter, the corrupt-file fallback, per-tier degradation, the save-time
+existence check, in-place mutation in `to_brain_tiers`, and an absolute path leaking
+into the written file.
+
+**This section was missing.** `modelconfig.py` opened by citing "D74" as its own
+provenance, and no D74 existed — a source file pointing at a decision that was never
+written, which is a reader sent to look for something that does not exist. It was
+found by `tests/test_decisions_log.py`, which asserts contiguity and that no source
+file cites a decision number absent from the log. HANDOFF.md had been claiming
+"contiguous, none missing" by hand, and nothing had ever checked it.
+
+---
+
+## D75 - A settings window, and the three bugs that only a real Tk found
+
+Option A, as chosen: a **second window**, not tabs on the chat window. The chat window
+is a transcript - append-only, one-directional, sized for reading. Configuration is
+the opposite. One window means two scrollbars fighting and every settings bug becomes
+a risk to the window D67 and D68 just made work.
+
+Three files:
+
+| File | What |
+|---|---|
+| `src/assistant/modelconfig.py` | which model answers which tier, in a file |
+| `src/assistant/settings.py` | the window; the Models section |
+| `src/assistant/daemon.py` | `model_config` / `model_config_set` ops |
+
+The tray gets a "Settings..." item and owns the window, closing it with the overlay.
+
+### The tiers were literals, and that was the actual blocker
+
+`FAST_MODEL` and `TIERS` were Python literals at `brain_server.py:43-72`. Nothing
+anywhere could edit them. They stay as the built-in default - a machine with no
+config must still have two tiers - but `resolve_tier` now reads `state/models.json`
+over the top.
+
+The file stores a **filename relative to `models/`**, never an absolute path, and
+`tests/test_model_config.py` asserts no `G:` appears in the written file. A config
+that hard-codes the checkout path is a config that breaks when the tree moves, and
+D73 established that the tree may.
+
+### These are ops, not tools, and that is the safety property
+
+If model configuration were a `system.*` tool then `brain.turn` could *propose* to
+change which model it is, and `tool_call` would execute it through the gate. That is
+D21's exact prohibition - "the assistant never rewrites its own code or policy" -
+in a new medium. As ops they are reachable only over the pipe by a process holding
+the authkey, which is the local user. `test_model_config_is_not_a_tool_the_assistant_may_propose`
+asserts the registry stays closed against it.
+
+The write is still audited, at T1. Reversible, and "the human changed the
+configuration" is the first question anyone asks after something odd happens.
+
+`model_config_set` takes **the whole table and refuses a partial one**. A patch would
+delete a tier the window had not rendered, and the failure would surface much later
+as "unknown tier deep" on a request about something the user never touched.
+
+### Three bugs, all found by running the real thing
+
+**D69's exit code, reproduced.** The first `settings.py` run made pytest exit
+`-2147483645`: Tcl's async handler deleted by the wrong thread. `_release_widgets`
+cleared `self._sections` but I had also stored `self._head`, `self._title_label`, and
+each section's own `listbox`/`detail`/`status` - all widget references outliving the
+root. Exactly D69, in the module written to prevent it. `_WIDGET_ATTRS` is now data,
+and a test asserts the live instance against it so a fifth widget attribute cannot be
+added and forgotten.
+
+I then nearly mis-diagnosed it: a bare `Tk()` on a worker thread aborts at exit even
+with no leak of mine, which made it look environmental. It was not - a baseline that
+held the root in a module-level dict reproduced the same abort with *no* code of mine
+involved, and dropping the reference made it clean. The leak was real; my first
+"evidence" for it was a probe artefact. Measuring the baseline rather than arguing
+about it is what separated the two.
+
+**Save had never worked.** `_save` passed the tiers as a positional argument, and
+`Tray.call` is `call(op, /, **args)` - keyword-only. Every save raised `TypeError`,
+which the method's own `except Exception` turned into "Could not reach the daemon".
+So the window reported a *connection failure* for a bug in the window, and had never
+once been able to save. Found because the test asserts the daemon **was reached**,
+rather than reading the status line - which is D68's lesson: assert on the effect, not
+on what the UI says about the effect.
+
+**Save reported nothing.** `_save` set "Saved" and then reloaded, and the reload
+overwrote the status with the provenance line. The user pressed Save and no pixel
+changed - the precise failure this method's own docstring says is worse than a
+refusal. Reload now happens first.
+
+### What is not built yet
+
+One section. Voices, speech, workspaces, authority and advanced configuration are all
+still in `brand/README.md` as specifications, and there is no code for them. The
+`Section` contract is small on purpose - build widgets into `parent`, keep references
+in `self.widgets` and `self.named` - so the next five are the same shape and one new
+file each.
+
+### The Tk tests run in a subprocess, and why that is not a workaround
+
+`tests/test_settings_real.py` is run by `tests/test_settings_isolated.py`, in a
+child process. The tests themselves are ordinary; the containment is about the
+*process exit code*.
+
+In this Python 3.11.14 / Tk build, a `Tk()` root created and destroyed on a worker
+thread can leave Tcl's async handler to be deleted at interpreter shutdown — on the
+main thread. Windows reports that as a debug break, so the message is
+
+    Tcl_AsyncDelete: async handler deleted by the wrong thread
+
+and the process exits `-2147483645` **after every test in the run has passed**. The
+first two symptoms are identical, which is the whole problem.
+
+What it was *not*, each checked rather than assumed:
+
+  * **not a leak.** `test_every_widget_attribute_is_released` and
+    `test_a_section_holds_no_widget_after_disposal` assert nothing is retained, and
+    they pass. The first version of this window *did* leak — it kept `_head` and
+    `_title_label` — and produced the same exit code, so the two had to be separated
+    rather than assumed to be one thing.
+  * **not a number of windows.** Bare tkinter created and destroyed forty sequential
+    worker-thread roots in the same interpreter without complaint. The count at
+    which the settings window tripped it was not stable between runs, which is the
+    opposite of a limit.
+  * **not the tests.** Driving the same code from a plain script, with no pytest at
+    all, exits 0.
+  * **not shared state.** A shared module-scoped window was tried and made things
+    *worse*: a shared fixture must guarantee its own preconditions, and the symptom
+    was `KeyError: 'models'` in whichever test ran next — an error naming the fixture
+    rather than the cause. One window per test is boring and deterministic.
+
+So it is an interpreter-lifetime quirk of this build, it is not the product's, and
+`settings.py` should not be contorted to avoid it. What it must not do is turn a
+green run red with no summary, which is what in-process execution does. Hence the
+subprocess: a real failure fails there, with the child's own output, and a Tcl abort
+is visible as a non-zero exit rather than as a mystery number.
+
+Two smaller findings from the same session, both about hiding the cause of a failure:
+
+  * **`_tk_main` swallowed its exception.** It set `_root_ready` and discarded the
+    error, which is why a window that failed to build presented as an unexplained
+    ten-second `_invoke` timeout in an unrelated test. It now records the error and
+    `show()` raises with the reason.
+  * **`_release_widgets` collects on the Tk thread.** Nulling the attributes is
+    necessary but not sufficient: the `after` callbacks and the event queue leave
+    reference cycles, and a cycle holding the Tcl interpreter is only broken by the
+    cyclic collector. Left to process shutdown, the interpreter dies on the wrong
+    thread. One line, and it is in the right place rather than in a test.
+
+### A test that reads the UI's own report about itself
+
+`test_a_successful_save_is_not_overwritten_by_its_own_reload` exists because the
+first version of that test only asserted the word "Saved" appeared. It would have
+passed on the broken build, where Save reported success and then immediately
+overwrote the message — because the reload's provenance line can also contain the
+word. The assertion had to be about the *ordering* of two messages, not about
+whether one of them was present. This is D68's lesson one level down: assert on the
+effect, not on what the UI says about the effect.
+
+### The decision log is now checked, because it was not
+
+`tests/test_decisions_log.py` exists because `modelconfig.py` cited "D74" as its own
+provenance and no D74 existed. HANDOFF.md had been claiming `decisions D1..D73,
+contiguous, none missing` by hand, and nothing had ever verified it — the same shape
+as the stale test count in D73, one layer over: a figure in a document is a claim
+about a moment, and nothing tells you when the moment passed.
+
+Its first version asserted ascending decision order and failed on D29. The failure
+was correct and the assertion was wrong: the log is organised into **Parts**, D29
+opens Part IV, and it refers back to D25 at the end of Part III. Moving D29 out of
+the section it introduces, or deleting a test that had found something real, would
+both have been worse than recording why total order is not a property this document
+has.
+
+Its regex was also wrong twice, and the second failure is the interesting one: it
+matched only `##` headings and only a hyphen, so it found 31 of 75 decisions and
+reported D1 through D44 as dangling citations — while **passing** the citation
+test, because the known set was nearly empty and so nothing looked missing. A check
+that is too narrow does not fail loudly; it fails confidently, about the wrong thing,
+and a green test is the most reassuring possible wrong answer.
+
+Suite after: **1294 passed, 22 skipped, 47 subtests**, exit 0 (1236 before).
+Nineteen of the 22 skips are `test_settings_real.py`, which is executed by
+`test_settings_isolated.py` in a subprocess and passes there; the other three are the
+speech slow tests. New tests: 29 for the config module, 21 for the ops, 19 for the
+window (run out of process), 6 for the decision log, and 2 for the isolation itself.
+
+---

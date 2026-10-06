@@ -53,7 +53,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D70-D73 | `email.*`, `reflect.*`, the brand kit, and the rename |
+| `DECISIONS.md` §D72-D75 | the brand kit, the rename, model config, the settings window |
 | `brand/README.md` | the Butleroy brand kit: mark, palette, glyphs, voice, widget rules |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
@@ -64,17 +64,28 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1236 passed, 3 skipped, 47 subtests   (~2m37s, no PYTHONPATH needed)
+tests        1294 passed, 22 skipped, 47 subtests   (~2m45s, no PYTHONPATH needed)
+             19 of the 22 skips are tests/test_settings_real.py, which is run
+             by tests/test_settings_isolated.py in a subprocess (see structural
+             claim 6 in §5). They are NOT unrun - 19 of them pass in the child.
+             The other 3 are the speech slow tests: BUTLEROY_SLOW_TESTS=1.
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D73, contiguous, none missing
+decisions    D1..D75, contiguous, none missing - and now *tested*
+             (tests/test_decisions_log.py), because a hand-kept
+             figure was wrong: D74 was cited by a source file and
+             did not exist
 brand        Butleroy. `brand/` = spec, tokens, SVGs, 27 glyphs, rasters.
              Geometry the product draws lives in `src/assistant/brand.py`,
              NOT `brand/` - see D72 and structural claim 4 in §5
 name         package/script/pipes/env = butleroy (D73). The DIRECTORY is still
              G:\localaized and must stay - it is a path, not a name, and
              policy.SELF_PATHS protects this checkout by that literal string
+GUI          a separate settings WINDOW (D75), reached from the tray as
+             "Settings...". One section exists: Models. It edits
+             state/models.json through two daemon ops. The other five
+             sections in brand/README.md are specification only, no code.
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed
@@ -286,6 +297,20 @@ future edit could quietly undo:
    is a thin CLI over the package module. If someone "tidies" the geometry back into
    `brand/`, the tray keeps working in a checkout and fails on install — and no test
    here will run against an installed copy. Read `brand/README.md` before moving it.
+6. **The real-Tk tests run in a subprocess.** `tests/test_settings_real.py` is
+   invoked by `tests/test_settings_isolated.py`. In this Python/Tk build a
+   worker-thread `Tk()` root can leave Tcl's async handler to be deleted at
+   *interpreter shutdown*, on the main thread, and the process exits `-2147483645`
+   **after every test has passed**. Windows makes it a debug break, so pytest never
+   prints a summary. It is not a leak (the release tests prove nothing is retained),
+   not a count of windows (bare tkinter handled forty), and not shared state. What
+   it must not do is turn a green run red with no explanation. Set
+   `SETTINGS_TK_INPROCESS=1` to run them directly while debugging.
+7. **`_release_widgets` must keep collecting on the Tk thread.** Nulling the widget
+   attributes is not sufficient on its own — the `after` callbacks and the event
+   queue leave reference cycles, and only the cyclic collector breaks them. Delete
+   the `gc.collect()` and the interpreter dies at shutdown on the wrong thread.
+
 5. **`G:\localaized` is a path, not a name — do not "tidy" it.** D73 renamed the
    product everywhere a user can reach it and deliberately left the directory. The
    reason is not caution: `policy.SELF_PATHS` names this checkout by that literal

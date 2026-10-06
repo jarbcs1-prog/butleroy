@@ -23,6 +23,7 @@ A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs 
 | **INSTALL.md** | How to install it. **Read §3 first** — one step is mandatory and counter-intuitive |
 | **HANDOFF.md** | Where the work stands and how to resume it |
 | `brand/README.md` | The brand kit: mark, palette, glyphs, voice, widget rules |
+| `src/assistant/settings.py` | The settings window (tray -> Settings...). Models only, so far |
 | `AI_Assistant_Local.md` | The original source document. **Superseded** — retained for provenance only |
 
 ## The governing constraint

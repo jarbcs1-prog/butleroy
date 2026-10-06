@@ -613,7 +613,7 @@ def resolve_tier(tier: str, model: str | None = None,
     "deep" request from the 4B would be a lie about which model spoke, and having
     two tiers is only worth anything if they are actually distinguishable.
     """
-    spec = TIERS.get(tier)
+    spec = _tier_spec(tier)
     if spec is None:
         raise ValueError(
             f"unknown tier {tier!r}; known tiers are {sorted(TIERS)}"
@@ -622,6 +622,41 @@ def resolve_tier(tier: str, model: str | None = None,
         model or str(spec["model"]),
         int(spec["need_bytes"] if need_bytes is None else need_bytes),
     )
+
+
+def _tier_spec(tier: str) -> dict[str, Any] | None:
+    """The tier's entry, from `state/models.json` if there is one.
+
+    The child resolves the tier rather than being told which file to load (D22), and
+    that is the right place for it: there is exactly one place where a model file is
+    named, and now that a user can *choose* one it has to be a place that reads the
+    choice rather than a literal in the middle of the program.
+
+    `TIERS` stays as the built-in default and as the answer to "what are the known
+    tier names" — a machine with no config must still have fast and deep, and the
+    error message for an unknown tier has to be able to name them. What changed is
+    that an operator-chosen `models.json` wins over the literals.
+
+    Read here, in the child, rather than sent from the daemon: the daemon passes
+    only a tier *name* over the wire, so a compromised or confused parent cannot
+    hand the child an arbitrary path. The child's own file is the only thing that
+    can move what it loads.
+    """
+    from . import modelconfig
+
+    try:
+        config = modelconfig.load()
+    except Exception as exc:  # noqa: BLE001 - never block a turn on a config read
+        print(f"[brain_server] models.json unusable ({type(exc).__name__}: {exc}); "
+              f"using built-in tiers", file=sys.stderr)
+        return TIERS.get(tier)
+
+    resolved = modelconfig.to_brain_tiers(config)
+    if tier in resolved:
+        return resolved[tier]
+    # A tier the config does not mention, or one that fell back. The literals are
+    # the answer either way, and `TIERS` is what a caller can enumerate.
+    return TIERS.get(tier)
 
 
 def serve(pipe: str = ipc.PIPE_BRAIN_RESP, *, upstream: str = ipc.PIPE_BRAIN_REQ,

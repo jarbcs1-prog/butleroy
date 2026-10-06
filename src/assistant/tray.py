@@ -380,6 +380,12 @@ class Tray:
         # it never gets to approve a confirmation - that is the overlay's job and
         # only the overlay's.
         self._overlay = None
+        # The settings window, same reasoning (D75): built on first use, owned here
+        # so closing it releases its Tk interpreter, and a client of the daemon like
+        # the overlay. A settings window that could approve a confirmation would
+        # make two windows able to answer the same dialog, and only one of them is
+        # the one the user was looking at.
+        self._settings = None
         self._notice: str | None = None
         self._color: tuple | None = None
         self._lock = threading.Lock()
@@ -485,6 +491,38 @@ class Tray:
             # the menu item appearing to work and doing nothing.
             self.notify(f"The prompt window could not open: {exc}")
 
+    def _open_settings(self, icon=None, item=None) -> None:
+        """Open the settings window.
+
+        Built lazily and owned by the tray, for the same reasons as
+        `_open_prompt`: importing tkinter and constructing a root costs seconds on a
+        machine with no interactive session, and this tray has to be able to run
+        headless.
+
+        It talks to the daemon through `self.call`, like everything else here. A
+        settings window holding a daemon reference would be a second front door into
+        the policy gate, which is the defect D59 is about.
+        """
+        try:
+            if self._settings is None:
+                from . import settings as settings_mod
+
+                self._settings = settings_mod.Settings(self.call, title=self.title)
+            self._settings.show()
+        except Exception as exc:
+            # A tray item that appears to work and does nothing is worse than one
+            # that says why, which is the same reason as `_open_prompt`.
+            self.notify(f"The settings window could not open: {exc}")
+
+    def open_settings(self) -> None:
+        """Public, for a hotkey or anything else holding a tray.
+
+        Same reason `open_prompt` is public: reaching into `_open_settings` from
+        another module is a second thing that can change without the tray's tests
+        noticing.
+        """
+        self._open_settings()
+
     def build(self):
         import pystray
 
@@ -494,6 +532,7 @@ class Tray:
         # only when someone actually clicks, which is the worst time to find out.
         menu = pystray.Menu(
             pystray.MenuItem("Open prompt", self._open_prompt, default=True),
+            pystray.MenuItem("Settings…", self._open_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(f"Summon ({HOTKEY_LABEL})", self._set_attended),
             pystray.MenuItem("Workspaces", self._workspaces),
@@ -550,6 +589,16 @@ class Tray:
             except Exception:  # noqa: BLE001 - a window that will not close is not
                 pass             # worth refusing to shut the rest down over
             self._overlay = None
+        # The settings window, same reason and same failure mode. It has its own Tk
+        # thread and its own Tcl interpreter, so leaving it standing leaks exactly
+        # as the overlay did - and D69's exit code is what a leak looks like from
+        # outside: a process that shut down cleanly and reported `-2147483645`.
+        if self._settings is not None:
+            try:
+                self._settings.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._settings = None
         if self.icon is not None:
             try:
                 self.icon.stop()

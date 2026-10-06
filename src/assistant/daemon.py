@@ -4589,6 +4589,134 @@ class Daemon:
         self._brain_loaded = False
         return {"stopped": was, "vram_returned": was}
 
+    # -- the models surface (D75) ------------------------------------------
+    #
+    # Two ops, and the split between them is the design. `model_config` reads;
+    # `model_config_set` writes. Both are ops rather than tools, deliberately:
+    #
+    #   * They are not actions the *model* may take. A tool would be reachable from
+    #     `brain.turn`'s proposals, which means the assistant could propose to
+    #     change which model it is - and a system that can rewrite its own
+    #     reasoning substrate is D21's exact prohibition. An op is only callable
+    #     over the pipe by a process holding the authkey, which is the local user.
+    #   * So there is no tier to declare and nothing for the gate to check. The gate
+    #     governs what the *assistant* may do with tools; a human reconfiguring the
+    #     product is not an assistant action. That is a real distinction and it is
+    #     why these are not `system.*` tools with a tier.
+    #
+    # The write is audited anyway, at T1. "The human changed the configuration" is
+    # exactly the kind of fact the audit chain exists to keep, and an un-audited
+    # write is a write nobody can account for after the fact.
+
+    def op_model_config(self, args: dict) -> Any:
+        """What models are on disk, which tier uses which, and where that came from.
+
+        Returns `provenance` on every call, not just on trouble, because the one
+        thing a user cannot guess is whether they are looking at their own settings
+        or at the built-in defaults. A window that omitted it would let someone
+        believe they had configured something they had not.
+        """
+        from . import modelconfig
+
+        config = modelconfig.load()
+        return {
+            "tiers": config.as_dict(),
+            "models": modelconfig.available_models(),
+            "provenance": config.provenance,
+            "config_path": str(config.path) if config.path else None,
+            "models_dir": str(modelconfig.MODELS_DIR),
+            # What the child would actually use, so a caller can see the resolved
+            # absolute path without re-deriving it and getting it subtly wrong.
+            "resolved": {
+                name: str(tier.resolved())
+                for name, tier in config.tiers.items()
+            },
+        }
+
+    def op_model_config_set(self, args: dict) -> Any:
+        """Replace the tier table. Refused loudly rather than partially applied.
+
+        Takes the **whole** table and insists on receiving it. A patch would delete
+        any tier the caller did not send, and the failure surfaces later as
+        "unknown tier deep" on a request about something the user never touched -
+        which is the worst shape a mistake can have, because the cause and the
+        symptom are in different places at different times.
+
+        Validates every tier, then writes all of them, or writes none.
+        """
+        from . import modelconfig
+
+        tiers_raw = args.get("tiers")
+        if not isinstance(tiers_raw, dict) or not tiers_raw:
+            raise Refused(
+                "model_config_set needs a non-empty 'tiers' object - the whole "
+                "table, not a patch"
+            )
+
+        from .brain_server import TIERS as KNOWN_TIERS
+
+        missing = sorted(set(KNOWN_TIERS) - set(tiers_raw))
+        if missing:
+            raise Refused(
+                f"model_config_set is missing tier(s) {missing}. It takes the whole "
+                f"table ({sorted(KNOWN_TIERS)}), because a partial one would "
+                f"silently delete the tiers it leaves out."
+            )
+
+        actor = str(args.get("actor", "local-user"))
+        channel = self._channel(args)
+
+        built: dict[str, Any] = {}
+        for name, spec in tiers_raw.items():
+            if not isinstance(spec, dict):
+                raise Refused(f"tier {name!r} is not an object")
+            try:
+                built[name] = modelconfig.TierSetting(
+                    model=str(spec.get("model", "")),
+                    need_bytes=int(spec.get("need_bytes", 0)),
+                )
+            except (modelconfig.ModelConfigError, TypeError, ValueError) as exc:
+                raise Refused(f"tier {name!r}: {exc}") from None
+
+        try:
+            saved = modelconfig.save(modelconfig.ModelsConfig(tiers=built))
+        except modelconfig.ModelConfigError as exc:
+            # Refused, not failed: the user asked for something specific and it was
+            # not done. `refused` is what the window keys its red row off.
+            raise Refused(str(exc)) from None
+        except OSError as exc:
+            raise DaemonError(f"could not write {saved}: {exc}") from None
+
+        # A loaded child keeps the model it was started with. Restarting it here
+        # would kill a turn in flight, which is a worse surprise than the stale
+        # model, so the daemon says so in the result and lets the caller decide.
+        self._audit(
+            actor=actor,
+            channel=channel,
+            tool="model_config.set",
+            # T1, not T3. The tier on an audit record says how consequential the
+            # thing was, and this is reversible - the previous file is still there.
+            # T3 would also be wrong in a way that matters: the confirmation queue
+            # is for actions on the *machine*, and this changes nothing until the
+            # next child starts.
+            tier=str(Tier.REVERSIBLE_WRITE),
+            decision="allow",
+            reason=f"tiers now {sorted(built)}",
+            args={"tiers": {n: t.model for n, t in built.items()}},
+        )
+
+        return {
+            "saved": str(saved),
+            "tiers": {n: {"model": t.model, "need_bytes": t.need_bytes}
+                      for n, t in sorted(built.items())},
+            "provenance": "file",
+            "note": (
+                "a tier already loaded keeps its model until the daemon next "
+                "starts a child; nothing was restarted"
+            ),
+            "brain_running": self._brain_alive(),
+        }
+
     def op_brain_describe(self, args: dict) -> Any:
         """What the brain can see, from the child that would use it.
 

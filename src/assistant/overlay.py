@@ -466,6 +466,11 @@ class Overlay:
         The turn costs seconds - it may load a 4 GB model first - so it cannot
         run on the Tk thread without freezing the window the user is looking at,
         which for a confirmation dialog would be its own kind of unsafe.
+
+        A turn also does not end at the proposal. `brain_turn` returns a
+        *proposed* call and nothing else - that is its contract, and it is the
+        right one - so a front door that stops there leaves the user looking at a
+        plan with nothing behind it. See `_carry_through`.
         """
         try:
             res = self._call("brain_turn", prompt=prompt, channel="pc", actor="overlay")
@@ -474,25 +479,98 @@ class Overlay:
             self._post("status", "")
             self._busy = False
             return
-        body = (res or {}).get("result", {}) or {}
-        kind = body.get("kind")
-        if kind == "answer":
-            self._post("say", body.get("text", ""), "")
-        elif kind == "tool":
-            tool = body.get("tool")
-            args = body.get("arguments", {})
-            # A proposal, never an execution. The daemon has already gated it;
-            # the overlay's only job is to tell the user what was proposed.
-            if body.get("parse_error"):
-                self._post("say", f"the model tried to call a tool but the call "
-                                  f"did not parse: {body['parse_error']}", "bad")
+        try:
+            body = (res or {}).get("result", {}) or {}
+            kind = body.get("kind")
+            if kind == "answer":
+                self._post("say", body.get("text", ""), "")
+            elif kind == "tool":
+                self._carry_through(body)
             else:
-                self._post("say", f"proposing {tool} {_fmt_args(args)}", "accent")
+                self._post("say", "the brain returned nothing usable", "bad")
+        finally:
+            # Never leave the window permanently deaf. `_busy` gates `_submit`,
+            # so a raise anywhere above that skipped the reset would leave a
+            # window that looks entirely normal and refuses every later question
+            # - no exception on screen, no log line, nothing to report.
+            self._busy = False
             self._post("status", "")
-        else:
-            self._post("say", "the brain returned nothing usable", "bad")
-            self._post("status", "")
-        self._busy = False
+
+    def _carry_through(self, body: dict) -> None:
+        """Send a proposed call back through the gate, and show what came of it.
+
+        `brain_turn` proposes and `tool_call` is the only path to an action. The
+        window is a front door like Telegram and voice, so it gets no private
+        route: the proposal goes back through `tool_call` and the gate rules on
+        it exactly as it would for anyone else. That is also why this is safe to
+        do without asking - the gate is still upstream, and a T3 action still
+        comes back as a confirmation id that this window then has to be asked
+        about.
+
+        This used to stop one line after printing `proposing <tool> (<args>)`.
+        The consequences were worse than an unimplemented feature, because
+        nothing said so:
+
+        * the transcript read as though the assistant were working, so the
+          failure looked like a slow answer rather than a dead end;
+        * the audit chain verified, because the proposal *was* audited - D68;
+        * and a T0 read like `system.gpu_state` needs no approval at all, so the
+          one category of tool that should have worked most obviously did not.
+
+        The four outcomes below are all of the things `tool_call` can legitimately return,
+        and each is reported rather than swallowed. An unbuilt tool is named as
+        unbuilt: "I will not do this" and "I have not built this yet" are different
+        answers, and conflating them is how an assistant ends up reporting
+        unfinished work as finished (D58).
+
+        One turn, one tool, on purpose. Feeding the result back for a second model
+        turn would be a genuine improvement and it is deliberately not here: that is
+        a loop with its own budget, its own cancellation and its own way of
+        surprising the user with four minutes of silence, and it deserves to be a
+        decision rather than a side effect of fixing a dead end.
+        """
+        parse_error = body.get("parse_error")
+        if parse_error:
+            self._post("say", f"the model tried to call a tool but the call "
+                              f"did not parse: {parse_error}", "bad")
+            return
+
+        tool = body.get("tool")
+        args = body.get("arguments") or {}
+        self._post("say", f"proposing {tool} {_fmt_args(args)}", "accent")
+
+        res = self._call("tool_call", tool=tool, args=args,
+                         channel="pc", actor="overlay")
+        res = res or {}
+        if not res.get("ok"):
+            # A refusal and a build gap are different facts about the world.
+            if res.get("not_implemented"):
+                self._post("say", f"{tool} is registered but has no executor "
+                                  f"yet: {res.get('error', '')}", "muted")
+            else:
+                self._post("say", f"refused: {res.get('error', 'no reason given')}",
+                           "bad")
+            return
+
+        done = res.get("result") or {}
+        if done.get("needs_confirmation"):
+            # The armed poll raises the dialog within a second; naming the id
+            # here means the window already shows what it is waiting for when
+            # the dialog appears over it. It is also the only place the user
+            # learns a confirmation id at all from this front door - Telegram
+            # reports one and the window is where it gets approved.
+            # The status line is NOT set here: `_run_turn`'s `finally` clears it
+            # unconditionally, so a status set inside this method would be
+            # overwritten a moment later and appear to flicker.
+            self._post("say", f"waiting for your approval as "
+                              f"{done.get('confirmation_id')}", "muted")
+            return
+        if done.get("queued"):
+            # T2/T3 from a channel that does not assert presence. Not an error.
+            self._post("say", f"queued until you are back at the keyboard: "
+                              f"{done.get('reason', '')}", "muted")
+            return
+        self._post("say", _render_result(tool, done), "")
 
     def _ask(self, prompt: str) -> None:
         if self._root is not None and not self.is_visible():
@@ -531,6 +609,88 @@ def _fmt_args(args: dict) -> str:
             s = s[:57] + "..."
         bits.append(f"{k}={s!r}")
     return "(" + ", ".join(bits) + ")"
+
+
+# Long enough for a real sysinfo payload, short enough that a stray multi-
+# megabyte result cannot wedge the transcript. Truncation always says so, because
+# a silently shortened answer is a wrong answer that reads as a complete one.
+_RESULT_CHARS = 1200
+
+
+def _render_result(tool: str, result: Any) -> str:
+    """Show what a tool actually returned.
+
+    Not `_describe_result`, and deliberately so. That one is for a *spoken*
+    answer: it prefers a human summary because a dict read aloud is a log line.
+    Here the user is looking at a scrollable transcript with the question still
+    on screen, and the whole point of a T0 read is the data - "6.26 GiB used of
+    12.0" is the answer, and `"Done: system.gpu_state."` is not. So the value is
+    rendered as-is, with scalars on their own lines rather than as Python repr,
+    since `{'vram_used_bytes': 939524096.0}` answers no question a person asked.
+    """
+    if result is None:
+        return f"{tool}: done."
+    if isinstance(result, str):
+        return result[:_RESULT_CHARS]
+    if isinstance(result, dict):
+        # A human-facing summary still wins when the tool offers one, so a tool
+        # that bothers to be readable stays readable.
+        for key in ("summary", "message", "answer", "transcript"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value[:_RESULT_CHARS]
+        lines = []
+        for key, value in result.items():
+            if isinstance(value, (dict, list)):
+                continue  # rendered below, at full width
+            if isinstance(value, bool) or value is None:
+                lines.append(f"{key}: {str(value).lower()}")
+            elif isinstance(value, float):
+                lines.append(f"{key}: {value:,.2f}".rstrip("0").rstrip("."))
+            else:
+                lines.append(f"{key}: {value}")
+        nested = {k: v for k, v in result.items() if isinstance(v, (dict, list))}
+        if nested:
+            lines.append("")
+            lines.append(_pretty(nested))
+        text = "\n".join(lines)
+        return text[:_RESULT_CHARS] + ("\n... (truncated)" if len(text) > _RESULT_CHARS
+                                       else "")
+    return str(result)[:_RESULT_CHARS]
+
+
+def _pretty(value: Any, indent: int = 0) -> str:
+    """Nested dicts and lists, indented, so nesting is visible.
+
+    A GPU report arrives as `{gpus: [{...}], count: 1}` and one flat line of that
+    is unreadable - which is the whole reason a person asked.
+    """
+    pad = "  " * indent
+    out = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, (dict, list)):
+                out.append(f"{pad}{k}:")
+                out.append(_pretty(v, indent + 1))
+            else:
+                out.append(f"{pad}{k}: {_scalar(v)}")
+    elif isinstance(value, list):
+        for entry in value:
+            if isinstance(entry, (dict, list)):
+                out.append(_pretty(entry, indent))
+            else:
+                out.append(f"{pad}- {_scalar(entry)}")
+    else:
+        out.append(f"{pad}{_scalar(value)}")
+    return "\n".join(line for line in out if line)
+
+
+def _scalar(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return str(value).lower()
+    if isinstance(value, float):
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+    return str(value)
 
 
 class _Confirm:

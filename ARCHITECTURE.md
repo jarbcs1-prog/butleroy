@@ -112,7 +112,11 @@ The only thing that changes for the user is a ~5–15 s pause on rare, hard plan
 Deterministic code in the policy gate classifies every proposed tool call. The model proposes; **the gate disposes.**
 
 ```
-model emits tool_call
+brain_turn ──► model commits to ONE tool name    (grammar-constrained, D34)
+        │
+        │   a proposal only. Never an execution.
+        ▼
+tool_call ──► the caller's job, not the brain's  (D68)
         │
         ▼
   policy gate ──► path allowlist / denylist     (D10, D21)
@@ -122,6 +126,16 @@ model emits tool_call
         ▼
   authorize ──► execute ──► audit log (append-only, hash-chained)
 ```
+
+**The gap between the first box and the second is load-bearing.** `brain_turn`
+returns a proposal and the *caller* must send it back through `tool_call`; the
+daemon does not do it, because a brain that could execute its own decision would
+make the gate decorative. Every front door therefore has to close that gap
+itself — the window does (`overlay._carry_through`), and voice does
+(`daemon._voice_turn`). Telegram deliberately does not, and says so in its own
+reply text. D68 is what it looks like when a front door simply forgets: the
+window proposed a tool and dropped it, which is the D36 failure mode one layer up
+— the system kept working, the audit chain verified, and no tool ever ran.
 
 - **Path allowlist** is empty by default. Every directory the assistant can touch must be granted via a **workspace manifest**. No manifest, no capability.
 - **Deny-path is absolute**: `C:\Windows`, `C:\Program Files`, the assistant's own `policy/` directory, `*/.git/*` internals and any path in a manifest marked `danger_level: critical` requires per-action confirmation regardless of tier.

@@ -2733,3 +2733,169 @@ I using right now* — and it has to produce a tool proposal and then real outpu
 The general point is D36 again, one layer up: **a constraint that is set is not a
 constraint that is active.** The grammar is compiled into every request; nothing
 in the suite, and nothing about a greeting, demonstrates it fired.
+
+## D68 - The window proposed the tool and then stopped, and the grammar was never the problem
+
+The next action after D67 was one sentence typed into the window — *how much VRAM
+am I using right now* — and the prediction was that it would fail because of D34:
+the 4B narrates the call in prose instead of committing. **D34 was right about the
+model and wrong about the consequence.** The model committed. The window threw the
+proposal away.
+
+### What was actually broken
+
+`Overlay._run_turn` printed `proposing <tool> (<args>)` and returned. It never sent
+the proposal back through `tool_call`. Its own comment recorded the intent and the
+gap in the same breath — *"A proposal, never an execution. The daemon has already
+gated it"* — and that second clause is the bug. The daemon had **not** gated it.
+`op_brain_turn` gates nothing; its docstring says the opposite: *"It returns the tool
+name and arguments to the caller, who must send them back through `tool_call`, where
+the policy gate and - for anything T3 - a human get to see them."* The caller was
+the overlay, and the caller did not.
+
+So the window — the one front door the user is physically sitting in front of —
+could never run a tool. Not a tool that needed approval, not a tool that could fail
+the gate: any tool at all.
+
+### Why it was so cheap to miss
+
+Four properties, all of which point the wrong way:
+
+- **Nothing said so.** The transcript read like an answer in progress. There was no
+  error, no exception, no log line, and the status line went back to empty, which is
+  what it does when a turn *succeeds*.
+- **The audit chain verified.** `op_brain_turn` audits the proposal at
+  `decision="allow"`, and that audit was genuine — the brain did propose. A verified
+  chain is exactly what a healthy turn looks like.
+- **`system.gpu_state` is T0.** It needs no approval and no approved workspace, so
+  the read that should have worked most obviously did not, and no policy edge was
+  anywhere near it.
+- **The other front doors were both correct, which pointed at the model.** Voice
+  carries its proposal through (`daemon._voice_turn` → `op_tool_call` →
+  `_describe_result`). Telegram deliberately does not and says so in its own return
+  text. The window did neither, so "voice works and the window doesn't" reads as a
+  model difference rather than a missing line in one method.
+
+That last one is the trap. Two working front doors make a third failure look like a
+property of the thing they share — the model — when it is a property of the one
+thing they do not share: their call sequences.
+
+### Measured, on the real model, both before and after
+
+`probe_turn_real.py` separates the two passes that D34 and D68 had been conflated
+into, because a pass-1 failure and a pass-2 failure are indistinguishable from
+outside the window — a sentence on screen and no tool output:
+
+```
+PASS 1  decision      : 'tool:\n"system.gpu_state"'   is_tool: True   1.50s
+        action        : tool=system.gpu_state arguments={} parse_error: none
+
+PASS 2  before  ops   : confirm_list, brain_turn, confirm_list, confirm_list, confirm_list
+        transcript  | proposing system.gpu_state ()
+        VERDICT: PASS 1 ok, PASS 2 FAILED
+
+PASS 2  after   ops   : confirm_list, brain_turn, ..., tool_call
+        transcript  | proposing system.gpu_state ()
+                    | count: 1
+                    | measured: true
+                    | gpus:
+                    |   name: NVIDIA GeForce RTX 3060
+                    |   vram_total_bytes: 12,884,901,888
+                    |   vram_used_bytes: 6,390,022,144
+                    |   vram_free_bytes: 6,314,524,672
+                    |   utilisation_percent: 39
+                    |   temperature_c: 55
+        VERDICT: PASS 1 ok, PASS 2 ok
+```
+
+Through the real `VramArbiter` reading real `nvidia-smi` (10.84 GiB free against a
+7.00 GiB request, granted), the real grammar, the real 4B on the GPU, the real gate
+and the real executor. `vram_used_bytes: 6,390,022,144` is the probe's own model —
+the load the handoff asked about is visible in the number the window now displays,
+which is a nice incidental proof that the tool read the machine rather than a fixture.
+
+**The spine is now closed for a tool turn, which `Hello` never was.**
+
+### The fix
+
+One method, `_carry_through`, doing what `_voice_turn` already did. It posts the
+proposal, sends it through `tool_call` with `channel="pc"`, and then reports
+whichever of `tool_call`'s four legitimate outcomes came back:
+
+| outcome | what the window says |
+|---|---|
+| ran | the real payload |
+| `needs_confirmation` | the confirmation id, and that it is waiting on a human |
+| `queued` | queued until you are back at the keyboard |
+| refused / not built | which of the two it was |
+
+The last row is D58's rule kept: "I will not do this" and "I have not built this yet"
+are different facts about the world, and `handle` already distinguishes them with a
+flag. Conflating them is how unfinished work gets reported as finished.
+
+### Showing the data, not a sentence about the data
+
+`_describe_result` was deliberately **not** reused. It is for a *spoken* answer and
+prefers a human summary, because a dict read aloud is a log line. On screen with the
+question still visible the situation is inverted — `Done: system.gpu_state.` is
+indistinguishable from success and answers nothing — so `_render_result` shows the
+payload, nested and with grouped separators, and truncates at 1200 characters with
+the truncation stated.
+
+This is D36 one layer up again, and it is worth being precise about the pattern,
+because it has now appeared four times at four different heights: **the D68 window
+would have passed a test that asserted the turn "handled" a tool.** What made it
+findable was the probe asserting on the *payload* — that the VRAM figure the user
+asked for is actually on screen — rather than on the fact that something ran.
+
+### Ten tests, and the two that were hollow first
+
+`tests/test_overlay_turn.py`. The whole defect is one assertion
+(`test_a_tool_turn_reaches_tool_call`), and it is the transition that is asserted:
+one overlay, one daemon-shaped `call`, `brain_turn` → `tool_call`, and the
+conversation that comes out. That is the project's stated blind spot — *tests that
+assert a property of a component in isolation cannot find a defect living in the
+transition between two instances of it* — applied to the transition between two ops.
+
+**Two of the ten passed against broken code on the first run, and both are worth
+recording because they were found by trying to break them rather than by reading
+them.**
+
+1. `test_a_raise_mid_turn...` asserted `ov._busy is False` after a raise, but called
+   `_run_turn` directly and so never set `_busy = True` first. The flag started
+   `False`; the assertion passed whether or not the `finally` existed. It survived
+   the mutation that removed the `finally` entirely.
+2. `test_a_t3_proposal_waits_for_a_human...` asserted only that `c000007` appeared
+   somewhere in the transcript. Dropping the whole confirmation branch still put the
+   string there, because the pending envelope *has* a `confirmation_id` field and
+   `_render_result` dutifully printed it. It survived the mutation that deleted the
+   branch.
+
+Both are the same failure D67's file records, one generation on: a test that cannot
+fail is worse than no test, because it is a green light on nothing. Seven mutations
+were applied to `overlay.py` to confirm the other eight are load-bearing:
+
+```
+1 drop the carry-through            8 failed    2 render like a spoken turn   1 failed
+3 drop the finally                  1 failed    4 swallow a refusal           2 failed
+5 drop the confirmation branch      1 failed    6 lose the channel            1 failed
+7 print the payload as python repr  1 failed
+```
+
+Mutation 3 is the one worth noting: the `finally` around the turn body is three lines
+and guards a flag whose failure mode is a window that looks entirely normal and
+silently refuses every later question. No exception, no log line.
+
+### What this says about the two questions that were open
+
+- **D34 survives intact.** The grammar-first decision is load-bearing and it works:
+  `tool:\n"system.gpu_state"` in 1.50 s, then a clean constrained call, no parse
+  error. What D34 could not have told anyone is that the commit was being thrown
+  away 40 lines later by the window.
+- **The handoff's own warning was right, and for a narrower reason than stated.** It
+  predicted a *silent* failure and got one. It attributed the silence to the model
+  narrating; the model committed. It attributed the risk to a missing test; the
+  suite was not missing a test of the decision, it was missing a test of the call
+  *sequence*.
+
+Suite after: **1090 passed, 3 skipped, 47 subtests** (1080 before, +10 new).

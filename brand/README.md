@@ -205,16 +205,58 @@ once. What they must obey:
   `currentColor`. Never the brass gradient — a gradient inside a 16 px list row is
   mush.
 
-### What is built, as of D76
+### What the interface is, and is not
+
+Measured, not remembered: **17 of the daemon's 44 ops have a way in; 27 do not.**
+Reached today by `overlay.py` (6), `tray.py` (5) and `settings.py` (8), counting the
+op names that actually appear as string literals in those files.
 
 | Section | State |
 |---|---|
-| Models | **built** - tiers, models on disk, leases, import by choosing a file |
-| Voices | **built** - installed/known voices, default, whisper model, download, import, remove |
-| Speech | not built - push-to-talk, wake word, mute |
-| Workspaces | not built - approved roots, manifests |
-| Authority | not built - tiers, confirmations, session ceiling |
-| Advanced | not built - paths, state dir, hotkeys, logs |
+| Models | **built** (D74/D75) - tiers, models on disk, lease ceilings, save |
+| Voices | **built** (D76) - installed/known, default, whisper model, download, import, remove |
+| Speech | **not built** - push-to-talk, mute, wake word |
+| Workspaces | **not built** - the biggest gap; see below |
+| Authority | **not built** - tiers, confirmations, session ceiling |
+| Advanced | **not built** - paths, state dir, hotkey, logs, transcripts |
+
+#### The 27 ops with no way in, grouped
+
+| Group | Ops | What a window would do |
+|---|---|---|
+| `workspace_*` (6) | `add`, `remove`, `list`, `covers`, `resolve`, `roots` | approve/revoke project roots. **The most important gap**: nothing outside `models/` is reachable until a root is approved, so this is the gate on the whole product |
+| `vault_*` (6) | `append`, `index`, `read_journal`, `role_templates`, `status`, `write_note` | the Obsidian bridge |
+| `brain_*` (5) | `describe`, `load`, `status`, `stream`, `unload` | which model is loaded, force load/unload, free VRAM now |
+| `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | what holds VRAM and for how long. `summary` is reached from the tray |
+| `audit_*` (2) | `note`, `tail` | write a note into the chain; read it back |
+| `mail_status` (1) | | is IMAP configured and reachable |
+| `voice_watch` (1) | | start/stop wake-word listening |
+| `reflect_overlay` (1) | | what the assistant has taught itself, and whether it was promoted |
+| `tool_check` (1) | | "what would happen if I ran this" - a prediction, not an action |
+| `ping` (1) | | liveness |
+
+#### Asked for, and does not exist in the code at all
+
+- **Provider editing.** There is no provider to edit, and that is the design rather
+  than an omission: reasoning is local only, and cloud providers are permitted in
+  exactly one place - delegated workers (Plane D). A "providers" screen would be a
+  screen for a feature the project forbids. Worth saying plainly because it was asked
+  for, and the honest answer is not "not built yet".
+- **"Modes."** No such concept exists. The nearest things are three *independent*
+  settings that have never been presented together: attended/unattended, the session
+  ceiling (T0-T3), and the fast/deep tier. If "modes" means naming a combination of
+  those, that is a real feature and it is unbuilt.
+- **A configurable hotkey.** `Ctrl+Alt+Space` is a constant in `tray.py`
+  (`HOTKEY_LABEL`). The Win32 `RegisterHotKey` path exists (D30) but nothing can
+  change the chord.
+- **The wake word.** `hey_jarvis` is a constant in `audio.py`. A different one means
+  retraining - `train_wakeword.py` exists, but there is no path from the window to it.
+- **Transcript history.** The overlay's transcript is in-memory and dies with the
+  window. Nothing writes a transcript anywhere, so there is nothing to search.
+- **Per-tool grants, viewed.** D32's 600-second class grants can be given from the
+  confirmation dialog but there is no way to *see* or revoke them except by waiting.
+- **Import/export of settings.** `models.json` and `voices.json` are hand-editable and
+  nothing more. No backup, no restore, no "export my configuration".
 
 ### Widgets to build, in priority order
 

@@ -494,7 +494,7 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
 5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **1090 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
+Current state: **1095 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
 
 **The daemon could not restart until D64, and that outranks everything below.**
 `Daemon.__init__` minted a fresh authkey per construction while `store_authkey`
@@ -537,6 +537,16 @@ not a plain dependency and a test enforces it. `uv pip install -e .` resolves 4
 packages in 2.9 s because Plane A is pure stdlib. The Telegram token may now come
 from `LOCALAIZED_TELEGRAM_TOKEN` so it need never touch disk.
 
+**And the confirmation dialog can be built at all (D69).** `activebackground="#3182ce6"`
+is seven hex digits, so `tk.Button` raised `TclError: invalid color name` while
+constructing every T3 dialog — silently, because `_poll` presents from an `after`
+callback where Tk prints and continues. 24 tests on the confirmation rules passed
+against a dialog that cannot exist, because their `NoButton` ignored every colour it
+was handed: **the fake agreed with the code about everything it did not check**. The
+same three lines left six widget references alive on a settled dialog, so the process
+exited -2147483645 after a clean shutdown (D67's bug, one level down). Fixed, and the
+full chain now runs against a real file in a real approved workspace.
+
 **The window runs tools now (D68).** Until then it proposed one and stopped: `_run_turn`
 printed `proposing <tool> (<args>)` and returned, never sending the proposal back
 through `tool_call`, so the front door the user is sitting in front of could not run
@@ -565,15 +575,13 @@ registered tools: 61        executors on the Daemon: 51        unimplemented: 10
 
 **Next, in order** - following the capability order the user set, not my own preference for the largest gap:
 
-0. **A T3 turn driven from the window, end to end.** The spine is proven for a tool
-   turn (D68). The model commits under the decision grammar and the window carries
-   the proposal through `tool_call` to a real executor, with real data on screen —
-   measured on the 4B through the real arbiter, not inferred. What no turn has yet
-   exercised is the *whole* loop: model proposes `file.delete` → the gate returns a
-   confirmation id → the armed poll raises the dialog → the user approves → the tool
-   runs. Every piece is tested; the chain is not, and D67 found this same chain had
-   never been armed. Use an approved workspace so the gate confirms rather than
-   refusing, and check the id in the transcript matches the dialog.
+0. **Done - and it found a fifth defect.** The T3 chain has been driven end to end on
+   the real model: the model commits to `file.delete`, the gate confirms `c000001`,
+   the armed poll raises the dialog *by itself*, the real button approves bound to
+   the payload hash, and the file is gone with nothing left pending (D69). The
+   previous round's item 0 closed with D68. **The spine is now proven for both a T0
+   read and a T3 destructive action, which is the whole authority range.** The
+   remaining GUI risk is not the chain but the fakes - see D69's closing note.
 1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later. D63 applies: argument names are part of the rule, and an IMAP argument like `folder` or `mailbox` must be checked against the path screen before it ships.
 2. **`reflect.*`** - Phase 6, last, and deliberately. D21 forbids the assistant writing its own code or policy permanently, at every phase, so that constraint belongs in the tests from the first line rather than retrofitted.
 

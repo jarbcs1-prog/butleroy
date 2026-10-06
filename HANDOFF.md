@@ -5,7 +5,7 @@ end of the session that fixed D68.
 
 **If you are resuming from a prompt like** *"inspect `G:\localaized` to determine
 the current progress status, find out where it stopped and resume"* — read this
-whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D68.
+whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D69.
 Do not re-read the other 4,600 lines before starting work.
 
 ---
@@ -38,7 +38,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 |---|---|
 | `HANDOFF.md` | this file |
 | `PLAN.md` → "Immediate next action" | what to do next, and why |
-| `DECISIONS.md` §D68 | why the window proposed a tool and dropped it, and why that was not the model's fault |
+| `DECISIONS.md` §D68–D69 | the two defects that made a tool turn impossible, and a T3 dialog that could not be built at all |
 | `ARCHITECTURE.md` | four planes, the VRAM arbiter, authority tiers |
 | `INSTALL.md` | how to install it. **§3 is mandatory and counter-intuitive** |
 | `AI_Assistant_Local.md` | the original brief. **Superseded** — provenance only |
@@ -48,11 +48,11 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1090 passed, 3 skipped, 47 subtests   (~2m36s, no PYTHONPATH needed)
+tests        1095 passed, 3 skipped, 47 subtests   (~2m34s, no PYTHONPATH needed)
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 51 with executors · 10 unimplemented
              (6 email.*, 4 reflect.* — the only two groups left)
-decisions    D1..D68, contiguous, none missing
+decisions    D1..D69, contiguous, none missing
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
              and tests/test_install.py asserts it never becomes a core dep (D66)
 tree         clean at the last commit; see §4 for what the last session changed
@@ -95,10 +95,40 @@ handoff predicted.**
   same failure a generation earlier. Seven mutations were run against `overlay.py`
   to prove the other eight tests are load-bearing.
 
+- **D69 — the T3 confirmation dialog could not be built, and 24 tests said it was
+  fine.** Driving the T3 chain next found the entire destructive path dead.
+  `activebackground="#3182ce6"` is seven hex digits, so `tk.Button` raised
+  `TclError: invalid color name` *while constructing the dialog*. Every T3
+  confirmation in the product died on that line, and **silently** — `_poll` calls
+  `_present` from an `after` callback, where Tk prints the traceback and carries on,
+  so the dialog never appeared and the pending action could be neither approved nor
+  refused. That is D67 defect 2's exact failure mode, reached by a different route
+  in the same method.
+
+  `test_overlay.py`'s `NoButton` ignored every colour it was handed, so all 24 tests
+  on the confirmation rules passed against a dialog that cannot exist. **The fake
+  agreed with the code about everything the fake did not check** — D67's lesson one
+  level too high: it made the *root* real and left the widgets imaginary, and the
+  part that was imaginary is the only part Tk validates.
+
+  The same three lines carried a second defect: `_settle` destroyed the Toplevel but
+  never cleared `top`/`body`/`clock` and the three buttons, so a settled dialog kept
+  the Tcl interpreter alive and the process exited `-2147483645` after a clean
+  shutdown — D67's exit-code bug one level down. Order matters: cleared on the Tk
+  thread gives exit 0, held past shutdown gives the debug break.
+
+- **The chain is now closed end to end.** Real model, real arbiter, real gate, real
+  executor, against a real 34-byte file in a real approved workspace: propose
+  `file.delete` → gate confirms `c000001` → **the armed poll raises the dialog by
+  itself** → the real button approves, bound to the payload hash → the file is gone
+  and nothing is left pending. D69 would have made every step after the second
+  impossible.
+
 The project's test suite had passed 1025 tests while three production-blocking
-defects were live, and 1080 while a fourth was. That is the thing to carry forward:
-**this codebase's tests do not cover lifecycle, threading, the real GUI, or call
-sequences between two ops.** See §6.
+defects were live, 1080 while a fourth was, and 1090 while a fifth was. That is the
+thing to carry forward: **this codebase's tests do not cover lifecycle, threading,
+the real GUI, call sequences between two ops, or whether its widgets can be
+constructed.** See §6.
 
 <details><summary>The previous session, for provenance</summary>
 
@@ -163,15 +193,21 @@ on the real model; it found the window was proposing a tool and dropping it. It 
 fixed and verified. Do not re-run it as a manual sanity check expecting a new
 answer — the interesting next steps are the two build gaps below.
 
-**One thing worth doing first, because it is cheap and it is the kind of thing this
-project keeps being bitten by:** drive a **T3** turn from the window and watch the
-dialog arrive. D68 proved a T0 read carries through and now says it is *waiting for
-your approval as c000001* when the gate returns a confirmation — but no turn has yet
-exercised the full loop: model proposes `file.delete` → `tool_call` returns a
-confirmation id → the armed poll raises the dialog → approve → the tool runs. Every
-piece of that is tested; the chain is not. Ask the window to delete a file inside an
-approved workspace and confirm the dialog appears over the window with the id
-matching. This is exactly the loop D67 found had never been armed.
+**Both of last session's open items are now closed.** D68 made the window carry a
+proposal through the gate; D69 made the confirmation dialog buildable and released
+its Tcl references correctly. The T3 chain has been driven end to end on the real
+model, so there is no instruction here to re-run it — the interesting next step is
+the first build gap.
+
+One thing worth doing first anyway, because it is cheap and it is the kind of thing
+this project keeps being bitten by: **read `tests/test_overlay_real_dialog.py` and
+ask what else the fakes in `test_overlay.py` are not checking.** That file exists
+because 24 tests on the confirmation rules passed against a dialog that could not be
+constructed. The widgets the fakes replace are `Button`, `Label`, `Text`, `Frame` and
+`Toplevel`, and Tk validates options on all of them. `NoButton` now checks colours;
+nothing checks `relief`, `padx`, `pady`, `wraplength`, `anchor`, `justify` or
+`insertbackground`, and `_Confirm` uses most of them. Expect the same class of
+finding, and treat "the fakes agree with the code" as the thing to distrust.
 
 Then, in order:
 
@@ -236,6 +272,21 @@ cannot find a defect living in the transition between two instances of it.* So:
   window by writing a second blank window. Write the sentence *"this test fails if
   and only if ___ is broken"* before writing the fake; if the blank is not obvious,
   the fake is not specified yet.
+- **A fake agrees with the code about everything it does not check.** D69 is this
+  sentence costing a destructive path: `NoButton` recorded `text` and `command` and
+  ignored `bg`, `fg` and `activebackground`, so it happily agreed with a
+  seven-hex-digit colour that Tk rejects outright. After D67 made the fake *root*
+  real and left the *widgets* imaginary — and the imaginary part was the only part
+  Tk validates. For every option a widget is handed, either check it in the fake or
+  check it against a real Tk somewhere; silently ignoring it is not neutral.
+- **Release Tk objects on the thread that created them, and in the right order.**
+  D67 for the Overlay, D69 for the dialog. A widget object holds `.tk`, which is the
+  Tcl interpreter, so a surviving reference means the interpreter is released at
+  *process* shutdown on the main thread: `Tcl_AsyncDelete: async handler deleted by
+  the wrong thread`, which on Windows is a debug break and an exit code of
+  -2147483645 that a scheduled task reads as failure. Measured, in D69: cleared on
+  the Tk thread → exit 0; held past shutdown → the break; cleared before the caller
+  drops its reference → exit 0. The order is load-bearing.
 - **Run the real thing.** Probes against real Tk, real pipes, real processes found
   four defects that 1,080 unit tests did not — including two bugs in my own fix.
   A fake of the key file would have passed against the broken `store_authkey`.
@@ -261,14 +312,14 @@ Local assistant 0.3.0 that is empty white") was the one that cracked it.
 
 **Decisions.** New findings go in `DECISIONS.md` as `## Dn - <title that states
 the finding, not the topic>`. Rationale and evidence, including the wrong
-hypotheses and what they cost. The numbering is load-bearing: all 67 are
+hypotheses and what they cost. The numbering is load-bearing: all 69 are
 contiguous. When a plan line turns out to be wrong on the record, correct the line
 and say so — do not quietly overwrite it.
 
 ## 7. Quick commands
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q        # 1090 tests, ~2m36s
+.\.venv\Scripts\python.exe -m pytest -q        # 1095 tests, ~2m34s
 .\.venv\Scripts\python.exe verify_install.py   # exit 0 = install is real
 .\.venv\Scripts\python.exe -m assistant        # start the product
 .\.venv\Scripts\python.exe -m assistant --check # preflight, no display
@@ -286,6 +337,10 @@ are worth re-creating rather than re-deriving if the question comes up again:
   through a real `Overlay`, separating "did the model commit" from "did the window
   run it". Those two failures are indistinguishable from outside the window, and
   conflating them is what sent the previous session looking at the model.
+- a T3 chain probe that drives propose → confirm → dialog → approve → run against a
+  real file in a real approved workspace, and asserts the dialog appeared *without
+  anything calling `_poll`*. This is the one that found D69, and it is the shape to
+  copy for any loop the suite claims to cover piece by piece.
 
 If the daemon will not start and reports `FileExistsError: authkey.bin`, another
 daemon owns that state directory — that is by design (D64). Check

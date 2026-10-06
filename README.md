@@ -58,7 +58,7 @@ verify_install.py              # prove the install actually works
 
 | | |
 |---|---|
-| Tests | **1090 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
+| Tests | **1095 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
 | Install | `uv pip install -e .` in 2.9 s; `verify_install.py` exits 0 |
 | Restart | The daemon survives restarts (D64) |
 | Launch | One command starts tray + chord + prompt window (D65, D67) |
@@ -66,7 +66,7 @@ verify_install.py              # prove the install actually works
 | Phases | 0–5 closed. Phase 6 (`reflect.*`) not started |
 
 **Blocking defects found and fixed** — every one of them passed the suite as it
-stood:
+stood, which is 1,090 tests for the last one:
 
 - **D64** — the daemon could start exactly **once**. Every reboot or crash after
   that killed it permanently.
@@ -78,14 +78,20 @@ stood:
   `proposing <tool> (<args>)` and never sent it through `tool_call`, so the front
   door you sit in front of could not run any tool at all — including a T0 read
   needing no approval. It failed silently: no error, and the audit chain verified.
+- **D69** — **every T3 confirmation dialog could not be built.** One button's hover
+  colour had seven hex digits, so Tk raised while constructing the dialog — and
+  silently, because the 1-second poll presents from a callback where Tk prints the
+  traceback and carries on. A pending destructive action could be neither approved
+  nor refused. 24 tests on the confirmation rules passed against it, because their
+  fake button ignored every colour it was given.
 
-**Proven end to end, including a tool turn:** type a question into the window and
-get an answer back — overlay → `brain_turn` → VRAM lease → the `brain_server`
-child → real llama.cpp on the GPU → streamed answer → transcript. Asking *how much
-VRAM am I using right now* now commits to `system.gpu_state` and shows the real
-figures, measured on the 4B through the real arbiter and gate. **Not yet proven:**
-the full T3 loop — model proposes a delete → confirmation id → dialog → approve →
-it runs. Every piece is tested; the chain is not.
+**Proven end to end, across the whole authority range.** Type a question into the
+window and get an answer back — overlay → `brain_turn` → VRAM lease → the
+`brain_server` child → real llama.cpp on the GPU → streamed answer → transcript.
+Asking *how much VRAM am I using right now* commits to `system.gpu_state` and shows
+the real figures. Asking it to delete a file in an approved workspace produces the
+confirmation dialog on its own, and approving it removes the file. Both measured on
+the 4B through the real arbiter and gate.
 
 **Outstanding:** `email.*` (6 tools, IMAP) and `reflect.*` (4 tools, Phase 6).
 Autostart is documented in `INSTALL.md` §9 but not registered. See

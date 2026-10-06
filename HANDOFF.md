@@ -1,11 +1,11 @@
 # HANDOFF
 
-**Purpose:** resume this project without re-deriving anything. Written at the end
-of the session that fixed D64–D67.
+**Purpose:** resume this project without re-deriving anything. Last rewritten at the
+end of the session that fixed D68.
 
 **If you are resuming from a prompt like** *"inspect `G:\localaized` to determine
 the current progress status, find out where it stopped and resume"* — read this
-whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D67.
+whole file, then `PLAN.md` → "Immediate next action", then `DECISIONS.md` §D68.
 Do not re-read the other 4,600 lines before starting work.
 
 ---

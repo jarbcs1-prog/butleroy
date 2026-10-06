@@ -864,3 +864,168 @@ def test_the_authority_widgets_are_released(win) -> None:
     assert section.holds_widgets() == [], (
         f"the section still holds {section.holds_widgets()} after disposal"
     )
+
+# --------------------------------------------------------------------------- #
+# the advanced section
+# --------------------------------------------------------------------------- #
+
+
+class FakeAdvancedDaemon(FakeDaemon):
+    """A daemon that answers the six diagnostics ops, with one deliberately absent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records = [
+            {"seq": 1, "timestamp": "2026-10-07T12:00:00.000000+00:00",
+             "actor": "tray", "channel": "pc", "tool": "voice_config.set",
+             "tier": "T1", "decision": "allow", "reason": "x", "args": {}},
+            {"seq": 2, "timestamp": "2026-10-07T12:01:00.000000+00:00",
+             "actor": "user", "channel": "pc", "tool": "workspace.add",
+             "tier": "T1", "decision": "allow", "reason": "y", "args": {}},
+        ]
+
+    def __call__(self, op: str, /, **args) -> dict:
+        self.calls.append((op, dict(args)))
+        if op == "status":
+            return {"ok": True, "result": {
+                "version": "0.3.0", "uptime_s": 12.5, "attended": True,
+                "session_ceiling": "T3", "requests": 3, "tools_registered": 61,
+                "audit_records": 2, "vram": {"used_bytes": 0, "ceiling_bytes": 0}}}
+        if op == "brain_status":
+            return {"ok": True, "result": {
+                "running": False, "tier": None, "model_loaded": False,
+                "idle_s": None, "ttl_s": 90.0, "note": "no child is running"}}
+        if op == "mail_status":
+            return {"ok": True, "result": {"configured": False,
+                                           "note": "no state/email.json"}}
+        if op == "vault_status":
+            return {"ok": True, "result": {"available": False,
+                                           "error": "vault not configured"}}
+        if op == "reflect_overlay":
+            return {"ok": True, "result": {"chars": 0}}
+        if op == "audit_tail":
+            return {"ok": True, "result": list(self.records)}
+        return super().__call__(op, **args)
+
+
+@requires_display
+def test_advanced_shows_the_facts_that_had_no_home(win) -> None:
+    """Six things that were previously invisible anywhere in the product.
+
+    Which model is loaded, whether mail is configured, whether the vault bridge is
+    up, what the assistant has promoted, the paths, and the audit record.
+    """
+    w = win(FakeAdvancedDaemon())
+    w._select("advanced")
+
+    text = w._sections["advanced"].facts.cget("text")
+    for needle in ("brain running", "mail configured", "vault available",
+                   "reflect overlay", "models dir", "voices dir"):
+        assert needle in text, f"{needle!r} is not shown: {text!r}"
+
+
+@requires_display
+def test_advanced_says_never_used_rather_than_none_s_of_90s(win) -> None:
+    """`idle_s` is None when no child has ever run.
+
+    Rendered naively that reads "Nones of 90.0s", which is not a sentence and looks
+    like a bug in the window rather than a fact about the daemon. Asserted because it
+    is exactly the kind of thing that ships.
+    """
+    w = win(FakeAdvancedDaemon())
+    w._select("advanced")
+
+    text = w._sections["advanced"].facts.cget("text")
+    assert "None" not in text, f"a raw None reached the screen: {text!r}"
+    assert "never used" in text, text
+
+
+@requires_display
+def test_advanced_survives_a_subsystem_being_absent(win) -> None:
+    """The vault is not installed on every machine.
+
+    A diagnostics panel that dies because one subsystem is missing is useless exactly
+    when it is most wanted. Each fact is asked for independently and a failure becomes
+    a line, not an exception.
+    """
+    w = win(FakeAdvancedDaemon())
+    w._select("advanced")
+
+    text = w._sections["advanced"].facts.cget("text")
+    # Booleans render as yes/no, so the absence reads as a fact rather than as a
+    # Python repr. The point of the assertion is that the panel is *complete* despite
+    # one subsystem being missing.
+    assert "vault available  no" in text, text
+    assert "vault error      vault not configured" in text, text
+
+
+@requires_display
+def test_advanced_renders_the_audit_tail_with_timestamps(win) -> None:
+    """The field is `timestamp`, not `at`.
+
+    The first version read `at`, so every row rendered with a blank time and the tail
+    looked like it was missing data rather than misreading it.
+    """
+    w = win(FakeAdvancedDaemon())
+    w._select("advanced")
+
+    rendered = w._sections["advanced"].record.get("1.0", "end")
+    assert "voice_config.set" in rendered, rendered
+    assert "workspace.add" in rendered, rendered
+    assert "2026-10-07" in rendered, (
+        f"the timestamps did not render: {rendered!r}"
+    )
+
+
+@requires_display
+def test_the_audit_tail_is_read_only(win) -> None:
+    """A diagnostics panel must not be an editor.
+
+    Every *setting* has a screen where it can be changed with its consequences
+    visible. This is the one place that answers "what is the state of things", and a
+    panel mixing the two is a panel where a stray keystroke changes something.
+    """
+    w = win(FakeAdvancedDaemon())
+    w._select("advanced")
+
+    assert str(w._sections["advanced"].record.cget("state")) == "disabled", (
+        "the audit tail is editable"
+    )
+
+
+@requires_display
+def test_advanced_calls_nothing_that_could_change_anything(win) -> None:
+    """Read-only asserted on the ops, not on the widget state.
+
+    `audit_tail`, `brain_status`, `mail_status`, `vault_status`, `reflect_overlay` and
+    `status` all read. If a future edit added a write here, the disabled text widget
+    would still look right.
+    """
+    daemon = FakeAdvancedDaemon()
+    w = win(daemon)
+    w._select("advanced")
+
+    writes = {
+        "voice_config_set", "voice_install", "voice_import", "voice_remove",
+        "model_config_set", "workspace_add", "workspace_remove",
+        "session_set_attended", "tool_call", "confirm_approve", "confirm_deny",
+        "audit_note", "brain_load", "brain_unload",
+    }
+    called = {op for op, _ in daemon.calls}
+    assert not (called & writes), (
+        f"the advanced panel called a mutating op: {sorted(called & writes)}"
+    )
+
+
+@requires_display
+def test_the_advanced_widgets_are_released(win) -> None:
+    w = win()
+    w._select("advanced")
+    section = w._sections["advanced"]
+    assert section.holds_widgets()
+
+    w.destroy()
+
+    assert section.holds_widgets() == [], (
+        f"the section still holds {section.holds_widgets()} after disposal"
+    )

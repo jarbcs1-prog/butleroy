@@ -3988,3 +3988,67 @@ Suite after: **1343 passed, 36 skipped, 47 subtests**, exit 0. Nine new tests in
 window body (33 there now), one of which was wrong on the first attempt: it walked the
 widget tree one level deep to find the tier examples, found nothing, and failed for a
 reason that had nothing to do with the rendering. Made recursive.
+
+---
+
+## D79 - Advanced: the facts that had no home, and a formatter
+
+The fifth section, and the last one that was specified. Read-only diagnostics: which
+model is loaded, whether mail is configured, whether the vault bridge is up, what the
+assistant has promoted, where everything lives, and the audit tail.
+
+**Read-only on purpose.** Every *setting* has a screen where it can be changed with
+its consequences next to it. This is the one place that answers "what is the state of
+things", and a panel that mixed the two would be a panel where a stray click changes
+something. The one action is Reload, and a test asserts the mutating ops never appear
+among the ops this section calls - not merely that the text widget is disabled, which
+a future edit could leave looking right.
+
+It reached six ops that had no way in at all: `brain_status`, `mail_status`,
+`vault_status`, `reflect_overlay`, `audit_tail` and a fuller reading of `status`.
+Coverage goes from 21 of 44 to **26 of 44**.
+
+### One op failing must not lose the other five
+
+The vault is not installed on every machine, and a diagnostics panel that dies because
+one subsystem is missing is useless exactly when it is most wanted. Each fact is asked
+for independently through a helper that converts any exception into a line. That is
+not defensive habit: `vault_status` on a machine with no vault is the *normal* case,
+and the panel's whole job is to report it.
+
+### The formatter, and what found it
+
+The first version interpolated values straight into the text, so a reply missing a
+field rendered `version          None`. The test asserting "no raw `None` reaches the
+screen" caught it - and it caught it on the *fake*, which returned an empty `status`.
+That is the interesting part: the fake was unrealistic and the test found a real
+rendering defect anyway, because the assertion was about the screen rather than about
+the fake.
+
+A raw `None` in a diagnostics panel is worse than a wrong value. The panel exists to
+be trusted when something *is* wrong, and a Python repr makes it look like the window
+is broken rather than the subsystem. `_fmt` renders `None` as "unknown" and booleans
+as yes/no.
+
+Two smaller display defects found the same way, both from reading real output rather
+than reasoning about it:
+
+  * the audit record field is `timestamp`, not `at` - so every row rendered with a
+    blank time, which looked like missing data rather than a misread field;
+  * `idle_s` is `None` before any child has run, and rendered as "Nones of 90.0s".
+
+### And a refusal worth keeping
+
+`workspace_add` refused the temporary directory the probe was using, with:
+
+    NotPermitted: p: root '...' contains the assistant's own state directory
+    '...\\state\\workspaces'. Refusing, because that would make our own code
+    reachable as an approved workspace.
+
+That is D21 working without being asked, on a case nobody had thought about: the
+manifest store protects itself against being made reachable by approving its own
+parent. Worth recording because it is the only reason the probe's first assertion
+failed and the second passed.
+
+Suite after: **1343 passed, 43 skipped, 47 subtests**, exit 0. Six new tests in the
+window body (40 there now).

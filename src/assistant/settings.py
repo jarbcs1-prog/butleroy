@@ -1109,6 +1109,221 @@ class AuthoritySection(Section):
             self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
 
 
+class AdvancedSection(Section):
+    """Everything that did not warrant a screen of its own, and the record.
+
+    A read-only diagnostics panel plus the audit tail. Most of what is here has never
+    had a way to be seen: which model is loaded, whether mail is configured, whether
+    the vault bridge is up, what the assistant has taught itself, and the paths
+    everything lives under.
+
+    **Read-only on purpose.** Every *setting* has a screen where it can be changed
+    with its consequences next to it; this is the one place that answers "what is the
+    state of things", and a panel that mixed the two would be a panel where a stray
+    click changes something. The one action is Reload.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("advanced", "Advanced", "settings")
+        self.named = ("facts", "record", "status")
+        self.facts: Any = None
+        self.record: Any = None
+        self.status: Any = None
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        self.facts = tk.Label(body, text="", fg=c["bone"], bg=c["slate"],
+                              anchor="w", justify="left", font=("Cascadia Code", 9))
+        self.facts.pack(fill="x", padx=16, pady=(14, 10))
+        self.widgets.append(self.facts)
+
+        tk.Label(body, text="Audit tail", fg=c["brass"], bg=c["slate"],
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(
+            fill="x", padx=16, pady=(4, 2))
+        self.widgets.append(body.winfo_children()[-1])
+
+        self.record = tk.Text(
+            body, fg=c["sage"], bg=c["obsidian"], relief="flat", wrap="none",
+            height=12, font=("Cascadia Code", 8), padx=10, pady=8,
+            insertbackground=c["bone"],
+        )
+        self.record.pack(fill="both", expand=True, padx=16)
+        self.record.configure(state="disabled")
+        self.widgets.append(self.record)
+
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(10, 14))
+        self.widgets.append(row)
+
+        self.status = tk.Label(row, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=520,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        button = tk.Button(
+            row, text="Reload", command=self._reload, relief="flat", bd=0,
+            bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
+            activeforeground=c["brass-lit"], font=("Segoe UI", 9),
+            padx=12, pady=4, cursor="hand2")
+        button.pack(side="right")
+        self.widgets.append(button)
+
+        self._load(call)
+
+    # -- data ---------------------------------------------------------------
+
+    @staticmethod
+    def _fmt(value: Any) -> str:
+        """A value fit for a person to read.
+
+        `None` becomes "unknown" rather than the string "None". The first version
+        interpolated the value directly, so a daemon reply missing a field rendered
+        as `version          None` - which reads as a bug in the window rather than
+        as a fact about the daemon, and the whole point of this panel is to be
+        trusted when something *is* wrong.
+        """
+        if value is None:
+            return "unknown"
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        return str(value)
+
+    def _ask(self, op: str, **args: Any) -> dict:
+        """One op, never raising. A panel of six facts must survive one of them
+        being unavailable - the vault is not installed on every machine, and a
+        diagnostics screen that dies because one subsystem is absent is useless
+        exactly when it is most wanted.
+        """
+        try:
+            res = self._call(op, **args) or {}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return res
+
+    def _load(self, call: Callable[..., dict]) -> None:
+        lines: list[str] = []
+
+        status = self._ask("status")
+        if status.get("ok"):
+            s = status["result"]
+            f = self._fmt
+            lines.append(f"version          {f(s.get('version'))}")
+            lines.append(f"uptime           {f(s.get('uptime_s'))}s")
+            lines.append(f"attended         {f(s.get('attended'))}")
+            lines.append(f"session ceiling  {f(s.get('session_ceiling'))}")
+            lines.append(f"requests         {f(s.get('requests'))}")
+            lines.append(f"tools            {f(s.get('tools_registered'))} registered")
+            lines.append(f"audit records    {f(s.get('audit_records'))}")
+            vram = s.get("vram") or {}
+            if isinstance(vram, dict):
+                for key in ("used_bytes", "ceiling_bytes", "holders"):
+                    if key in vram:
+                        lines.append(f"vram {key:<11} {vram[key]}")
+        else:
+            lines.append(f"status           unavailable: {status.get('error')}")
+
+        brain = self._ask("brain_status")
+        if brain.get("ok"):
+            b = brain["result"]
+            lines.append("")
+            lines.append(f"brain running    {self._fmt(b.get('running'))}")
+            lines.append(f"brain tier       {self._fmt(b.get('tier'))}")
+            lines.append(f"model loaded     {self._fmt(b.get('model_loaded'))}")
+            idle = b.get("idle_s")
+            lines.append(
+                "idle             never used yet"
+                if idle is None
+                else f"idle             {idle}s of {b.get('ttl_s')}s"
+            )
+            lines.append(f"note             {b.get('note')}")
+
+        mail = self._ask("mail_status")
+        lines.append("")
+        if mail.get("ok"):
+            m = mail["result"]
+            lines.append(f"mail configured  {self._fmt(m.get('configured'))}")
+            for key in ("host", "username", "mailbox", "note"):
+                if m.get(key):
+                    lines.append(f"mail {key:<11} {m[key]}")
+        else:
+            lines.append(f"mail             unavailable: {mail.get('error')}")
+
+        vault = self._ask("vault_status")
+        lines.append("")
+        if vault.get("ok"):
+            v = vault["result"]
+            lines.append(f"vault available  {self._fmt(v.get('available'))}")
+            if v.get("error"):
+                lines.append(f"vault error      {v['error']}")
+            described = v.get("describe")
+            if isinstance(described, dict):
+                for key in ("path", "notes", "last_index"):
+                    if described.get(key) is not None:
+                        lines.append(f"vault {key:<11} {described[key]}")
+        else:
+            lines.append(f"vault            unavailable: {vault.get('error')}")
+
+        reflect = self._ask("reflect_overlay")
+        lines.append("")
+        if reflect.get("ok"):
+            r = reflect["result"] or {}
+            lines.append(
+                f"reflect overlay  {self._fmt(r.get('chars'))} chars promoted")
+            for key in ("ledger", "candidates", "note"):
+                if r.get(key) is not None:
+                    lines.append(f"reflect {key:<9} {r[key]}")
+        else:
+            lines.append(f"reflect          unavailable: {reflect.get('error')}")
+
+        # Paths, from the modules that own them rather than re-derived here.
+        from . import modelconfig, voiceconfig
+
+        lines.append("")
+        lines.append(f"models dir       {modelconfig.MODELS_DIR}")
+        lines.append(f"voices dir       {voiceconfig.VOICES_DIR}")
+        lines.append(f"models config    {modelconfig.DEFAULT_CONFIG_PATH}")
+        lines.append(f"voices config    {voiceconfig.DEFAULT_CONFIG_PATH}")
+
+        self.facts.configure(text="\n".join(lines))
+
+        tail = self._ask("audit_tail", limit=40)
+        self.record.configure(state="normal")
+        self.record.delete("1.0", "end")
+        if tail.get("ok"):
+            records = tail.get("result") or []
+            for r in records:
+                if not isinstance(r, dict):
+                    continue
+                self.record.insert(
+                    "end",
+                    f"{str(r.get('timestamp', ''))[:19]:<20}"
+                    f"{r.get('decision', ''):<8}"
+                    f"{r.get('tier', ''):<4} {r.get('actor', ''):<12}"
+                    f"{r.get('tool', '')}\n",
+                )
+            self._say(f"{len(records)} of {len(records)} record(s) shown. "
+                      f"Read-only.", "sage")
+        else:
+            self.record.insert("end", f"unavailable: {tail.get('error')}\n")
+            self._say(f"the audit tail is unavailable: {tail.get('error')}", "rust")
+        self.record.configure(state="disabled")
+
+    def _reload(self) -> None:
+        self._load(self._call)
+
+    def _say(self, message: str, tone: str) -> None:
+        if self.status is not None:
+            self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
+
+
 class Settings:
     """The window. One Tk thread, one queue, built like `overlay.Overlay`.
 
@@ -1400,12 +1615,13 @@ class Settings:
         # Sections are listed in this order rather than discovered, because a
         # settings window whose navigation depends on a registry lookup is a window
         # that can come up empty with nothing wrong anywhere.
-        self._order = ["models", "voices", "workspaces", "authority"]
+        self._order = ["models", "voices", "workspaces", "authority", "advanced"]
         self._sections = {
             "models": ModelsSection(),
             "voices": VoicesSection(),
             "workspaces": WorkspacesSection(),
             "authority": AuthoritySection(),
+            "advanced": AdvancedSection(),
         }
 
         for key in self._order:

@@ -207,15 +207,15 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **21 of the daemon's 44 ops have a way in; 23 do not.**
+Measured, not remembered: **26 of the daemon's 44 ops have a way in; 18 do not.**
 Reached by `overlay.py` (6), `tray.py` (5, four of which were broken until D77) and
-`settings.py` (15), counting the op names that actually appear as string literals in
+`settings.py` (20), counting the op names that actually appear as string literals in
 those files - and, since D77, asserting that every one of them exists.
 
-The figure was 21 in the first version of this paragraph, then 20 after a
-correction, and is 21 again now that Authority exists. Each time it was written from
-the change just made rather than from the measurement - which is the same mistake in
-miniature that this whole section is about, so it is left visible rather than tidied.
+The figure in this paragraph has been 21, then 20, then 21, and is 26 now that
+Advanced exists. Each earlier time it was written from the change just made rather
+than from the measurement - the same mistake in miniature that the whole section is
+about, so it is left visible rather than tidied.
 
 | Section | State |
 |---|---|
@@ -224,7 +224,7 @@ miniature that this whole section is about, so it is left visible rather than ti
 | Speech | **not built** - push-to-talk, mute, wake word |
 | Workspaces | **built** (D77) - approve/revoke folders, danger level, allowed tiers |
 | Authority | **built** (D78) - the tier ladder, ceiling, attended state, pending list, and a what-would-happen checker |
-| Advanced | **not built** - paths, state dir, hotkey, logs, transcripts |
+| Advanced | **built** (D79) - read-only diagnostics: brain, mail, vault, reflection, paths, and the audit tail |
 
 #### The 27 ops with no way in, grouped
 
@@ -232,13 +232,11 @@ miniature that this whole section is about, so it is left visible rather than ti
 |---|---|---|
 | `workspace_covers`, `workspace_resolve` (2) | | "is this path approved, and what may happen in it" - useful for a path checker in Advanced |
 | `vault_*` (6) | `append`, `index`, `read_journal`, `role_templates`, `status`, `write_note` | the Obsidian bridge |
-| `brain_*` (5) | `describe`, `load`, `status`, `stream`, `unload` | which model is loaded, force load/unload, free VRAM now |
+| `brain_*` (4) | `describe`, `load`, `stream`, `unload` | force a load or unload, free VRAM now, see what the model was given. `status` is reached from Advanced |
 | `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | what holds VRAM and for how long. `summary` is reached from the tray |
-| `audit_tail` (1) | | read the chain back; `audit_verify` is reached from the tray |
-| `audit_note` (1) | | write a note into the chain - a decision that was not a tool call |
-| `mail_status` (1) | | is IMAP configured and reachable |
+| `mail_status` | reached, in Advanced |
 | `voice_watch` (1) | | start/stop wake-word listening |
-| `reflect_overlay` (1) | | what the assistant has taught itself, and whether it was promoted |
+| `reflect_overlay` | reached, in Advanced |
 | `tool_check` | reached, in Authority | "what would happen if I ran this" - a prediction, not an action |
 | `ping` (1) | | liveness |
 

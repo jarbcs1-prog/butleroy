@@ -10,6 +10,7 @@ A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs 
 | **ARCHITECTURE.md** | Four planes, the VRAM arbiter, authority tiers, memory design |
 | **PLAN.md** | Seven phases with measurable gates |
 | **INSTALL.md** | How to install it. **Read §3 first** — one step is mandatory and counter-intuitive |
+| **HANDOFF.md** | Where the work stands and how to resume it |
 | `AI_Assistant_Local.md` | The original source document. **Superseded** — retained for provenance only |
 
 ## The governing constraint
@@ -53,8 +54,33 @@ locala --check                 # same, once installed
 verify_install.py              # prove the install actually works
 ```
 
-**Next:** the daemon survives restarts (D64), one command starts the whole product
-(D65), and it installs and verifies (D66). Outstanding before it is
-production-ready: autostart is documented but not yet exercised across a real
-logon, then `email.*` (6 tools) and `reflect.*` (4). See `PLAN.md` →
-"Immediate next action".
+## Where it stands
+
+| | |
+|---|---|
+| Tests | **1080 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
+| Install | `uv pip install -e .` in 2.9 s; `verify_install.py` exits 0 |
+| Restart | The daemon survives restarts (D64) |
+| Launch | One command starts tray + chord + prompt window (D65, D67) |
+| Tools | 61 registered, **51 with executors**, 10 to go |
+| Phases | 0–5 closed. Phase 6 (`reflect.*`) not started |
+
+**Blocking defects found and fixed in this round** — all three passed the
+previous 1025-test suite:
+
+- **D64** — the daemon could start exactly **once**. Every reboot or crash after
+  that killed it permanently.
+- **D65** — four complete modules, composed by nothing. `Tray` and `Overlay` were
+  referenced from zero modules in `src/`.
+- **D67** — the prompt window was mapped, titled, and completely dead. No Tk
+  event loop, and the T3 confirmation poll was never armed.
+
+**Not yet proven:** no test or script has driven a full turn through the real
+window with the real model. The chord reaches the window and the window renders,
+but the path overlay → lease → brain child → llama.cpp → answer has not been
+exercised since Phase 2. That is the first thing to do.
+
+**Outstanding:** `email.*` (6 tools, IMAP) and `reflect.*` (4 tools, Phase 6).
+Autostart is documented in `INSTALL.md` §9 but not registered. See
+`HANDOFF.md` for the current state of play and `PLAN.md` → "Immediate next
+action".

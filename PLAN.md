@@ -554,8 +554,38 @@ registered tools: 61        executors on the Daemon: 51        unimplemented: 10
 
 **Next, in order** - following the capability order the user set, not my own preference for the largest gap:
 
-1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later.
-2. **`reflect.*`** - Phase 6, last. D21 forbids the assistant writing its own code or policy permanently, at every phase.
+0. **A real end-to-end turn through the window.** Not a feature — a verification,
+   and the highest-value thing outstanding. Every proof so far is narrower than it
+   looks: the chord reaches the window (D67), the window renders text, the daemon
+   serves and restarts (D64). But **nothing has typed a question into that window
+   and got an answer back.** That path crosses overlay → `brain_turn` → the VRAM
+   arbiter's lease → spawning the `brain_server` child → real llama.cpp →
+   streaming → rendering, and D64, D65 and D67 each changed that machinery while
+   every test stayed green, because the tests for it use fakes. The last real
+   proof of a working turn was Phase 2 on 2026-10-01.
+1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later. D63 applies: argument names are part of the rule, and an IMAP argument like `folder` or `mailbox` must be checked against the path screen before it ships.
+2. **`reflect.*`** - Phase 6, last, and deliberately. D21 forbids the assistant writing its own code or policy permanently, at every phase, so that constraint belongs in the tests from the first line rather than retrofitted.
+
+**Also outstanding, and deliberately not done:**
+
+- **The 9B deep tier is downloaded (5.96 GB) and has never been measured.**
+  `phase1_measure.py` does not reference it. The kill criterion is already
+  written: if it fails to load or misses the gate, the deep tier is dropped and
+  Plane D does the heavy reasoning. That is a planned outcome, not project
+  failure.
+- **`daemon.py` is 239 KB / 4,667 lines** in a single `Daemon` class. It absorbed
+  three changes in this round without complaint, which is a good sign, but it is
+  the largest single point of failure left. Split it only along the seams already
+  visible in `_OPS`, and only opportunistically — never as a standalone refactor
+  with no behaviour change to justify it.
+- **Autostart is documented (`INSTALL.md` §9) but not registered.** The command
+  parses and the settings are reasoned (at-logon not at-startup, `pythonw.exe`,
+  `MultipleInstances=IgnoreNew`, no execution-time limit), but registering a
+  scheduled task is a persistent change to the user's machine and has not been
+  done without asking.
+- **The Telegram token is still in plaintext** at `state/telegram.json`.
+  `LOCALAIZED_TELEGRAM_TOKEN` now works if it is moved, and rotation is
+  @BotFather plus one edit.
 
 ### The machine can now be read (D40–D44)
 

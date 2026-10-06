@@ -554,15 +554,17 @@ registered tools: 61        executors on the Daemon: 51        unimplemented: 10
 
 **Next, in order** - following the capability order the user set, not my own preference for the largest gap:
 
-0. **A real end-to-end turn through the window.** Not a feature — a verification,
-   and the highest-value thing outstanding. Every proof so far is narrower than it
-   looks: the chord reaches the window (D67), the window renders text, the daemon
-   serves and restarts (D64). But **nothing has typed a question into that window
-   and got an answer back.** That path crosses overlay → `brain_turn` → the VRAM
-   arbiter's lease → spawning the `brain_server` child → real llama.cpp →
-   streaming → rendering, and D64, D65 and D67 each changed that machinery while
-   every test stayed green, because the tests for it use fakes. The last real
-   proof of a working turn was Phase 2 on 2026-10-01.
+0. **One turn through the window that requires a *tool*.** The spine is proven —
+   the user typed `Hello` and got an answer, crossing overlay → `brain_turn` →
+   the arbiter's lease → the `brain_server` child → real llama.cpp → streaming →
+   transcript. That was the last real proof since Phase 2 on 2026-10-01, and it
+   survived D64, D65 and D67, each of which had passed the whole suite. What a
+   greeting does **not** exercise is the grammar-constrained decision, and D34
+   makes that omission dangerous: unconstrained, the 4B narrates a tool call in
+   prose and returns none, which renders as a normal-looking answer. Ask it
+   *how much VRAM am I using right now* and require a tool proposal followed by
+   real output. Use a `system.*` read — the policy gate will refuse an unapproved
+   path, which is correct behaviour and will mask the thing being tested.
 1. **`email.*`** - six tools, IMAP. The only transport besides Telegram in scope. `email.send` is T3 external; `email.delete` is T3 destructive; the three reads are T0. Worth knowing before it starts: `email.delete` is *currently* the only destructive tool left without an executor, which is exactly what two tests use as their example of one. Building it makes that example vanish, and both tests already say so where it happens rather than failing mysteriously later. D63 applies: argument names are part of the rule, and an IMAP argument like `folder` or `mailbox` must be checked against the path screen before it ships.
 2. **`reflect.*`** - Phase 6, last, and deliberately. D21 forbids the assistant writing its own code or policy permanently, at every phase, so that constraint belongs in the tests from the first line rather than retrofitted.
 

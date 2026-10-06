@@ -101,22 +101,44 @@ GUI.** See §6.
   (`overlay-tk`) that owns the root and runs `mainloop()`. The prompt window is no
   longer permanently always-on-top; **the T3 dialog still is**, deliberately.
 
+- **The full spine is proven end to end.** After D67 the user typed `Hello` into
+  the window and got an answer back. That single turn crosses
+  `overlay._submit` → `brain_turn` → the arbiter's lease → spawning the
+  `brain_server` child → real llama.cpp on the GPU → a streamed answer → the
+  transcript. **The vertical slice works.** The last proof before that had been
+  Phase 2, on 2026-10-01.
+
+  **What it does not prove, and the reason is not pedantry:** a greeting
+  correctly produces *no tool call*, so this turn never exercised the
+  grammar-constrained decision. D34's load-bearing claim is that under
+  `tool_choice="auto"` the 4B **narrates** the call in prose and returns no call —
+  a silent failure that renders as a perfectly normal-looking answer. A prose turn
+  and a tool turn therefore fail *differently*, and only one of them has been
+  tested.
+
 ## 5. Do this next
 
-**Verify a real end-to-end turn.** One script, and it is the highest-value thing
-outstanding.
+**Ask the window something that requires a tool.** That is the remaining gap, and
+it is a small, cheap one — but it is the one that can fail *silently*.
 
-Everything proven so far is narrower than it looks. The chord reaches the window;
-the window renders text; the daemon serves and restarts. But **nothing has typed a
-question into that window and got an answer back.** That path crosses
-`overlay` → `brain_turn` → the arbiter's lease → spawning the `brain_server`
-child → real llama.cpp → streaming → rendering. D64, D65 and D67 each changed that
-machinery while every test stayed green, because the tests for it use fakes. The
-last real proof of a working turn was Phase 2, on 2026-10-01.
+A `Hello` turn came back correctly, which proves the spine (see §4). It did not
+exercise the grammar-constrained decision, because a greeting correctly yields no
+tool call. D34 says the 4B cannot be *made* to decide to call a tool under
+`tool_choice="auto"` — it narrates the call in prose and returns nothing, which
+renders as a normal-looking answer. So the failure mode of this next check is a
+window that says "I'll list that directory for you" and then does nothing, with
+every test in the repository still green.
 
-If it works, the assistant is genuinely end-to-end and that can be said with
-evidence. If it does not, you have just found the next real defect, and it will be
-a good one.
+Ask for something concrete — *list the files in C:\Users\Public\Documents*, or
+*how much VRAM am I using* — and check two things:
+
+- the window shows a **tool proposal**, not prose describing one, and
+- the tool actually **runs** and its real output comes back.
+
+Note the policy gate is expected to refuse an unapproved path (§ D30/D33 era), so
+prefer a `system.*` read, which needs no approved workspace. `system.gpu_state`
+over the pipe returns live data today; it has simply never been driven *from the
+window through a model turn*.
 
 Then, in order:
 

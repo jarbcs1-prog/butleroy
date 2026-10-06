@@ -75,10 +75,12 @@ previous 1025-test suite:
 - **D67** — the prompt window was mapped, titled, and completely dead. No Tk
   event loop, and the T3 confirmation poll was never armed.
 
-**Not yet proven:** no test or script has driven a full turn through the real
-window with the real model. The chord reaches the window and the window renders,
-but the path overlay → lease → brain child → llama.cpp → answer has not been
-exercised since Phase 2. That is the first thing to do.
+**Proven end to end:** typing a question into the window and getting an answer
+back — overlay → `brain_turn` → VRAM lease → the `brain_server` child → real
+llama.cpp on the GPU → streamed answer → transcript. **Not yet proven:** a turn
+that requires a *tool call*. A greeting correctly produces none, and D34 says an
+unconstrained tool call fails *silently* — the model narrates it in prose and the
+window looks normal. Ask it *how much VRAM am I using right now*.
 
 **Outstanding:** `email.*` (6 tools, IMAP) and `reflect.*` (4 tools, Phase 6).
 Autostart is documented in `INSTALL.md` §9 but not registered. See

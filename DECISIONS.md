@@ -2702,3 +2702,34 @@ tests pass 30.0. What the tests assert is *delivery*, not latency, and a 2 s
 budget measured on an idle desktop is not a fact about delivery.
 
 Suite after: **1080 passed, 3 skipped, 47 subtests**, twice in a row.
+
+### The spine, proven end to end — and the one thing it does not prove
+
+After the D67 fix the user typed `Hello` into the window and got an answer back.
+One turn, and it crosses every layer:
+
+```
+overlay._submit -> daemon brain_turn -> arbiter lease -> brain_server child
+                -> real llama.cpp on the GPU -> streamed answer -> transcript
+```
+
+**The vertical slice works.** The previous real proof was Phase 2, on 2026-10-01,
+before D64 through D67 touched any of that machinery — and every one of those
+three changes had passed the full suite while doing it.
+
+Recorded here rather than as a victory lap, because of what it does **not** cover.
+A greeting correctly produces *no tool call*, so this turn never exercised the
+grammar-constrained decision. And D34 is the load-bearing finding of the entire
+brain design: under `tool_choice="auto"` the 4B **cannot be made to decide** to
+call a tool — it narrates the call in prose and returns no call at all. Pinned to
+GBNF it commits every time, and the call arrives in `content`, not `tool_calls`.
+
+That is a **silent** failure. The window would say "I'll list that directory for
+you" and then sit there, with the audit chain verifying and all 1,080 tests green.
+So a prose turn and a tool turn fail differently, and only the first has been
+exercised. The next check is one sentence typed into the window — *how much VRAM am
+I using right now* — and it has to produce a tool proposal and then real output.
+
+The general point is D36 again, one layer up: **a constraint that is set is not a
+constraint that is active.** The grammar is compiled into every request; nothing
+in the suite, and nothing about a greeting, demonstrates it fired.

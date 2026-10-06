@@ -285,7 +285,7 @@ class Presence:
 
     def _call(self, want: bool, why: str) -> bool:
         req = ipc.Request(
-            op="session.set_attended",
+            op="session_set_attended",
             args={"attended": want, "channel": CHANNEL_PC, "why": why},
             id=ipc.next_id(),
         )
@@ -407,7 +407,7 @@ class Tray:
         return f"assistant {s['version']}  |  {mode}"
 
     def _snapshot(self, icon=None, item=None) -> None:
-        res = self.call("audit.verify")
+        res = self.call("audit_verify")
         ok = bool(res.get("ok")) and res["result"].get("ok")
         n = res["result"].get("checked", 0) if res.get("ok") else 0
         self.notify(
@@ -416,12 +416,12 @@ class Tray:
         )
 
     def _vram(self, icon=None, item=None) -> None:
-        res = self.call("arbiter.summary")
+        res = self.call("arbiter_summary")
         self.notify(res.get("result") if res.get("ok") else str(res.get("error")),
                     None if res.get("ok") else (255, 90, 90))
 
     def _workspaces(self, icon=None, item=None) -> None:
-        res = self.call("workspace.list")
+        res = self.call("workspace_list")
         if not res.get("ok"):
             self.notify(str(res.get("error")), (255, 90, 90))
             return
@@ -441,7 +441,7 @@ class Tray:
         """
         if self.hotkey is not None and self.hotkey.trigger():
             return
-        self.call("session.set_attended", attended=True, why="summoned from the tray")
+        self.call("session_set_attended", attended=True, why="summoned from the tray")
         self.notify("Marked attended. Remote channels still cannot authorise T3.")
 
     def notify(self, message, color=None) -> None:

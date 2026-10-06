@@ -508,3 +508,139 @@ def test_the_tray_closes_the_settings_window_with_the_overlay() -> None:
         "Tray.stop() left the settings window standing; its Tk thread and Tcl "
         "interpreter leak on every restart"
     )
+# --------------------------------------------------------------------------- #
+# the workspaces section
+# --------------------------------------------------------------------------- #
+
+
+class FakeWorkspaceDaemon(FakeDaemon):
+    """A daemon whose `workspace_list` returns what the real one returns: strings.
+
+    This matters more than it looks. The real op returns a list of **strings**
+    formatted for a person, and the first version of the section filtered for dicts -
+    which discarded every row and left the screen saying "No workspace approved"
+    while a workspace demonstrably existed. A fake that returned dicts would have
+    agreed with the bug.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.workspaces: list[str] = []
+        self.roots: list[str] = []
+
+    def __call__(self, op: str, /, **args) -> dict:
+        self.calls.append((op, dict(args)))
+        if op == "workspace_list":
+            return {"ok": True, "result": list(self.workspaces)}
+        if op == "workspace_roots":
+            return {"ok": True, "result": {"roots": list(self.roots)}}
+        if op == "workspace_add":
+            name = args.get("name", "?")
+            root = args.get("root", "?")
+            self.workspaces.append(
+                f"{name} [{args.get('danger_level')}] {root}\n"
+                f"  allowed here: {', '.join(args.get('allow_tiers') or [])}"
+            )
+            self.roots.append(root)
+            return {"ok": True, "result": {"name": name}}
+        if op == "workspace_remove":
+            name = args.get("name")
+            self.workspaces = [w for w in self.workspaces
+                               if not w.startswith(f"{name} ")]
+            self.roots = [r for r in self.roots if not r.endswith(str(name))]
+            return {"ok": True, "result": {"removed": name}}
+        return super().__call__(op, **args)
+
+
+@requires_display
+def test_workspaces_are_listed_from_strings_not_dicts(win) -> None:
+    """The exact bug: the op returns strings and the section must cope.
+
+    Asserted as "the row appears", because the failure was a screen that looked
+    correct and said the opposite of the truth.
+    """
+    daemon = FakeWorkspaceDaemon()
+    daemon.workspaces = ["proj [low] G:/work/proj\n  allowed here: T0"]
+    daemon.roots = ["G:/work/proj"]
+
+    w = win(daemon)
+    w._select("workspaces")
+
+    text = "\n".join(w._sections["workspaces"].listbox.get(0, "end"))
+    assert "proj" in text, f"the workspace was not rendered: {text!r}"
+    assert "G:/work/proj" in text, text
+
+
+@requires_display
+def test_an_empty_workspace_list_says_what_that_means(win) -> None:
+    """Not just "0" - the consequence.
+
+    "No workspace approved" on its own reads as a neutral fact. The sentence that
+    matters is that the assistant therefore cannot read any project, because that is
+    what the user has to change.
+    """
+    w = win(FakeWorkspaceDaemon())
+    w._select("workspaces")
+
+    status = w._sections["workspaces"].status.cget("text")
+    assert "cannot read any project" in status, status
+
+
+@requires_display
+def test_the_workspace_count_and_root_count_are_both_reported(win) -> None:
+    """Two different numbers, from two different ops.
+
+    A workspace and a root are not one-to-one, and reporting only the first would
+    hide a manifest that resolved to nothing.
+    """
+    daemon = FakeWorkspaceDaemon()
+    daemon.workspaces = ["a [low] G:/a\n  allowed here: T0"]
+    daemon.roots = ["G:/a", "G:/a/sub"]
+
+    w = win(daemon)
+    w._select("workspaces")
+
+    status = w._sections["workspaces"].status.cget("text")
+    assert "1 workspace" in status and "2 root" in status, status
+
+
+@requires_display
+def test_revoking_a_workspace_says_what_it_stopped(win) -> None:
+    """The consequence, not the record.
+
+    "Revoked a" is a database report. What the user needs to know is that nothing
+    under it is reachable any more - which is the thing that just changed.
+    """
+    daemon = FakeWorkspaceDaemon()
+    daemon.workspaces = ["a [low] G:/a\n  allowed here: T0"]
+    daemon.roots = ["G:/a"]
+
+    w = win(daemon)
+    w._select("workspaces")
+    section = w._sections["workspaces"]
+    section.listbox.selection_set(0)
+    section._remove()
+
+    status = section.status.cget("text")
+    assert "reachable" in status, status
+    assert not section.listbox.get(0, "end"), "the row survived the revoke"
+
+
+@requires_display
+def test_the_workspace_pickers_are_released(win) -> None:
+    """Two OptionMenus were leaked the first time round.
+
+    They were stored as `_danger_menu` and `_tiers_menu` and left out of `named`, so
+    `dispose()` never nulled them - the same class of leak as D75's `_head`, caught
+    this time by the section-level check rather than by a process exit code.
+    """
+    w = win()
+    w._select("workspaces")
+    section = w._sections["workspaces"]
+    assert section.holds_widgets()
+
+    w.destroy()
+
+    assert section.holds_widgets() == [], (
+        f"the section still holds {section.holds_widgets()} after disposal"
+    )

@@ -3834,3 +3834,104 @@ something has tried to violate it.
 Suite after: **1335 passed, 22 skipped, 47 subtests**, exit 0 (1294 before).
 41 new tests in `tests/test_voice_config.py`. Seven mutations, each caught by
 the intended test, each verified to have actually changed the file.
+
+---
+
+## D77 - Four of the tray's six menu items had never worked
+
+Building the Workspaces section surfaced this, and it is the most serious defect found
+this session. It is not in the new code; it has been there since the tray was written.
+
+`tray.py` called four ops by names that do not exist:
+
+| Menu item | Called | The op is |
+|---|---|---|
+| Summon | `session.set_attended` | `session_set_attended` |
+| Workspaces | `workspace.list` | `workspace_list` |
+| VRAM leases | `arbiter.summary` | `arbiter_summary` |
+| Verify audit chain | `audit.verify` | `audit_verify` |
+
+There was a **fifth**, found later and by a different route: `Presence` in the same
+file builds `ipc.Request(op="session.set_attended", ...)` directly rather than going
+through `Tray.call`, so it was not in the table above and the first version of the
+op-name check - which scanned for `.call("...")` - reported the file clean. The suite
+caught it only because `test_presence_marks_attended_when_someone_is_typing` asserted
+the op it had recorded, and that assertion had been written against the wrong name
+too, so fixing the name is what surfaced it. The check now scans both spellings, and
+`test_the_check_would_notice_a_wrong_name` feeds it the `ipc.Request(op=...)` form
+specifically so that widening cannot silently regress.
+
+Ops are named after the methods with `op_` stripped, so they are underscored. Every
+one of those four returned `unknown op 'workspace.list'`, and the tray's own `notify`
+turned it into a toast - so the user saw a message about an unknown op and reasonably
+concluded something transient had gone wrong. **The daemon's `handle` even returns
+`known_ops` in that reply**, and nothing read it.
+
+### Why no test caught it, which is the part worth keeping
+
+`test_tray.py` drives the menu against a **fake daemon**, and a fake that answers any
+string answers the wrong string too. The failure was not in the code the fake
+replaced - it was in the *name*, and a name is precisely what a fake does not check.
+
+This is D69's sentence again ("a fake agrees with the code about everything it does
+not check") and D70's ("the fake did its own LOGIN"), one level up. The fake did the
+**op lookup**, which is the daemon's job, and the daemon is the only thing that can
+say whether a name exists.
+
+### The fix is a check, not four edits
+
+Four edits fix four menu items. `tests/test_ui_op_names.py` fixes the class: it
+extracts every string a UI module passes to `call(...)` and asserts each is in
+`Daemon._OPS`, the table the daemon actually dispatches on.
+
+The generalisable rule: **any string a caller sends that a different module resolves
+should be asserted against that module's own table, not against a stand-in.** The
+stand-in cannot know. It also asserts the direction that cannot currently fail -
+every entry in `_OPS` is callable - because that is the invariant which makes the
+table worth trusting and it is one refactor away from not holding.
+
+It reports *all* offenders rather than the first, because these arrive in batches:
+four were wrong at once, and stopping at the first turns one fix into four round
+trips.
+
+### A too-narrow check, for the fourth and fifth time this session
+
+The count of "ops with no UI" was wrong twice before it was right - first because it
+matched `_call(` and missed `call(`, then because it matched exact op keys and missed
+the dotted spelling the callers use. The second wrong version made the tray menu look
+like five stubs when all five were calling the daemon. That wrong answer is what led
+to reading the tray's methods, which is how the four broken names were found.
+
+So: **a check that under-matches does not fail, it reports.** Four times now - the
+decisions-log regex twice, this count twice. The lesson is not "write better regexes".
+It is that a negative result from a check you wrote yourself is a claim about the
+check as much as about the code, and the cheap thing to do is verify the check against
+a case you know the answer to. The op-name check itself then missed the fifth broken
+name, one paragraph after being written to catch exactly that - which is the argument
+for the guard-on-the-guard test rather than an argument against writing the check. `test_the_check_would_notice_a_wrong_name` does that
+for the op-name test, and the other two have been replaced by checks whose
+under-matching would fail a different assertion.
+
+### Workspaces, the section that found it
+
+The most important surface in the window, because nothing outside `models/` is
+reachable until a root is approved here: a manifest is the *only* source of
+"approved" that `policy.Gate` has.
+
+`workspace_list` returns a list of **strings** formatted for a person, and
+`workspace_roots` is the op for machines - its own docstring says so. The first
+version of the section filtered the list for dicts, discarded every row, and left the
+screen saying "No workspace approved" while a workspace demonstrably existed. A
+plausible and completely wrong answer, which is the worst kind. The section now counts
+rows from the human string and takes every fact that decides anything from
+`workspace_roots`, and it does not parse the prose for anything but a name.
+
+The screen cannot widen authority, and the code makes sure of it rather than a
+comment: `allow_tiers` is always intersected with the session ceiling at resolve time,
+and `DangerLevel.TIER_CEILING` caps what a manifest may ask for at all - `high` danger
+permits no more than T1. The pickers can only narrow.
+
+Suite after D77: **1343 passed, 27 skipped, 47 subtests**, exit 0 (1335 before). Eight
+more: five for the workspaces section, four for the op-name check (one of which is the
+guard on the guard), and two tray tests whose assertions had been pinning the broken
+names.

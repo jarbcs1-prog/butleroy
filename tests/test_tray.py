@@ -205,7 +205,7 @@ def test_presence_marks_attended_when_someone_is_typing():
         p.stop()
     assert d.calls, "presence never spoke"
     first = d.calls[0]
-    assert first.op == "session.set_attended"
+    assert first.op == "session_set_attended"
     assert first.args["attended"] is True
     assert first.args["channel"] == "pc"
 
@@ -267,7 +267,7 @@ def test_presence_uses_the_daemons_audited_path(monkeypatch):
     p.start()
     time.sleep(0.3)
     p.stop()
-    assert seen == ["session.set_attended"]
+    assert seen == ["session_set_attended"]
 
 
 # --- the tray -----------------------------------------------------------------
@@ -290,11 +290,11 @@ class StubDaemon:
                     "tools_executable": ["file.read"],
                 },
             }
-        if request.op == "audit.verify":
+        if request.op == "audit_verify":
             return {"ok": True, "result": {"ok": True, "checked": 12}}
-        if request.op == "arbiter.summary":
+        if request.op == "arbiter_summary":
             return {"ok": True, "result": "no leases; 1.5 GiB reserved for you"}
-        if request.op == "workspace.list":
+        if request.op == "workspace_list":
             return {"ok": True, "result": {"workspaces": []}}
         return {"ok": True, "result": {}}
 
@@ -321,10 +321,10 @@ def test_every_tray_action_went_through_handle():
     t._snapshot()
     ops = {r.op for r in d.requests}
     assert ops == {
-        "session.set_attended",
-        "workspace.list",
-        "arbiter.summary",
-        "audit.verify",
+        "session_set_attended",
+        "workspace_list",
+        "arbiter_summary",
+        "audit_verify",
     }
 
 
@@ -347,7 +347,7 @@ def test_an_empty_workspace_list_says_so_instead_of_looking_healthy():
 def test_a_broken_audit_chain_is_reported_in_red():
     class Broken(StubDaemon):
         def handle(self, request):
-            if request.op == "audit.verify":
+            if request.op == "audit_verify":
                 return {"ok": True, "result": {"ok": False, "checked": 9}}
             return super().handle(request)
 

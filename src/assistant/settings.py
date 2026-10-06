@@ -635,6 +635,248 @@ class VoicesSection(Section):
             self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
 
 
+class WorkspacesSection(Section):
+    """Which directories the assistant may touch at all.
+
+    The most important surface in the window, and the reason is structural: nothing
+    outside `models/` is reachable until a root is approved here. A workspace manifest
+    is the *only* source of "approved" that `policy.Gate` has - D13 says paths are
+    checked against approved roots, and this is where approved comes from.
+
+    **This screen cannot widen authority, and the code makes sure of that rather than
+    this comment.** `allow_tiers` is a per-workspace ceiling that is always
+    *intersected* with the session ceiling at resolve time, and `DangerLevel` caps the
+    tiers a manifest may ask for at all - `high` danger permits no more than T1. So
+    the tier pickers here can only ever narrow. A window that could raise the ceiling
+    would be a window that hands the assistant authority the session did not have.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("workspaces", "Workspaces", "workspaces")
+        self.named = ("listbox", "detail", "status", "danger", "tiers",
+                      "_danger_menu", "_tiers_menu")
+        self.listbox: Any = None
+        self.detail: Any = None
+        self.status: Any = None
+        self.danger: Any = None
+        self.tiers: Any = None
+        self._danger_menu: Any = None
+        self._tiers_menu: Any = None
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        note = tk.Label(
+            body,
+            text="The assistant can only read and write inside a directory you "
+                 "approve here. Nothing else on the machine is reachable, however "
+                 "it is asked. A workspace is a claim you make about a folder - it "
+                 "does not make the folder safe, it makes it reachable.",
+            fg=c["sage"], bg=c["slate"], wraplength=660, justify="left",
+            font=("Segoe UI", 9),
+        )
+        note.pack(fill="x", padx=16, pady=(14, 10))
+        self.widgets.append(note)
+
+        self.listbox = tk.Listbox(
+            body, fg=c["bone"], bg=c["obsidian"], selectbackground=c["brass"],
+            selectforeground=c["obsidian"], relief="flat", highlightthickness=0,
+            font=("Cascadia Code", 9), activestyle="none", height=8,
+        )
+        self.listbox.pack(fill="both", expand=True, padx=16)
+        self.widgets.append(self.listbox)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+
+        self.detail = tk.Label(body, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", font=("Segoe UI", 9))
+        self.detail.pack(fill="x", padx=16, pady=(10, 0))
+        self.widgets.append(self.detail)
+
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(10, 0))
+        self.widgets.append(row)
+
+        tk.Label(row, text="Danger", fg=c["sage"], bg=c["slate"],
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.widgets.append(row.winfo_children()[-1])
+        self.danger = tk.StringVar(value="low")
+        danger_menu = tk.OptionMenu(row, self.danger, "low", "medium", "high")
+        danger_menu.configure(bg=c["obsidian"], fg=c["bone"], relief="flat", bd=0,
+                              highlightthickness=0, activebackground=c["slate-line"],
+                              font=("Cascadia Code", 9))
+        danger_menu["menu"].configure(bg=c["obsidian"], fg=c["bone"])
+        danger_menu.pack(side="left", padx=(8, 18))
+        self.widgets.append(danger_menu)
+        self._danger_menu = danger_menu
+
+        tk.Label(row, text="Allowed tiers", fg=c["sage"], bg=c["slate"],
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.widgets.append(row.winfo_children()[-1])
+        self.tiers = tk.StringVar(value="T0")
+        tiers_menu = tk.OptionMenu(row, self.tiers,
+                                   "T0", "T0 T1", "T0 T1 T2", "T0 T1 T2 T3")
+        tiers_menu.configure(bg=c["obsidian"], fg=c["bone"], relief="flat", bd=0,
+                             highlightthickness=0, activebackground=c["slate-line"],
+                             font=("Cascadia Code", 9))
+        tiers_menu["menu"].configure(bg=c["obsidian"], fg=c["bone"])
+        tiers_menu.pack(side="left", padx=8)
+        self.widgets.append(tiers_menu)
+        self._tiers_menu = tiers_menu
+
+        actions = tk.Frame(body, bg=c["slate"])
+        actions.pack(fill="x", padx=16, pady=(12, 14))
+        self.widgets.append(actions)
+
+        self.status = tk.Label(actions, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=420,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        for label, command in (
+            ("Remove", self._remove),
+            ("Approve a folder…", self._add),
+            ("Reload", self._reload),
+        ):
+            button = tk.Button(
+                actions, text=label, command=command, relief="flat", bd=0,
+                bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
+                activeforeground=c["brass-lit"], font=("Segoe UI", 9),
+                padx=10, pady=4, cursor="hand2",
+            )
+            button.pack(side="right", padx=(6, 0))
+            self.widgets.append(button)
+
+        self._rows: list[dict[str, Any]] = []
+        self._load(call)
+
+    # -- data ---------------------------------------------------------------
+
+    def _load(self, call: Callable[..., dict]) -> None:
+        try:
+            res = call("workspace_list") or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+
+        # `workspace_list` returns a list of **strings**, formatted for a person to
+        # read - the op's own docstring says `workspace_roots` is the one for
+        # machines. The first version of this filtered for dicts, which discarded
+        # every row and left the screen saying "No workspace approved" while a
+        # workspace demonstrably existed. That is a plausible and completely wrong
+        # answer, which is the worst kind.
+        #
+        # So the list is used only to *count*, and the structured facts come from
+        # `workspace_roots` - never by parsing the human string, because a caller
+        # that parses prose is one wording change away from believing the wrong thing.
+        described = res.get("result") or []
+        self._rows = [line for line in described if isinstance(line, str)]
+
+        roots_res = call("workspace_roots") or {}
+        roots = (roots_res.get("result") or {}).get("roots") or []
+
+        self.listbox.delete(0, "end")
+        for line in self._rows:
+            self.listbox.insert("end", "  " + str(line).replace("\n", "\n  "))
+
+        if not self._rows:
+            self._say("No workspace approved. The assistant cannot read any project "
+                      "yet - approve a folder to change that.", "amber")
+        else:
+            self._say(f"{len(self._rows)} workspace(s) approved, covering "
+                      f"{len(roots)} root(s).", "sage")
+        self._roots = roots
+
+    def _selected(self) -> str | None:
+        """The selected row's workspace name, taken from the human string's first
+        token - which is safe *only* because `workspace_list`'s format starts with
+        the name and this is used for a name, not for a path or a permission.
+
+        Anything that decides what is allowed comes from `workspace_roots`."""
+        selection = self.listbox.curselection()
+        if not selection:
+            return None
+        line = self._rows[selection[0]]
+        return str(line).split(" ", 1)[0] or None
+
+    def _on_select(self, _event: Any = None) -> None:
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+        self.detail.configure(text=str(self._rows[selection[0]]))
+
+    # -- actions ------------------------------------------------------------
+
+    def _add(self) -> None:
+        """Pick a folder, then approve it.
+
+        The folder chooser is Tk's, so the *user* names the directory; the window
+        never enumerates the filesystem. The name is derived from the folder and can
+        be overridden by the daemon's own validation, which refuses a name that is
+        not a plain identifier.
+        """
+        from tkinter import filedialog
+
+        parent = self.listbox.winfo_toplevel() if self.listbox is not None else None
+        root = filedialog.askdirectory(
+            parent=parent, title="Choose a folder to approve", mustexist=True)
+        if not root:
+            self._say("Cancelled.", "sage")
+            return
+
+        name = root.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        tiers = [t for t in self.tiers.get().split() if t]
+
+        try:
+            res = self._call("workspace_add", name=name, root=root,
+                             danger_level=self.danger.get(),
+                             allow_tiers=tiers) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        self._load(self._call)
+        self._say(f"Approved {root} as {name!r}, {self.danger.get()} danger, "
+                  f"allowing {' '.join(tiers)}.", "verdigris")
+
+    def _remove(self) -> None:
+        name = self._selected()
+        if name is None:
+            self._say("Select a workspace first.", "amber")
+            return
+        try:
+            res = self._call("workspace_remove", name=name) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        self._load(self._call)
+        self._say(f"Revoked access to {name!r}. Nothing under it is reachable "
+                  f"any more.", "verdigris")
+
+    def _reload(self) -> None:
+        self._load(self._call)
+
+    def _say(self, message: str, tone: str) -> None:
+        if self.status is not None:
+            self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
+
+
 class Settings:
     """The window. One Tk thread, one queue, built like `overlay.Overlay`.
 
@@ -926,8 +1168,12 @@ class Settings:
         # Sections are listed in this order rather than discovered, because a
         # settings window whose navigation depends on a registry lookup is a window
         # that can come up empty with nothing wrong anywhere.
-        self._order = ["models", "voices"]
-        self._sections = {"models": ModelsSection(), "voices": VoicesSection()}
+        self._order = ["models", "voices", "workspaces"]
+        self._sections = {
+            "models": ModelsSection(),
+            "voices": VoicesSection(),
+            "workspaces": WorkspacesSection(),
+        }
 
         for key in self._order:
             section = self._sections[key]

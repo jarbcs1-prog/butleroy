@@ -207,16 +207,21 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **17 of the daemon's 44 ops have a way in; 27 do not.**
-Reached today by `overlay.py` (6), `tray.py` (5) and `settings.py` (8), counting the
-op names that actually appear as string literals in those files.
+Measured, not remembered: **20 of the daemon's 44 ops have a way in; 24 do not.**
+Reached by `overlay.py` (6), `tray.py` (5, four of which were broken until D77) and
+`settings.py` (11), counting the op names that actually appear as string literals in
+those files - and, since D77, asserting that every one of them exists.
+
+The figure was 21 in the first version of this paragraph. It was written from the
+change I had just made rather than from the measurement, which is the same mistake in
+miniature that this whole section is about.
 
 | Section | State |
 |---|---|
 | Models | **built** (D74/D75) - tiers, models on disk, lease ceilings, save |
 | Voices | **built** (D76) - installed/known, default, whisper model, download, import, remove |
 | Speech | **not built** - push-to-talk, mute, wake word |
-| Workspaces | **not built** - the biggest gap; see below |
+| Workspaces | **built** (D77) - approve/revoke folders, danger level, allowed tiers |
 | Authority | **not built** - tiers, confirmations, session ceiling |
 | Advanced | **not built** - paths, state dir, hotkey, logs, transcripts |
 
@@ -224,7 +229,7 @@ op names that actually appear as string literals in those files.
 
 | Group | Ops | What a window would do |
 |---|---|---|
-| `workspace_*` (6) | `add`, `remove`, `list`, `covers`, `resolve`, `roots` | approve/revoke project roots. **The most important gap**: nothing outside `models/` is reachable until a root is approved, so this is the gate on the whole product |
+| `workspace_covers`, `workspace_resolve` (2) | | "is this path approved, and what may happen in it" - useful for a path checker in Advanced |
 | `vault_*` (6) | `append`, `index`, `read_journal`, `role_templates`, `status`, `write_note` | the Obsidian bridge |
 | `brain_*` (5) | `describe`, `load`, `status`, `stream`, `unload` | which model is loaded, force load/unload, free VRAM now |
 | `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | what holds VRAM and for how long. `summary` is reached from the tray |

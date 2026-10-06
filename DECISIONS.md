@@ -2343,3 +2343,107 @@ the bug survived a suite this large.
 Suite after the fix: **1036 passed, 3 skipped, 47 subtests**, and two sequential
 starts of the real daemon on the real `state/` both report `authkey adopted from`
 with the chain still verifying at 21 records.
+
+---
+
+## D65 - Four complete modules and no way to start the product
+
+The assistant had a daemon, a tray icon, a chord, a presence monitor, a prompt
+window and a confirmation dialog. All six were tested. **No module imported
+another.** `Tray` and `Overlay` appeared in `tests/` and nowhere else, so the
+product could pass 1025 green tests and still have no route to being started -
+and Phase 2's gate, "hotkey opens the overlay with no terminal visible", was
+unreachable because nothing owned the process.
+
+Measured, not inferred:
+
+```
+Tray(          referenced from src/ : 0 modules (12 call sites in tests/)
+Overlay(       referenced from src/ : 0 modules (24 call sites in tests/)
+python -m assistant               : does not exist
+python -m assistant.daemon        : serves a pipe and nothing else
+```
+
+A grep for the wiring is the whole diagnosis. The individual components were
+never wrong; they were never *composed*.
+
+### The only thing that had to be decided was the order
+
+`launcher.py` contains no new logic, and that is deliberate - the daemon still
+holds the gate, the leases and the chain, and the tray is still a *client* of
+the daemon rather than a second front door. What the launcher adds is an order,
+and one invariant the order exists to hold:
+
+1. **Bind the pipe first.** Nothing appears on screen until the daemon is
+   genuinely serving. A tray icon for a daemon that lost the race to another
+   instance is a lie about a running service: the menu would answer, and the
+   answers would be nothing.
+2. **Then the chord, the presence monitor, the tray** - chord before tray, so the
+   icon cannot appear without the summons that belongs to it.
+3. **Then park**, and let the tray's Exit item, a signal, or a second instance
+   stop the daemon.
+
+A refused start leaves no icon, no chord, no credential and no audit record -
+the same rule D64 established for the state directory, applied one level up.
+
+### A taken chord is survivable, and has to be
+
+`tray.HotkeyUnavailable` already existed and already documented why: Ctrl+Alt+Space
+is a popular IME toggle on several East Asian input method editors. Treating that
+as fatal produces a daemon that starts and can never be summoned, which the user
+experiences as *the assistant is broken* rather than as *something else owns my
+shortcut* - two problems with the same symptom and different fixes.
+
+So losing the chord costs the chord. The tray still comes up, and says why, in
+red, so the two are distinguishable. The alternative - refusing to start - trades
+a working assistant for a correctly-mourned one.
+
+### Proof, and the limit of it
+
+Two of the gate's claims are checkable without a screen, and both were checked
+rather than assumed:
+
+```
+$ probe_chord.py                      # tries to register Ctrl+Alt+Space itself
+before launch : chord was FREE
+while running : ALREADY TAKEN (GetLastError=1409 = ERROR_HOTKEY_ALREADY_REGISTERED)
+after stop    : chord was FREE                  <- released cleanly
+live pipe     : ping -> pong | v0.3.0 | 51 executors | attended
+threads       : tray, hotkey, presence, brain-sweeper, telegram, serve:<pipe>
+```
+
+**1409 while running and free again after stopping is the whole gate**, measured
+from a second process: the chord is genuinely registered by Windows on the
+assistant's behalf, and genuinely released. That is a stronger claim than "the
+code called `RegisterHotKey`".
+
+What is *not* proved: that the tray icon renders, and that the tkinter window
+appears correctly. Both need eyes on the screen, and this is the first thing in
+the project that cannot be closed by a test. It is recorded here as an open item
+rather than as a gate that passed.
+
+### The tests are about behaviour, and were checked by breaking them
+
+Eleven tests, none mocking the thing under test. `Overlay` already set the
+convention - its `call` is injected "so the tests can drive this whole module
+with no tkinter display" - so the launcher takes its three OS components as
+factories whose defaults are the real ones.
+
+Two were mutated to confirm they fail for the reason they name, because a first
+attempt at the ordering mutation only moved a line and still passed, which would
+have made the ordering test worthless:
+
+| Mutation | Test | Result |
+|---|---|---|
+| hotkey wired to `lambda: None` | `test_the_hotkey_opens_the_prompt_window` | **failed** as intended |
+| a refused daemon still gets a tray | `test_the_daemon_is_bound_before_the_tray_appears` | **failed** as intended |
+
+The general finding is D64's, one level up: **a test that cannot fail when the
+property is broken is not a test of that property.** Both of these would have
+passed against a launcher that built every object and connected none of them -
+which is precisely the state the project was in.
+
+Suite after: **1047 passed, 3 skipped, 47 subtests.** Plane A's load-bearing
+invariant still holds - importing `daemon`, `launcher`, `tray` and `overlay`
+pulls in no llama.cpp, no torch, no onnxruntime and no faster-whisper, so the
+assistant is still a few hundred MB with no VRAM (D1).

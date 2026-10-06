@@ -494,7 +494,7 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
 5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **1036 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
+Current state: **1047 tests pass, 3 skipped, 47 subtests. Phases 0-5 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 51 tool executors covering administration, delegation, teaching and the file tools, and the whole tool registry are done.
 
 **The daemon could not restart until D64, and that outranks everything below.**
 `Daemon.__init__` minted a fresh authkey per construction while `store_authkey`
@@ -507,6 +507,19 @@ consecutive starts of the real daemon now both report `authkey adopted from` wit
 the audit chain verifying. The second defect it exposed — a refused startup
 writing to the shared hash chain before it knew it owned the directory — is in
 D64 too.
+
+**`python -m assistant` now starts the product (D65).** Until then, four
+complete modules were composed by nothing: `Tray` and `Overlay` were referenced
+from zero modules in `src/`, so the gate "hotkey opens the overlay with no
+terminal visible" was unreachable. `launcher.py` holds no new logic — only an
+order: bind the pipe, *then* the chord, presence and tray, then park. A refused
+start leaves no icon, chord, credential or audit record. The chord is registered
+for real and released on stop, measured from a second process
+(`ERROR_HOTKEY_ALREADY_REGISTERED` while running, free again after).
+
+**Open, and not closable by a test:** the tray icon rendering and the tkinter
+window appearing correctly both need eyes on the screen. Recorded in D65 rather
+than asserted as passing.
 
 **The real gap is breadth, not depth.** Measured, not estimated:
 

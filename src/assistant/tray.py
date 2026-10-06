@@ -455,6 +455,17 @@ class Tray:
         except Exception as exc:  # noqa: BLE001 - a toast failure is not fatal
             ipc.note(f"tray notify failed: {type(exc).__name__}: {exc}")
 
+    def open_prompt(self) -> None:
+        """Raise the prompt window, from anything that holds a tray.
+
+        Public because the launcher's hotkey callback needs it, and reaching into
+        ``_open_prompt`` from another module would be a second thing that can
+        change without the tray's tests noticing. The pystray menu item still goes
+        through ``_open_prompt`` because pystray calls every action with
+        ``(icon, item)``.
+        """
+        self._open_prompt()
+
     def _open_prompt(self, icon=None, item=None) -> None:
         """Raise the prompt window.
 

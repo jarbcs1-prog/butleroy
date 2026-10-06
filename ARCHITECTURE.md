@@ -7,6 +7,8 @@ Four planes. One invariant. Read DECISIONS.md first — this document assumes it
 │  pystray tray · Ctrl+Alt+Space · wake word · Telegram long-poll                 │
 │  named-pipe server · policy gate · VRAM arbiter · audit log · scheduler         │
 │  Obsidian bridge · workspace-manifest resolver                                  │
+│  launched by ONE process: `python -m assistant` (launcher.py, D65)              │
+│    binds the pipe → then chord + presence + tray → parks. No model runtime.     │
 └──────────────────────┬──────────────────────────────────────────────────────────┘
                        │ request (JSON)                    ▲ event / result
                        ▼                                    │

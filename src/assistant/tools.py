@@ -230,10 +230,41 @@ DELEGATION_TOOLS: tuple[ToolSpec, ...] = (
 # Self-reflection. Writes only to the assistant's own state directory, and the
 # promotion gate in D21 disposes of every proposal deterministically.
 REFLECTION_TOOLS: tuple[ToolSpec, ...] = (
-    ToolSpec("reflect.log_friction", Tier.REVERSIBLE_WRITE, "Record a friction event"),
-    ToolSpec("reflect.distil", Tier.READ, "Distil repeated events into a candidate lesson"),
-    ToolSpec("reflect.propose", Tier.REVERSIBLE_WRITE, "Propose a one-change improvement"),
-    ToolSpec("reflect.report", Tier.READ, "Report reflection and capability state"),
+    # **No tool in this group accepts a `path` argument, and that is the safety
+    # property rather than an oversight.** D21 forbids the assistant writing its own
+    # code or its own policy, and there are two ways to enforce that: refuse the
+    # paths, or make the tools incapable of being pointed anywhere. These take the
+    # second road — every file they touch is derived from the daemon's own state
+    # directory — so "the assistant modified its own code" is not a rule being
+    # enforced, it is an operation that has no representation.
+    #
+    # The same argument as `telegram.send_draft` and for the same reason, except
+    # the stakes: a write tool that reasons about changing the assistant, and that
+    # accepts a path from its caller, is an arbitrary-write primitive wearing the
+    # most persuasive name in the registry. `policy.SELF_PATHS` refuses
+    # `src/` independently, which is defence in depth — and this group does not
+    # rely on it.
+    ToolSpec("reflect.log_friction", Tier.REVERSIBLE_WRITE,
+             "Record a friction event; observed once is not a pattern",
+             parameters={"area": {"type": "str"},
+                         "symptom": {"type": "str"},
+                         "detail": {"type": "str", "required": False}}),
+    # T0 because it counts rows. A distil that called a model would spend a 5 GiB
+    # load on arithmetic, and the arithmetic would then be the model's rather than
+    # the ledger's — D62's mistake in a new place.
+    ToolSpec("reflect.distil", Tier.READ,
+             "Distil repeated events into candidate lessons",
+             parameters={"min_observations": {"type": "int", "required": False}}),
+    # `check` is required in practice and refused when absent: D21 lists
+    # "reflection without change" as an anti-pattern, and a change nobody can
+    # falsify is indistinguishable from no change at all.
+    ToolSpec("reflect.propose", Tier.REVERSIBLE_WRITE,
+             "Propose one improvement; a deterministic gate promotes it or does not",
+             parameters={"key": {"type": "str"},
+                         "change": {"type": "str"},
+                         "check": {"type": "str"}}),
+    ToolSpec("reflect.report", Tier.READ,
+             "Report reflection and capability state"),
 )
 
 # Voice. Speaking and listening are both outward-facing in a way the other tools

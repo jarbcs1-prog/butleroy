@@ -40,7 +40,7 @@ import pytest
 
 from assistant import daemon as D
 from assistant.manifest import Workspace
-from assistant.policy import CHANNEL_PC, CHANNEL_TELEGRAM, Tier
+from assistant.policy import CHANNEL_PC, CHANNEL_TELEGRAM, Tier, ToolSpec
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -534,10 +534,18 @@ def test_the_gap_stays_visible_in_status(dg):
     # tools_registered is a count; tools_executable is the list of names.
     assert isinstance(status["tools_registered"], int)
     assert isinstance(status["tools_executable"], list)
-    # Registered tools outnumber executable ones while any build gap remains.
-    assert status["tools_registered"] > len(status["tools_executable"]), (
-        "every registered tool can now run; assert what is left to report rather "
-        "than a comparison that will stop meaning anything"
+    # Every registered tool has an executor now, so the count and the list length
+    # are equal and this comparison has stopped carrying information. What still
+    # carries it: the gate accepts a registered tool the executor table has never
+    # heard of, and that tool reports itself as unexecutable rather than being
+    # quietly folded into the executable list.
+    assert status["tools_registered"] == len(status["tools_executable"])
+    ghost = "test.only.ghost_in_status"
+    assert ghost not in D.Daemon._EXECUTORS
+    dg.gate.register(ToolSpec(ghost, Tier.IRREVERSIBLE, "registered, never built",
+                              destructive=True))
+    assert ghost not in call(dg, "status")["result"]["tools_executable"], (
+        "a tool with no executor was advertised as executable in status"
     )
 
 

@@ -62,6 +62,7 @@ from .audit import AuditLog
 from .manifest import TIER_BY_NAME, ManifestStore, NotPermitted, Workspace
 from .obsidian import ObsidianBridge, ReadRefused, VaultError, WriteRefused
 from . import delegate, fileops, obsidian, sysinfo, teach
+from . import reflect
 from . import audio, speech, voice_loop
 #: The child's tier table, imported rather than restated. A second copy of this
 #: list would be a second answer to "which models exist", and the two would drift
@@ -405,6 +406,11 @@ class Daemon:
         self.mail: Any = None
         self.mail_error: str | None = None
         self._load_mail()
+        #: The reflection ledger (D21). Constructed unconditionally — it opens no
+        #: file until something is written — and deliberately *not* on-demand the
+        #: way mail is, because the daemon writes to it itself and needs a stable
+        #: handle for that.
+        self.reflect = reflect.ReflectionLedger(self.state)
         #: The pipe the child *serves* turns on. Distinct from PIPE_BRAIN_REQ,
         #: which is the pipe we *serve* on and the child *calls* to ask for its
         #: lease. Sharing one name would mean the child asks itself for
@@ -870,6 +876,16 @@ class Daemon:
         )
 
         if verdict.decision == Decision.DENY:
+            # Recorded before the refusal is raised, so the ledger sees every
+            # one. A refusal is friction by definition: the assistant asked for
+            # something the gate would not allow, which is precisely the signal
+            # D21 wants repeated observations of. Args are the redacted ones.
+            self._note_friction(area=f"gate.{tool}", symptom=verdict.reason,
+                                kind="denied",
+                                detail=json.dumps({"channel": channel,
+                                                   "actor": actor,
+                                                   "args": _redact(call_args)},
+                                                  default=str)[:1000])
             raise Refused(f"{tool}: {verdict.reason}")
         if verdict.decision == Decision.QUEUE:
             self.queue.append(
@@ -882,6 +898,16 @@ class Daemon:
                     "reason": verdict.reason,
                 }
             )
+            # Also friction, and the more interesting kind: the assistant
+            # reached for something that could not happen *now*.
+            self._note_friction(
+                area=f"queue.{tool}",
+                symptom=f"queued rather than executed: {verdict.reason}",
+                kind="queued",
+                detail=json.dumps({"channel": channel, "actor": actor,
+                                   "args": _redact(call_args)},
+                                  default=str)[:1000],
+            )
             return {"queued": True, "reason": verdict.reason, "depth": len(self.queue)}
         # The executor is looked up BEFORE the CONFIRM branch, deliberately. If a
         # destructive tool has no executor, we must not ask the user to approve
@@ -890,6 +916,12 @@ class Daemon:
         # honest answer is "this is not built", which is a build gap, not a refusal.
         executor = self._EXECUTORS.get(tool)
         if executor is None:
+            # A build gap is the clearest friction signal there is: the
+            # registry promises a capability the daemon cannot deliver.
+            self._note_friction(area=f"build.{tool}",
+                                symptom=f"registered at {verdict.tier} with no "
+                                         "executor, so the call cannot run",
+                                kind="not_implemented", detail=tool)
             raise NotImplementedOp(
                 f"{tool} is registered at tier {verdict.tier} but has no "
                 f"executor yet. {len(self._EXECUTORS)} of {len(ALL_TOOLS)} "
@@ -4991,6 +5023,94 @@ class Daemon:
             return "", "", "", "needs a to address"
         return to, subject, body, ""
 
+    def op_reflect_overlay(self, args: dict) -> Any:
+        """The promoted overlay, for the brain child to read each turn (D21).
+
+        An op rather than a registered tool, for the D59 reason: it is a read the
+        child needs and a model has no business calling. Registering it would put
+        "show me my accumulated habits" in the grammar, which is a prompt the model
+        could use to reason about its own instructions instead of the user's mail.
+        """
+        return {"overlay": self.reflect.overlay()}
+
+    def _exec_reflect_report(self, args: dict) -> Any:
+        """Reflection and capability state. A read that can report nothing.
+
+        Deliberately capable of saying "nothing repeated yet", which is the answer
+        most of the time and the one a reflection tool is most tempted to dress up.
+
+        A registered tool and therefore reached only through `tool_call` - there is
+        no `reflect_report` op, because an executable tool with an op of its own is a
+        second door to the same room (the D59 rule, asserted in `test_voice_ops.py`).
+        """
+        return self.reflect.report()
+
+    def _exec_reflect_log_friction(self, args: dict) -> Any:
+        """Record one friction event, from the model or the user.
+
+        T1 because the only thing it does is append a line inside the daemon's own
+        state directory. No `path` argument, for the reason `telegram.send_draft`
+        has none and for the same stronger reason: this is the only toolset in the
+        project that reasons about changing the assistant itself, and a write tool
+        in that group that accepted a path from its caller would be an
+        arbitrary-write primitive with a very persuasive name.
+
+        `kind` is `observed` unless the daemon is recording it, and only
+        system-witnessed events can ever be promoted into a lesson — see
+        `reflect.ReflectionLedger.propose`.
+        """
+        return self.reflect.log(
+            area=str(args.get("area") or ""),
+            symptom=str(args.get("symptom") or ""),
+            kind=str(args.get("kind") or "observed"),
+            detail=str(args.get("detail") or ""),
+        )
+
+    def _exec_reflect_distil(self, args: dict) -> Any:
+        """Group the ledger into candidates. Deterministic, model-free, T0.
+
+        T0 because it counts rows. A distil that calls a model would spend a 5 GiB
+        load to do arithmetic, and the arithmetic would then be the model's rather
+        than the ledger's — D62's mistake in a new place, where a READ label on a
+        call that loads the model is a lie about the cost.
+        """
+        floor = args.get("min_observations")
+        return self.reflect.distil(
+            min_observations=int(floor) if floor else reflect.MIN_OBSERVATIONS
+        )
+
+    def _exec_reflect_propose(self, args: dict) -> Any:
+        """Propose one improvement; the gate promotes it or does not.
+
+        D21: self-improvement proposes, and a deterministic gate disposes. The
+        gate is in `reflect._gate` and it is never reachable by anything the model
+        can choose to skip — there is no fifth tool that runs it on demand.
+        """
+        return self.reflect.propose(
+            key=str(args.get("key") or ""),
+            change=str(args.get("change") or ""),
+            check=str(args.get("check") or ""),
+        )
+
+    def _note_friction(self, *, area: str, symptom: str, kind: str,
+                       detail: str = "") -> None:
+        """Record friction the *daemon* observed.
+
+        This is the reason `reflect.*` can promote anything at all. A lesson the
+        model derived from its own account of a conversation is a lesson about what
+        it thinks happened; this is a lesson about what the system actually did. So
+        every refusal, build gap and queue is written here by the code that saw it,
+        and `propose` refuses to promote a candidate the daemon did not witness.
+
+        Never raises. A reflection failure must not be able to fail the tool call
+        that triggered it — the user asked for a deletion, not for a diary entry,
+        and losing the deletion over a full disk would be a spectacular own goal.
+        """
+        try:
+            self.reflect.log(area=area, symptom=symptom, kind=kind, detail=detail)
+        except Exception as exc:  # noqa: BLE001
+            ipc.note(f"friction not recorded: {type(exc).__name__}: {exc}")
+
     def _precheck_email_send(self, args: dict) -> None:
         """Refuse an unusable recipient or an injectable header, before the dialog.
 
@@ -5219,6 +5339,10 @@ def _install_tables() -> None:
         "email.draft": Daemon._exec_email_draft,
         "email.send": Daemon._exec_email_send,
         "email.delete": Daemon._exec_email_delete,
+        "reflect.log_friction": Daemon._exec_reflect_log_friction,
+        "reflect.distil": Daemon._exec_reflect_distil,
+        "reflect.propose": Daemon._exec_reflect_propose,
+        "reflect.report": Daemon._exec_reflect_report,
         "delegate.plan": Daemon._exec_delegate_plan,
         "delegate.brainstorm": Daemon._exec_delegate_brainstorm,
         "delegate.assign": Daemon._exec_delegate_assign,

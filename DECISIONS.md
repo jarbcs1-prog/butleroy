@@ -3169,3 +3169,138 @@ renames `mailbox` back to `folder`.
 Suite after: **1138 passed, 3 skipped, 47 subtests** (1131 before, +43 across two
 files). Still no destructive T3 tool without an executor, and that is now a
 *statement* rather than a coincidence.
+
+## D71 - Self-improvement that cannot happen, rather than self-improvement that is discouraged
+
+`reflect.*` is built: four tools, and **every registered tool in the project now has
+an executor**. This is the last group, and it is the one D21 says must be built last
+and on purpose — so the interesting question was never how to make reflection work.
+It was how to make it *unable to do damage*, which turned out to be the whole design.
+
+### The load-bearing property: it cannot write its own code or policy
+
+Not "is discouraged from". Not "the prompt says not to". **Cannot.** Three
+independent mechanisms, and the first is the one everything else leans on:
+
+1. **No `reflect.*` tool accepts a path argument.** They derive every file they
+   touch from the daemon's own state directory. A tool that cannot be *pointed*
+   anywhere cannot be pointed at `src/`. So "the assistant modified its own code"
+   is not a rule being enforced; it is an operation with no representation.
+
+   This is the same argument as `telegram.send_draft` — a T1 write tool that takes a
+   path from its caller is an arbitrary-write primitive — except the stakes here are
+   the whole thing. A write tool that reasons about changing the assistant, and that
+   accepts a path from its caller, would be an arbitrary-write primitive wearing the
+   most persuasive name in the registry.
+
+2. **The gate denies the assistant's own tree** (`policy.SELF_PATHS`), independently.
+   `tests/test_reflect_ops.py` promotes a lesson and then asks the gate to write into
+   `src/`, and expects a refusal — so the independent check is asserted still working,
+   not assumed.
+
+3. **The overlay grants no authority.** D21 keeps behaviour and authority separate
+   and this is the code that keeps them separate: the `### OPERATIONAL CONSTRAINTS`
+   block reaches `default_system_prompt` and nothing else. Not the gate, not a tier,
+   not an argument. A promoted lesson can change how the assistant *behaves*; it
+   cannot change what it is allowed to do. Measured, not asserted — the probe
+   promoted a lesson and then asked the gate to overwrite `daemon.py`:
+
+       overlay says: - check the approved roots before proposing a read, and prefer a
+                      root the user granted over one you remember from elsewhere
+       gate says   : deny - path 'G:\localaized\src\assistant\daemon.py' resolves
+                      inside a protected location
+
+### The four anti-patterns, each with a mechanism rather than a warning
+
+D21 names them, so each got a rule and each rule got a mutation:
+
+| anti-pattern | mechanism | mutation |
+|---|---|---|
+| **overfitting** — one failure becomes a permanent rule | `distil` and `propose` refuse a candidate observed once | caught |
+| **reflection without change** | `check` is required; a proposal without a falsifiable "what would be different" is refused | caught |
+| **performative reflection** | the daemon witnesses its own friction, and a candidate the daemon did not witness is never promoted | caught |
+| **endless analysis** | one change per cycle, a candidate cap, and a bounded overlay | caught |
+
+The third one is the design decision worth defending, because it is the one that
+makes reflection *possible* rather than merely safe. `op_tool_call` now records every
+denial, every queue and every build gap into the ledger as it happens. A lesson the
+model derived from its own account of a conversation is a lesson about what it thinks
+happened; this is a lesson about what the system actually did. Without that
+distinction every candidate is a hypothesis, and a promotion gate over hypotheses is
+just a delay.
+
+### The scores are computed, never supplied
+
+`validation_score` and `confidence` come out of `scores()`, which reads the ledger.
+No tool takes a score argument, and there is a test asserting that absence — because
+a model that could score its own proposal would score it ten, every time, and the
+gate would be arithmetic with a suggestion on the front.
+
+**Two defects the mutation run found in my own gate, both of the same kind:**
+
+- **The threshold was doing nothing.** `PROMOTION_THRESHOLD = 60` on a scale where
+  the product runs 0..10,000, so every candidate passed it. The gate was carrying
+  every promotion test on the witness check alone. It is now a *fraction* of the
+  maximum, `0.45`, with the maximum derived from the two score ranges so the two
+  cannot drift apart.
+- **A score term was dead code.** `witnessed = 20 if system_observed` — removing it
+  left the suite green, because `_gate` refuses a non-witnessed candidate outright,
+  so the term could only ever have applied to candidates already refused. Removed,
+  with the reasoning left in place: dead weight in a scoring function is worse than
+  no function, because it looks like part of the evidence and is not.
+
+A third term, `specificity`, was also untested. Rather than delete a genuine property
+— a vague three-word grouping key should score below a specific one, because vagueness
+is what lets a rule absorb every later exception — it got a test, and the mutation now
+fails. Twelve mutations, twelve caught.
+
+### Two bugs only the real model could find
+
+The unit tests construct a `Brain` with a roots reader; production does too. So this
+was invisible until the probe loaded the actual 4B and asked whether the promoted
+lesson was in the prompt it would answer from. It was not, for two reasons:
+
+1. **`current_prompt()` returned early when there was no roots reader**, so a `Brain`
+   built without one kept whatever prompt it was constructed with — and the
+   constructor built that prompt without the overlay. The whole Phase 6 feature was
+   inert for every construction that did not pass a roots reader.
+2. **`_overlay` was assigned after the system prompt was built**, and the prompt now
+   reads the overlay, so the constructor raised `AttributeError: '_overlay'`. It was
+   fine the moment before that, which is the worst possible moment to be fine.
+
+Both were ordering mistakes in a constructor, and both are the kind that a test which
+passes a reader takes the other branch past without noticing. The fix reorders the
+constructor so the prompt is built last, from both.
+
+### The honest-reporting property, which is unusual and which is tested
+
+A reflection tool that can only report success is a vanity metric, and its failure
+mode is not a crash — it is a system that appears to be learning. So
+`reflect.report` is *required* to be able to say "nothing repeated yet", and
+`test_an_empty_ledger_reports_nothing_and_does_not_call_it_a_failure` asserts it. The
+commonest state is "no lesson yet" and it must read that way.
+
+Related, and found by the mutation: a burst of identical rows inside a one-minute
+window is one observation, so a retry loop cannot defeat `MIN_OBSERVATIONS` — while
+the same complaint an hour later *is* a second observation, so a problem that
+happens every day can still become a lesson. The first version keyed on the exact
+timestamp, which meant the test asserting the burst collapsed passed or failed
+depending on the millisecond.
+
+### Proven end to end, on the real model
+
+    4 genuine gate refusals, recorded by the daemon as it refused them
+      -> 1 candidate after the two-observation floor
+      -> validation 60 x confidence 100 = 6000 of 10000, above 45%
+      -> promoted
+      -> overlay present in the prompt of a RESIDENT 4B, with no reload
+      -> a second, different lesson held: "one change per cycle"
+      -> the gate still denies G:\localaized\src\assistant\daemon.py
+      -> report: 8 events, 2 candidates, 1 promoted, overlay 73 of 500 tokens
+
+Suite after: **1167 passed, 3 skipped, 47 subtests** (1164 before, +29). Every
+registered tool has an executor, which is worth stating plainly rather than leaving to
+be discovered: `test_daemon.py` and `test_confirm.py` both asserted "registered tools
+outnumber executable ones", which was a coincidence that has now stopped carrying
+information. They register a synthetic unbuildable tool instead, which is the
+condition rather than an instance of it.

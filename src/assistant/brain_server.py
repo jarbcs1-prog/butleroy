@@ -250,6 +250,29 @@ def _roots_reader(lease: LeaseClient) -> Callable[[], tuple[str, ...]]:
     return read
 
 
+def _overlay_reader(lease: LeaseClient):
+    """The reflection overlay, read from the daemon every turn (D21).
+
+    Asked for over the pipe rather than read from disk in this process, because the
+    overlay is written by Plane A into *its* state directory and this is a leased
+    child: it must not go looking for files it was not given. The same rule as the
+    roots reader, for the same reason.
+
+    A turn with no overlay is the normal case, and the reader says so by returning
+    "" rather than raising — the assistant answering without any accumulated habits
+    is the correct state, not an error.
+    """
+    def read() -> str:
+        try:
+            envelope = lease.client.call("reflect_overlay") or {}
+            payload = envelope.get("result", envelope)
+            return str(payload.get("overlay") or "")
+        except Exception:
+            return ""
+
+    return read
+
+
 def _load(brain_box: dict[str, Any], lease: LeaseClient) -> dict:
     existing = brain_box.get("brain")
     if existing is not None:
@@ -284,9 +307,11 @@ def _load(brain_box: dict[str, Any], lease: LeaseClient) -> dict:
         # training data. The gate refused both, which is correct, but a refusal is
         # not assistance.
         roots = _roots_reader(lease)
+        overlay = _overlay_reader(lease)
         brain = Brain(cfg, lease=lease,
-                      system_prompt=default_system_prompt(ALL_TOOLS, roots()),
-                      roots=roots)
+                      system_prompt=default_system_prompt(ALL_TOOLS, roots(),
+                                                          overlay()),
+                      roots=roots, overlay=overlay)
         status = brain.load()
     except BrainError as exc:
         return {"loaded": False, "error": f"{type(exc).__name__}: {exc}"}

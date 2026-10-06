@@ -270,14 +270,42 @@ def test_t0_and_t1_still_run_when_unattended(dg: D.Daemon, workspace: Path):
 
 
 def test_a_registered_tool_with_no_executor_says_so_loudly(dg: D.Daemon, workspace: Path):
+    """The gap must be visible in `status`, not only when a call trips over it.
+
+    Every registered tool now has an executor, so the original comparison
+    (`tools_registered > len(tools_executable)`) has stopped meaning anything — it
+    passes while the registry grows and fails the day the last gap is closed, which
+    is the wrong way round. The property is "`executable` is derived from the
+    executor table, not hardcoded", so a tool the daemon has never heard of is
+    registered and reports itself as unexecutable.
+    """
+    from assistant.policy import ToolSpec, Tier
+
     req(dg, "workspace_add", name="proj", root=str(workspace), allow_tiers=["T3"])
     # T3 always needs confirmation regardless of channel, so confirmation wins
     # over the missing executor. The gap must still be visible in status.
     status = req(dg, "status")["result"]
-    assert status["tools_registered"] > len(status["tools_executable"]), (
-        "an unimplemented tool surface must be visible, not silent"
-    )
     assert "file.list" in status["tools_executable"]
+    # `tools_registered` counts the registry and `tools_executable` lists the
+    # executor table, so the two are only comparable while a gap exists. Assert the
+    # shapes rather than a difference that will eventually be zero.
+    assert isinstance(status["tools_registered"], int)
+    assert isinstance(status["tools_executable"], list)
+
+    # Now the property itself: a registered tool with no executor must not be
+    # advertised as executable. Registered on the gate, absent from _EXECUTORS.
+    ghost = "test.only.ghost_tool"
+    assert ghost not in D.Daemon._EXECUTORS
+    dg.gate.register(ToolSpec(ghost, Tier.READ, "registered but not implemented"))
+    out = req(dg, "tool_check", tool=ghost, channel=CHANNEL_PC)
+    assert out["ok"], "tool_check refused a registered tool outright"
+    assert out["result"]["executable"] is False, (
+        "a tool the daemon has no executor for was reported as executable, which "
+        "lets the user plan around a capability that is absent"
+    )
+    # And it is absent from the executable list, so a caller reading `status`
+    # cannot be told it can be called.
+    assert ghost not in req(dg, "status")["result"]["tools_executable"]
 
 
 # --------------------------------------------------------------------------- #

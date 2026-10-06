@@ -61,7 +61,8 @@ MAX_TIER_FOR_TOOLS = "T3"
 
 
 def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS,
-                          roots: Sequence[str] = ()) -> str:
+                          roots: Sequence[str] = (),
+                          overlay: str = "") -> str:
     """The prompt a brain turn runs under.
 
     This is not decoration. Measured on this machine with the 4B fast tier:
@@ -180,6 +181,20 @@ def default_system_prompt(tools: Sequence[Any] = ALL_TOOLS,
             args.append(f"{key}: {spec.get('type', 'str')}{flag}")
         shape = f" ({', '.join(args)})" if args else " (takes no arguments)"
         lines.append(f"- {tool.name}{shape} - {tool.description}")
+    # The reflection overlay (D21), last so it cannot crowd the tool list out.
+    #
+    # It is prompt text and nothing else. It reaches this function and no further:
+    # not the policy gate, not a tier, not an argument. A promoted lesson can change
+    # how the assistant behaves; it cannot widen what it is allowed to do, and
+    # `reflect.ReflectionLedger` writes it into the state directory rather than into
+    # `src/` precisely so that distinction is structural rather than a promise.
+    #
+    # Appended after the tool list because the tool list is what the grammar draws
+    # from, and an overlay that pushed it out of the window would trade a real
+    # capability for an accumulated habit.
+    if overlay and overlay.strip():
+        lines.append("")
+        lines.append(overlay.strip())
     return "\n".join(lines)
 
 
@@ -400,6 +415,7 @@ class Brain:
         system_prompt: str | None = None,
         tools: Sequence[Any] = ALL_TOOLS,
         roots: Callable[[], Sequence[str]] | None = None,
+        overlay: Callable[[], str] | None = None,
     ):
         self.config = config
         # Default to the real prompt rather than an empty string. An empty
@@ -409,17 +425,37 @@ class Brain:
         # Found by a test that constructed a brain without a roots reader and got
         # back `""`; whether or not production always supplies one, a constructor
         # that produces an empty prompt is a trap for whoever comes next.
-        self.system_prompt = (
-            system_prompt
-            if system_prompt is not None
-            else default_system_prompt(tools, ())
-        )
         # Approved roots, re-read every turn rather than captured at load. They
         # can be granted or revoked while the model is resident, and a prompt
         # that still advertises a revoked root is an assistant inviting itself
         # to be refused - or, worse, describing somewhere it no longer belongs.
         self._roots = roots
+        # The reflection overlay, read the same way roots are: a callable, so a
+        # lesson promoted while the model is resident is visible on the next turn
+        # without a reload, and a retired one stops being visible just as promptly.
+        # A promotion is a change in behaviour, and behaviour that needs a model
+        # restart to take effect is behaviour nobody will trust.
+        #
+        # Assigned BEFORE the system prompt is built, because that prompt reads the
+        # overlay. It was assigned after, and every construction raised
+        # `AttributeError: '_overlay'` — which only a real model load could find,
+        # because the unit tests all pass a roots reader and so took the other
+        # branch.
+        self._overlay = overlay
         self._prompt_cache: tuple[str, ...] | None = None
+        self._overlay_cache: str | None = None
+        # Built last, because it reads `_roots` and `_overlay` from both.
+        #
+        # An empty system prompt is not a neutral one: it is a model with no
+        # instructions that will confidently produce anything, and it fails by
+        # being refused rather than by erroring, which is the hardest kind of
+        # failure to notice. Found by a test that constructed a brain without a
+        # roots reader and got back `""`.
+        self.system_prompt = (
+            system_prompt
+            if system_prompt is not None
+            else default_system_prompt(tools, (), self._read_overlay())
+        )
         self.tools = tools
         self._acquire = lease
         self._lease: Any = None
@@ -604,21 +640,44 @@ class Brain:
             return ()
         return tuple(self._roots() or ())
 
+    def _read_overlay(self) -> str:
+        """The reflection overlay, or "" when there is none or unreadable.
+
+        A reader that raises yields "" rather than failing: an unreadable lesson
+        file must not be the reason the assistant stops answering, and an overlay
+        that cannot be read is an overlay that has not been promoted.
+        """
+        if self._overlay is None:
+            return ""
+        try:
+            return str(self._overlay() or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
     def current_prompt(self) -> str:
-        """The system prompt, rebuilt when the approved roots change.
+        """The system prompt, rebuilt when the roots or the overlay change.
 
         A static prompt would name a workspace that has since been revoked. The
         gate would refuse anyway - but a prompt advertising somewhere the user
         took away is an assistant describing itself inaccurately, which is the
-        failure this project keeps paying for in other places.
+        failure this project keeps paying for in other places. The same argument
+        applies to a promoted lesson, and rather more strongly: a retired habit
+        that stays in the prompt is a habit the assistant keeps obeying.
+
+        Both caches are consulted even when there is no roots reader. That was a
+        real bug: the early return for `roots is None` meant a `Brain` built
+        without a roots reader kept whatever prompt it was constructed with, so
+        the overlay was read by nobody and the whole Phase 6 feature was inert for
+        every construction that did not pass one. Found by loading the real model
+        and asking whether the lesson was in the prompt it would answer from.
         """
-        if self._roots is None:
-            return self.system_prompt
-        roots = self._current_roots()
-        if roots == self._prompt_cache:
+        roots = self._current_roots() if self._roots is not None else ()
+        overlay = self._read_overlay()
+        if roots == self._prompt_cache and overlay == self._overlay_cache:
             return self.system_prompt
         self._prompt_cache = roots
-        self.system_prompt = default_system_prompt(self.tools, roots)
+        self._overlay_cache = overlay
+        self.system_prompt = default_system_prompt(self.tools, roots, overlay)
         return self.system_prompt
 
     def _messages(self, prompt: str) -> list[dict[str, str]]:

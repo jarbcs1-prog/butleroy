@@ -33,6 +33,8 @@ import queue
 import threading
 from typing import Any, Callable
 
+from . import widgets as W
+
 #: Palette, read from the brand kit rather than re-typed. `brand/tokens.json` is
 #: the one definition; a hex code written out here would be the second, and would
 #: drift the first time someone edited the brand.
@@ -189,12 +191,8 @@ class ModelsSection(Section):
 
         for label, command in (("Reload", self._reload),
                                ("Save", self._save)):
-            button = tk.Button(
-                row, text=label, command=command, relief="flat", bd=0,
-                bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
-                activeforeground=c["brass-lit"], font=("Segoe UI", 9),
-                padx=14, pady=4, cursor="hand2",
-            )
+            button = W.Button(row, label, command,
+                               variant="ghost")
             button.pack(side="right", padx=(8, 0))
             self.widgets.append(button)
 
@@ -427,12 +425,8 @@ class VoicesSection(Section):
             ("Use this voice", self._make_default),
             ("Save", self._save),
         ):
-            button = tk.Button(
-                actions, text=label, command=command, relief="flat", bd=0,
-                bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
-                activeforeground=c["brass-lit"], font=("Segoe UI", 9),
-                padx=10, pady=4, cursor="hand2",
-            )
+            button = W.Button(actions, label, command,
+                               variant="ghost")
             button.pack(side="right", padx=(6, 0))
             self.widgets.append(button)
 
@@ -744,12 +738,8 @@ class WorkspacesSection(Section):
             ("Approve a folder…", self._add),
             ("Reload", self._reload),
         ):
-            button = tk.Button(
-                actions, text=label, command=command, relief="flat", bd=0,
-                bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
-                activeforeground=c["brass-lit"], font=("Segoe UI", 9),
-                padx=10, pady=4, cursor="hand2",
-            )
+            button = W.Button(actions, label, command,
+                               variant="ghost")
             button.pack(side="right", padx=(6, 0))
             self.widgets.append(button)
 
@@ -951,8 +941,12 @@ class AuthoritySection(Section):
             row = tk.Frame(ladder, bg=c["slate"])
             row.pack(fill="x", pady=1)
             self.widgets.append(row)
-            badge = tk.Label(row, text=f" {name} ", fg=c["obsidian"], bg=c[colour],
-                             font=("Segoe UI", 9, "bold"))
+            # The badge, from the kit. This is the one place the widget set carries
+            # real meaning rather than style: the tier colour is how the authority
+            # model becomes visible, and `Badge.for_tier` is the single mapping from a
+            # tier name to a colour. Spelling it out here was the second copy of that
+            # mapping, and the second copy is the one that drifts.
+            badge = W.Badge.for_tier(row, name)
             badge.pack(side="left")
             self.widgets.append(badge)
             tk.Label(row, text=f"  {label}", fg=c["bone"], bg=c["slate"],
@@ -998,19 +992,12 @@ class AuthoritySection(Section):
         self.status.pack(side="left", fill="x", expand=True)
         self.widgets.append(self.status)
 
-        self.attended_button = tk.Button(
-            actions, text="Step back (unattended)", command=self._step_back,
-            relief="flat", bd=0, bg=c["slate"], fg=c["brass"],
-            activebackground=c["slate-line"], activeforeground=c["brass-lit"],
-            font=("Segoe UI", 9), padx=10, pady=4, cursor="hand2")
+        self.attended_button = W.Button(
+            actions, "Step back (unattended)", self._step_back, variant="ghost")
         self.attended_button.pack(side="right", padx=(6, 0))
         self.widgets.append(self.attended_button)
 
-        reload_button = tk.Button(
-            actions, text="Reload", command=self._reload, relief="flat", bd=0,
-            bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
-            activeforeground=c["brass-lit"], font=("Segoe UI", 9),
-            padx=10, pady=4, cursor="hand2")
+        reload_button = W.Button(actions, "Reload", self._reload, variant="ghost")
         reload_button.pack(side="right", padx=(6, 0))
         self.widgets.append(reload_button)
 
@@ -1168,11 +1155,7 @@ class AdvancedSection(Section):
         self.status.pack(side="left", fill="x", expand=True)
         self.widgets.append(self.status)
 
-        button = tk.Button(
-            row, text="Reload", command=self._reload, relief="flat", bd=0,
-            bg=c["slate"], fg=c["brass"], activebackground=c["slate-line"],
-            activeforeground=c["brass-lit"], font=("Segoe UI", 9),
-            padx=12, pady=4, cursor="hand2")
+        button = W.Button(row, "Reload", self._reload, variant="ghost")
         button.pack(side="right")
         self.widgets.append(button)
 
@@ -1626,13 +1609,12 @@ class Settings:
 
         for key in self._order:
             section = self._sections[key]
-            button = tk.Button(
-                head, text=section.title, relief="flat", bd=0,
-                bg=c["slate"], fg=c["sage"], activebackground=c["slate-line"],
-                activeforeground=c["bone"], font=("Segoe UI", 9),
-                padx=16, pady=6, cursor="hand2",
-                command=lambda k=key: self._select(k),
-            )
+            # A ghost button whose text colour marks the active page. Configured after
+            # construction rather than being a variant of its own, because "active tab"
+            # is a property of the *set* of buttons rather than of one button.
+            button = W.Button(head, section.title, lambda k=key: self._select(k),
+                              variant="ghost")
+            button.configure(fg=c["sage"], activeforeground=c["bone"], padx=16)
             button.pack(side="left")
             self._buttons.append(button)
 

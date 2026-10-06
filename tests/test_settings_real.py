@@ -31,8 +31,6 @@ into a red one.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from assistant import settings as S
@@ -41,34 +39,28 @@ tk = pytest.importorskip("tkinter")
 
 
 def _display_available() -> bool:
-    """Whether a Tk root can actually be created here.
+    """Whether tkinter is usable, WITHOUT creating a root.
 
-    Probed rather than assumed, so an unavailable display skips instead of erroring
-    halfway through a test that has already built half a window.
+    This probe used to create and destroy a `tk.Tk()` at import time. That turned out
+    to be the cause of the `-2147483645` aborts this project spent a session working
+    around: a Tcl interpreter created and dropped on the **main** thread leaves the
+    main thread's Tcl state unusable, and the interpreter is then torn down at
+    shutdown by the wrong thread.
 
-    In-process runs are for development and for this module being run directly.
-    The normal suite runs it through `test_settings_isolated.py`, in a subprocess —
-    see that file, and this module's docstring, for why.
+    Measured: with the probe, `tests/test_widgets_real.py` produced 26 errors and this
+    file aborted the process; without it, both pass in-process with exit 0.
+
+    A capability check instead. On the target platform tkinter implies a display.
     """
     try:
-        root = tk.Tk()
+        return tk.Tcl is not None
     except Exception:  # noqa: BLE001
         return False
-    root.destroy()
-    return True
 
 
 requires_display = pytest.mark.skipif(
     not _display_available(), reason="no interactive session for Tk"
 )
-
-#: This module is not collected by the normal suite. `test_settings_isolated.py` runs
-#: it in a subprocess, because a Tcl interpreter that outlives its owning thread
-#: aborts at interpreter *shutdown* in this build - after every test has passed -
-#: and turns a green run red with no summary at all. Running in-process here is for
-#: development; set `SETTINGS_TK_INPROCESS=1` only if you are debugging these tests.
-if not os.environ.get("SETTINGS_TK_INPROCESS"):
-    pytestmark = pytest.mark.skip(reason="run by test_settings_isolated.py")
 
 
 class FakeDaemon:

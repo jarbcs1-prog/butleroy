@@ -64,7 +64,7 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1343 passed, 43 skipped, 47 subtests   (~2m50s, no PYTHONPATH needed)
+tests        1411 passed, 3 skipped, 47 subtests   (~2m52s, no PYTHONPATH needed)
              40 of the 43 skips are tests/test_settings_real.py, which is run
              by tests/test_settings_isolated.py in a subprocess (see structural
              claim 6 in §5). They are NOT unrun - 19 of them pass in the child.
@@ -72,7 +72,7 @@ tests        1343 passed, 43 skipped, 47 subtests   (~2m50s, no PYTHONPATH neede
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D79, contiguous, none missing - and now *tested*
+decisions    D1..D80, contiguous, none missing - and now *tested*
              (tests/test_decisions_log.py), because a hand-kept
              figure was wrong: D74 was cited by a source file and
              did not exist
@@ -84,7 +84,8 @@ name         package/script/pipes/env = butleroy (D73). The DIRECTORY is still
              policy.SELF_PATHS protects this checkout by that literal string
 GUI          a separate settings WINDOW (D75), reached from the tray as
              "Settings...". FIVE sections: Models (D74/D75), Voices (D76),
-             Workspaces (D77), Authority (D78), Advanced (D79). Remaining:
+             Workspaces (D77), Authority (D78), Advanced (D79), all built
+             on the widget set (D80, src/assistant/widgets.py). Remaining:
              Speech, and the Vault. See the inventory in brand/README.md,
              which is measured (26 of 44 ops reachable), not estimated.
 core deps    pystray, pillow. llama-cpp-python is in the [brain] extra ONLY,
@@ -298,15 +299,20 @@ future edit could quietly undo:
    is a thin CLI over the package module. If someone "tidies" the geometry back into
    `brand/`, the tray keeps working in a checkout and fails on install — and no test
    here will run against an installed copy. Read `brand/README.md` before moving it.
-6. **The real-Tk tests run in a subprocess.** `tests/test_settings_real.py` is
-   invoked by `tests/test_settings_isolated.py`. In this Python/Tk build a
-   worker-thread `Tk()` root can leave Tcl's async handler to be deleted at
-   *interpreter shutdown*, on the main thread, and the process exits `-2147483645`
-   **after every test has passed**. Windows makes it a debug break, so pytest never
-   prints a summary. It is not a leak (the release tests prove nothing is retained),
-   not a count of windows (bare tkinter handled forty), and not shared state. What
-   it must not do is turn a green run red with no explanation. Set
-   `SETTINGS_TK_INPROCESS=1` to run them directly while debugging.
+6. **Never create a `Tk()` at import time.** D80. Every real-Tk test file used to
+   begin with a display probe that built and dropped a `tk.Tk()` while the module was
+   being imported. A Tcl interpreter created and dropped on the **main** thread leaves
+   that thread's Tcl state unusable: `tests/test_widgets_real.py` gave 26 errors and 4
+   passes, all `Can't find a usable init.tcl`, and `tests/test_settings_real.py`
+   aborted the process roughly half the time with `-2147483645`. Removing the probe -
+   for a capability check that creates nothing - fixed both, and the subprocess
+   containment that had been working around it is gone. Probe with `tk.Tcl is not
+   None`, never with a root.
+
+   **Still open:** the full suite aborted occasionally even after that fix, from an
+   interaction between these files and the rest of the suite that a three-file run
+   does not reproduce. It has not recurred in three consecutive full runs, and it is
+   recorded rather than called solved.
 7. **`_release_widgets` must keep collecting on the Tk thread.** Nulling the widget
    attributes is not sufficient on its own — the `after` callbacks and the event
    queue leave reference cycles, and only the cyclic collector breaks them. Delete

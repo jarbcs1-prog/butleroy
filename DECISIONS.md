@@ -4052,3 +4052,95 @@ failed and the second passed.
 
 Suite after: **1343 passed, 43 skipped, 47 subtests**, exit 0. Six new tests in the
 window body (40 there now).
+
+---
+
+## D80 - The widget set, and the import-time probe that was causing the aborts
+
+`brand/README.md` §5 specified nine widgets and had no code behind it. The settings
+sections used raw `tk.Listbox`, `tk.Label` and `tk.Button` styled ad hoc with the brand
+palette, so consistency came from repeating the same `configure(...)` calls. That works
+exactly until someone adds a section who did not read the file.
+
+`src/assistant/widgets.py` is the set: `Button` (four variants), `Field`, `Select`,
+`Toggle`, `Badge`, `Meter`, `Panel`, `ListRow`, `Dialog`. The sections now use it -
+seven ad-hoc button blocks and the tier rows collapsed into it - so the kit is load
+bearing rather than a parallel implementation.
+
+### Two things the spec asked for that tkinter cannot do
+
+Both are corrected in `brand/README.md` rather than quietly ignored, because a spec
+that claims something the code does not do is the failure this project keeps hitting.
+
+**Rounded corners are not implemented.** `tk.Button`, `tk.Frame` and `tk.Label` are
+rectangles; there is no radius option. A rounded control in tkinter means a `Canvas`
+with hand-drawn shapes, which loses native focus handling, keyboard navigation and
+screen-reader semantics. That is a bad trade for 6 px of corner. `Meter` *is* a
+`Canvas`, because a filled bar is a shape rather than a control and has no behaviour
+to lose.
+
+**The SVG glyphs are not used in the UI.** tkinter cannot load SVG and this project has
+no rasterizer (D66 keeps the dependencies to pystray and pillow, and pillow cannot
+render SVG). `ListRow`'s icon slot takes a short text mark instead. The 27 SVGs remain
+what they are for: the brand kit, the documentation, and any future non-tk surface.
+
+### The kit was looked at, because it cannot be asserted
+
+Whether a widget set *looks* right is not testable, and a test that pretended to would
+be the D36 shape. So it was rendered and photographed - `ImageGrab`, since Tk cannot
+screenshot itself - and two defects were only visible that way:
+
+  * **the meter did not stretch.** It drew once at a fixed 220 px and never noticed
+    being resized, so a VRAM meter occupied a sixth of its panel and read as a
+    truncated widget rather than a gauge. A bar is read by comparing its length to
+    something, and a bar whose length is arbitrary cannot be compared to anything. Now
+    bound to `<Configure>`, with the figure measured first and the track given what is
+    left.
+  * **`ImageGrab` and Tk disagree about pixels.** Tk reports logical pixels and
+    `ImageGrab` works in physical ones, so a bbox computed from `winfo_rootx()` is
+    wrong by the DPI scale factor and the capture lands on the wrong window. Grabbing
+    the full screen is the only reliable version.
+
+### The find: an import-time `Tk()` breaks the main thread's Tcl
+
+Every real-Tk test file began with a display probe that created and destroyed a
+`tk.Tk()` at **import** time. That was not harmless.
+
+`tests/test_widgets_real.py` failed with 26 errors and 4 passes, all of them
+
+    _tkinter.TclError: Can't find a usable init.tcl
+
+Removing the probe - replacing it with a capability check that creates nothing - made
+all 30 pass. And `tests/test_settings_real.py`, which had the same probe, went from
+aborting the process roughly half the time to **six consecutive clean in-process runs,
+exit 0**.
+
+A Tcl interpreter created and dropped on the **main** thread leaves that thread's Tcl
+state unusable. Three roots in sequence are fine in a plain script, so it is the pytest
+context rather than Tk itself.
+
+**This is the mechanism behind the `-2147483645` aborts this project has been working
+around since D75.** It was recorded there as an unresolved interpreter-lifetime quirk
+of the build, with the tests contained in a subprocess so a green run could not be
+turned red. The containment is now removed and the tests run in-process: 75 passed,
+exit 0, and **zero live `_tkinter` objects at session end** across three runs.
+
+What is *not* solved: the full suite still aborts occasionally, so something in the
+interaction between these files and the rest of the suite leaves Tcl unhappy in a way
+the three-file run does not reproduce. That is recorded rather than papered over.
+
+### The kit is asserted on meaning, not on appearance
+
+`tests/test_widgets_real.py`, 30 tests: the fallback palette agrees with
+`brand/tokens.json` (two copies, one test - D72's lesson applied to colour); every
+token a widget names is a real token, because a *misspelled* token is the quiet version
+of D69's invalid-colour bug; the tier badge maps to the documented colours, asserted as
+an exact mapping rather than "four different colours"; the meter clamps rather than
+overflowing and reports the true overage as text; a dialog takes the grab and gives it
+back; and every widget is a `tk.Misc` with a `.tk`, which is what `Section.dispose`
+needs in order to release it.
+
+One test was wrong on the first attempt and worth recording: it withdrew the root, and
+a withdrawn root reports width 1 for its children, so the meter-stretches test measured
+60 px at every window size and failed for a reason that had nothing to do with the
+meter. The root is now positioned off-screen instead.

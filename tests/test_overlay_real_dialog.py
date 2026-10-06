@@ -38,17 +38,24 @@ pytestmark = pytest.mark.skipif(
 
 
 def _can_display() -> bool:
-    """Can a Tk root actually be created here?
+    """Can tkinter be used here, WITHOUT creating a root.
 
-    Probed rather than assumed, so an unavailable display skips instead of erroring
-    halfway through a test that has already built half a dialog.
+    This probe used to create and destroy a `Tk()` at import time. D80 found that to
+    be the cause of the `-2147483645` aborts this project spent a session working
+    around: a Tcl interpreter created and dropped on the **main** thread leaves the
+    main thread's Tcl state unusable, and it is then torn down at shutdown by the
+    wrong thread - `Tcl_AsyncDelete: async handler deleted by the wrong thread`.
+
+    Measured, both directions: with the probe, `tests/test_widgets_real.py` gave 26
+    errors and the settings suite aborted roughly half the time; without it, six
+    consecutive in-process runs of the settings suite exit 0.
+
+    A capability check instead. On the target platform tkinter implies a display.
     """
     try:
-        root = O.tk.Tk()
-    except Exception:  # noqa: BLE001 - any failure means no display
+        return O.tk.Tcl is not None
+    except Exception:  # noqa: BLE001
         return False
-    root.destroy()
-    return True
 
 
 pytestmark = [

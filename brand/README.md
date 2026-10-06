@@ -195,15 +195,22 @@ There are none yet — deliberately. Widgets are specified here so they are buil
 this kit rather than to whatever tkinter defaulted to, and so the set is designed
 once. What they must obey:
 
-- **Corners.** 6 px on controls, 10 px on cards and menus, 22.5% on the app plate.
-  Nothing in between unless there is a reason.
-- **Borders.** 1 px `slate-line`. A focused control is 1 px `brass` plus a 2 px
-  `brass` at 24% outward — an outer glow, not a thick ring, which is what tkinter
-  can actually draw.
-- **Height.** 32 px rows, 36 px buttons, 40 px inputs. All multiples of 4.
-- **Icons in the UI** come from `glyphs/`: 24-unit grid, 2 px stroke, round caps,
-  `currentColor`. Never the brass gradient — a gradient inside a 16 px list row is
-  mush.
+- **Corners. NOT IMPLEMENTED, and the spec was wrong to ask.** `tk.Button`,
+  `tk.Frame` and `tk.Label` are rectangles with no radius option. Rounded corners in
+  tkinter mean a `Canvas` with hand-drawn shapes, which loses native focus handling,
+  keyboard navigation and screen-reader semantics — a bad trade for 6 px. Every
+  control is a sharp rectangle. `Meter` *is* a `Canvas`, because a filled bar is a
+  shape rather than a control and has no behaviour to lose. The 22.5% app plate is
+  still real: it is in the `.ico`, which is a raster the OS draws.
+- **Borders.** 1 px `slate-line`, via `highlightthickness` — `bd` draws a 3D bevel.
+  A focused control is a 2 px `brass` highlight. The spec's "1 px plus a 2 px glow" is
+  two borders and Tk has one, so it is the single-border version.
+- **Height.** 32 px rows, 36 px buttons, 40 px inputs. All multiples of 4. Real, and
+  asserted.
+- **Icons in the UI. NOT IMPLEMENTED, and the spec was wrong to ask.** tkinter cannot
+  load SVG and this project has no rasteriser (D66: pystray and pillow, and pillow
+  cannot render SVG). `ListRow`'s icon slot takes a short *text* mark. The 27 glyphs
+  remain the brand kit's, the documentation's, and any future non-tk surface's.
 
 ### What the interface is, and is not
 
@@ -263,7 +270,31 @@ about, so it is left visible rather than tidied.
 - **Import/export of settings.** `models.json` and `voices.json` are hand-editable and
   nothing more. No backup, no restore, no "export my configuration".
 
-### Widgets to build, in priority order
+### The widgets, as built (D80)
+
+`src/assistant/widgets.py`. The sections use it — seven ad-hoc button blocks and the
+tier rows collapsed into it — so the kit is load bearing rather than a parallel
+implementation.
+
+| Widget | State |
+|---|---|
+| `Button` | built — primary, secondary, ghost, destructive, plus `set_variant` |
+| `Field` | built — label above, hint below, `set_error` replaces the hint |
+| `Select` | built — native `OptionMenu`, traced so a programmatic set notifies too |
+| `Toggle` | built — a flat checkbox, label always shown |
+| `Badge` | built — `for_tier()` is the single tier→colour mapping |
+| `Meter` | built — a Canvas, stretches, clamps, always reports the figure as text |
+| `Panel` | built — 1 px `slate-line` via `highlightthickness` |
+| `ListRow` | built — 32 px, label + value + optional mark and chevron |
+| `Dialog` | built — transient, topmost, `grab_set`, idempotent `close()` |
+
+Whether it *looks* right cannot be asserted, so it was rendered and photographed. Two
+defects were visible only that way: the meter did not stretch (it drew once at a fixed
+width and never noticed being resized), and `ImageGrab` works in physical pixels while
+Tk reports logical ones, so a bbox from `winfo_rootx()` lands on the wrong window at
+any DPI scaling above 100%.
+
+### Widgets still to build, in priority order
 
 1. `Button` — primary (brass fill, `obsidian` text), secondary (`slate` fill), ghost
    (no fill), destructive (`rust` fill). Min 88 px wide.

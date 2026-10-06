@@ -3048,3 +3048,124 @@ code is 0, which it was not before either fix.
 Suite after: **1095 passed, 3 skipped, 47 subtests** (1090 before, +5). Both
 defects were found by driving the chain, and neither was in the set of things the
 handoff expected to be wrong.
+
+## D70 - A mail client that never authenticated, and a fake that hid it
+
+`email.*` is built: six tools, stdlib `imaplib`, no new dependency — which is the
+point, because Plane A is deliberately dependency-free (D66) and a mail client is
+exactly the kind of thing that arrives as a 40 MB package with its own TLS stack and
+its own idea about where credentials live. 57 of 61 tools now have executors; the
+four that do not are `reflect.*`.
+
+Two of the traps PLAN.md predicted fired and are worth recording first, because both
+were avoided by measuring rather than by being careful.
+
+### The `folder` argument, measured
+
+PLAN.md said to check `folder` / `mailbox` against the path screen. Checked:
+
+    mailbox = 'INBOX' -> allow      folder = 'INBOX'            -> DENY
+    mailbox = 'Sent'  -> allow      folder = 'Sent'             -> DENY
+    mailbox = '[Gmail]/All Mail' -> allow   folder = '[Gmail]/All Mail' -> DENY
+
+Every real IMAP mailbox name is refused, because `policy._check_paths` screens
+argument keys containing "folder" as well as "dir". So the argument is `mailbox`,
+and the registry says why. Carving "folder" out of the screen is the trade D63
+already rejected for `subdir`.
+
+There is a second-order consequence worth keeping: a test asserts that `folder` is
+*still* refused for a genuine path argument, because if the screen stopped refusing
+paths the mailbox tests would start passing for the wrong reason. D68 had two of its
+ten tests pass against broken code for exactly that shape, and the general lesson is
+now written into `HANDOFF.md` §6.
+
+### The destructive-tool example, which had to stop being a lookup
+
+`email.delete` was the last destructive T3 without an executor — which is exactly
+what two tests used as their *example* of one. Both looked the example up in the
+registry rather than naming it, so building it turned both into failures whose
+message said the real thing: *"no destructive T3 tool lacks an executor any more, so
+the case this covers is exercised by nothing."*
+
+They had already been moved twice (`package.install`, then `file.empty_recycle_bin`)
+and each move was a failure rather than a decision. **A lookup is a coincidence that
+happens to be true today.** Both now register a synthetic destructive T3 the executor
+table has never heard of, which is the *condition* rather than an instance of it, and
+which keeps reproducing as the registry grows.
+
+### The design: the credential is not a parameter
+
+No `email.*` tool takes a password, and that is the sharpest difference from every
+other tool in the project. A password that arrives as a tool argument is a password
+that reaches the audit chain — append-only, hash-chained, the most-read file here.
+`_redact` would catch a key containing "password", but the answer is that the
+credential is never an argument: it lives in `state/email.json` or
+`LOCALAIZED_EMAIL_PASSWORD`, is held in `EmailConfig`, and `describe()`/`__repr__` omit
+it. Three tests assert this in layers — the declaration, the log, and the repr — because
+"no tool declares a credential" is invisible everywhere else.
+
+Two related decisions:
+
+- **`email.delete` files the message before it expunges it.** IMAP offers no undo:
+  `\Deleted` + `EXPUNGE` is gone and the only copy is the client's. Fetching first is
+  what makes the word mean here what it means in `file.delete`, and the result says so
+  honestly — `recoverable: True` *and* "gone from the mail store", because a preview
+  that claimed only the first would be describing a weaker action than the one taken.
+- **A precheck runs before the gate.** Found by a test asserting a header injection
+  would be refused: `email.send` with a newline in `to` was refused by the *preview*
+  ("cannot send") while the request still came back with a confirmation id and a
+  dialog for the user to approve. `op_tool_call` resolves the executor before CONFIRM
+  precisely so nobody approves a no-op, and it did not cover a call that is malformed.
+  So `_PRECHECKS` exists, and the refusal is audited with a reason — "the assistant
+  tried to send to an injected address and was stopped" is a fact worth having.
+
+### What the real server found that no fake could
+
+`tests/test_email_live.py` runs an actual IMAP4rev1 server on a real localhost socket:
+greeting, CAPABILITY, LOGIN, LIST, SELECT/EXAMINE, SEARCH, FETCH with genuine `{n}`
+literals, STORE, EXPUNGE, APPEND, LOGOUT. `imaplib` parses it. It found four bugs,
+every one of which the fake-based suite reported green:
+
+1. **The client never authenticated at all.** `_imap_connect` returned a connection
+   and issued SELECT; every IMAP server requires LOGIN first, so production answered
+   `SEARCH illegal in state AUTH`. It survived because each fake's `connect` did its
+   own login — the seam was hiding the absence. The first version of the live test's
+   connector did the same thing and reproduced the hiding, which is how the shape
+   became obvious.
+2. **`MailAuthError` never fired.** `imaplib` raises a bare `IMAP4.error` when a
+   server answers NO to LOGIN; the `("OK"|"NO", data)` pair a fake returns is a shape
+   `imaplib` produces only when *it* is the parser. So `_check` — and the whole
+   distinction between "wrong password" and "network is down", which is the entire
+   reason the class exists — was unreachable in production while three fake-based tests
+   asserted it worked.
+3. **`append()` rejected the date.** IMAP's date_list is `dd-Mon-yyyy`, and `imaplib`
+   raises `ValueError: date_time not of a known type` for anything that is not an aware
+   `datetime` or a fully quoted string. Passing the message's own RFC 2822 `Date`
+   header is the obvious mistake. Now an aware `datetime`, so `imaplib` formats it and
+   no locale-dependent `%b` can produce "Mär".
+4. **A `{n}` literal needs a `+ go ahead` first.** RFC 3501: the server answers a
+   command line ending in a literal with a continuation request, and only then does the
+   client send the bytes. Without it `imaplib` sits in `_get_response()` and the call
+   times out — which is what the first version of the test server did.
+
+TLS is not exercised, and that is stated in the module rather than implied: a test
+server needs a certificate, a certificate needs a crypto dependency, and this project
+has none by choice. The connector is injected; everything above the socket is genuine.
+
+### The fakes, and one of their own bugs
+
+`test_email_ops.py` uses a `FakeIMAP` that returns wire-shaped responses. It earned
+its keep by proving the logic and by catching a falsy-default in itself:
+`dict(messages or {"7": ...})` means an **empty** dict is falsy, so
+`FakeIMAP(messages={})` silently became a mailbox holding one message — and the test
+asserting "an empty mailbox reads as no mail" was asserting against a fixture that
+could not be empty. The same shape as D63: a default that is wrong for exactly the
+case you construct it for. `is None` is the only check that means what it looks like.
+
+Eight mutations were applied to `email.py`, `daemon.py` and `tools.py` to confirm the
+36 tests are load-bearing. All eight fail at least one test, including the one that
+renames `mailbox` back to `folder`.
+
+Suite after: **1138 passed, 3 skipped, 47 subtests** (1131 before, +43 across two
+files). Still no destructive T3 tool without an executor, and that is now a
+*statement* rather than a coincidence.

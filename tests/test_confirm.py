@@ -471,30 +471,40 @@ def test_a_grant_expires_on_its_own(dg, sandbox):
 
 
 # ------------------------------------------------- 5. T3 without an executor never asks
-def _an_unrunnable_destructive_tool() -> str:
-    """A destructive T3 tool with no executor, *found* rather than named.
+def _an_unrunnable_destructive_tool(dg) -> str:
+    """A destructive T3 tool with no executor — **constructed**, not found.
 
-    This example has already moved twice. It was `package.install`, then
-    `file.empty_recycle_bin`, and each time one of them gained an executor and
-    quietly stopped being an example - the test failed, which is how the moves
-    were noticed, but the fix was always to point at the next one. Naming a
-    third would only buy time.
+    This example was looked up in the registry, and that was a mistake that cost
+    three test runs. It was `package.install`, then `file.empty_recycle_bin`, then
+    `email.delete`; each time one of them gained an executor and quietly stopped
+    being an example, and the test failed for a reason that had nothing to do with
+    what it tests. The last failure said so plainly, and it was right: with
+    `email.delete` built, every destructive T3 tool can now run, so a lookup finds
+    nothing and the property goes unexercised — not because it is false, but
+    because nothing in the registry happens to have it today.
 
-    The property is what is under test, so the test looks the property up. And
-    if every destructive tool can now run, that is worth being told plainly
-    here, rather than discovering later that no test covers the case at all.
+    The property is "a destructive T3 with no executor must fail before the
+    dialog". That is a statement about `op_tool_call`, which looks the executor up
+    in `Daemon._EXECUTORS` and the tier up in the gate. Registering a spec the
+    executor table has never heard of reproduces the condition exactly, and keeps
+    reproducing it as the registry grows — which is the difference between a test
+    that covers a property and one that covers a coincidence.
+
+    The name is prefixed so it cannot collide with a real tool, and it is
+    registered rather than monkeypatched so the gate and `tool_check` see the same
+    spec the daemon would.
     """
+    from assistant.policy import ToolSpec, Tier
     from assistant.tools import ALL_TOOLS
 
-    found = [s.name for s in ALL_TOOLS
-             if s.destructive and s.tier.name == "IRREVERSIBLE"
-             and s.name not in D.Daemon._EXECUTORS]
-    assert found, (
-        "no destructive T3 tool lacks an executor any more, so the case this "
-        "section covers is exercised by nothing. Either build one that cannot "
-        "run, or delete this section and say in the commit message that the "
-        "property is now vacuous.")
-    return found[0]
+    name = "test.only.unrunnable_destructive"
+    assert name not in ALL_TOOLS, "a real tool took the test's name"
+    assert name not in D.Daemon._EXECUTORS, "the test's tool must have no executor"
+    dg.gate.register(
+        ToolSpec(name, Tier.IRREVERSIBLE, "a destructive tool with no executor",
+                 destructive=True, parameters={"path": {"type": "str"}})
+    )
+    return name
 
 
 def test_a_destructive_tool_without_an_executor_never_asks(dg):
@@ -504,10 +514,10 @@ def test_a_destructive_tool_without_an_executor_never_asks(dg):
     theatre: the approval would be recorded, and then nothing would happen. It
     has to fail before the dialog.
 
-    Which tool makes the point is looked up rather than named - see
-    `_an_unrunnable_destructive_tool` for why.
+    The tool is constructed rather than found - see `_an_unrunnable_destructive_tool`
+    for why that changed, and why it is not merely a tidiness point.
     """
-    res = ask(dg, _an_unrunnable_destructive_tool())
+    res = ask(dg, _an_unrunnable_destructive_tool(dg))
     assert res["ok"] is False
     assert res.get("not_implemented") or res["result"].get("not_implemented"), res
     assert dg._pending == {}, "nothing may be left pending for a tool that cannot run"
@@ -519,12 +529,16 @@ def test_a_destructive_tool_without_an_executor_never_asks(dg):
 def test_the_gap_stays_visible_in_status(dg):
     """A tool that cannot run must still be *registered*, or the gap is invisible."""
     status = call(dg, "status")["result"]
-    unrunnable = _an_unrunnable_destructive_tool()
+    unrunnable = _an_unrunnable_destructive_tool(dg)
     assert unrunnable not in status["tools_executable"]
     # tools_registered is a count; tools_executable is the list of names.
     assert isinstance(status["tools_registered"], int)
     assert isinstance(status["tools_executable"], list)
-    assert status["tools_registered"] > len(status["tools_executable"])
+    # Registered tools outnumber executable ones while any build gap remains.
+    assert status["tools_registered"] > len(status["tools_executable"]), (
+        "every registered tool can now run; assert what is left to report rather "
+        "than a comparison that will stop meaning anything"
+    )
 
 
 # -------------------------------------------------------------------- 6. D33 quarantine

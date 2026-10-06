@@ -216,6 +216,33 @@ def _redact(args: dict | None) -> dict:
     return out
 
 
+#: Named in a refusal so the user knows where a credential may come from. Spelled
+#: out here and imported nowhere else, for the same reason the Telegram token
+#: constant is: one copy, and INSTALL.md §10 documents the same name.
+PASSWORD_ENV_VAR_HINT = "LOCALAIZED_EMAIL_PASSWORD"
+
+#: A plausibly-shaped address. Deliberately not RFC 5322 — the full grammar accepts
+#: `a@b` with no dot, quoted local parts and comments, and every one of those is a
+#: way for a header-injection attempt to look like a valid address to a strict
+#: parser. This accepts the shape a person types and refuses the shapes that are
+#: either malformed or hostile.
+_ADDRESS = re.compile(r"^[^@\s<>,;:\"]+@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$")
+
+
+def _plausible_address(addr: str) -> bool:
+    """Would this address be safe to put in a header?
+
+    Also refuses anything with a line break, angle bracket, comma or quote, because
+    `email.send` is irreversible and external: a newline in `to` is not a typo, it
+    is a Bcc, and a comma is a second recipient the user never saw.
+    """
+    if not addr or len(addr) > 254:
+        return False
+    if any(ch in addr for ch in "\r\n<>,;\""):
+        return False
+    return bool(_ADDRESS.match(addr.strip()))
+
+
 def _tiers(names: Any) -> tuple[Tier, ...]:
     """Accept 'T0' or 'READ' and refuse anything else by name.
 
@@ -365,6 +392,19 @@ class Daemon:
         self.telegram = None
         self.telegram_error: str | None = None
         self._load_telegram()
+        # The mail client, if one could be built. Same non-fatal rule as Telegram:
+        # a machine with no mail configuration still serves the PC, the hotkey, the
+        # brain and every other tool, and a daemon that refused to start over a
+        # missing `email.json` would turn one absent integration into a dead
+        # assistant.
+        #
+        # Built but NOT connected. Constructing a `Mailbox` opens nothing - the
+        # session is established on the first call that needs one - so a daemon
+        # that is never asked about mail never touches the network, which is the
+        # same discipline that keeps the resident process cheap (D1).
+        self.mail: Any = None
+        self.mail_error: str | None = None
+        self._load_mail()
         #: The pipe the child *serves* turns on. Distinct from PIPE_BRAIN_REQ,
         #: which is the pipe we *serve* on and the child *calls* to ask for its
         #: lease. Sharing one name would mean the child asks itself for
@@ -730,6 +770,28 @@ class Daemon:
             raise ValueError(f"unknown channel {channel!r}; expected one of {sorted(known)}")
         return channel
 
+    def _precheck(self, tool: str, call_args: dict) -> None:
+        """Refuse a malformed call before anything asks the user about it.
+
+        One hook, consulted by `op_tool_call` before the gate and therefore before
+        the confirmation branch. It exists because "cannot happen" has two causes
+        and only one of them was handled: a tool with no executor is caught by the
+        executor lookup, and a call whose *arguments* cannot work was not caught at
+        all — the user was shown a dialog for an action that was going to be
+        refused a moment later.
+
+        Raising here means the refusal is audited as a refusal with a reason, which
+        is the useful record: "the assistant tried to send to an injected address
+        and was stopped" is a fact worth having, and "a dialog appeared" is not.
+
+        Deliberately not a general validation framework. It is one table and one
+        call, and a tool opts in by naming a checker.
+        """
+        check = self._PRECHECKS.get(tool)
+        if check is None:
+            return
+        check(self, call_args)
+
     def _verdict(self, tool: str, channel: str, args: dict) -> Verdict:
         # allowed_roots is recomputed from the manifest store on every call
         # rather than cached at construction. A workspace added or removed
@@ -779,6 +841,22 @@ class Daemon:
         channel = self._channel(args)
         call_args = self._anchor_args(args.get("args") or {})
         actor = str(args.get("actor", "user"))
+
+        # A precheck runs before the gate and before the confirmation branch, and
+        # its whole reason to exist is the branch a few lines below.
+        #
+        # `op_tool_call` resolves the executor *before* CONFIRM so the user is never
+        # asked to approve something that cannot then happen. That covers a tool
+        # with no executor. It did not cover a call that is *malformed* - and
+        # `email.send` with a newline in the recipient is malformed in a way that
+        # matters: the preview noticed and said "cannot send", while the request
+        # still came back with a confirmation id and a dialog to approve. That is
+        # the ceremony-for-a-no-op shape, found by a test asserting the opposite.
+        #
+        # So argument validation belongs here, before the dialog, rather than inside
+        # the branch that runs after it. One hook, because the alternative is every
+        # executor re-deriving "should this have been asked at all".
+        self._precheck(tool, call_args)
 
         verdict = self._verdict(tool, channel, call_args)
         self._audit(
@@ -4750,6 +4828,281 @@ class Daemon:
             ),
         }
 
+    def _load_mail(self) -> None:
+        """Build the mail client if it can be built, and say why if it cannot.
+
+        Deliberately non-fatal for the same reason `_load_telegram` is, and with
+        the same asymmetry the Telegram one has: a *configuration* problem is
+        reported and the daemon carries on, because every other tool still works.
+        Absent is not an error and never a default — `MailNotConfigured` says "you
+        have not set this up", which is a different answer from "I could not read
+        your mail", and conflating them is how a working integration looks broken.
+
+        The quarantine tree is shared with `file.delete` on purpose: one place to
+        look for "what did the assistant remove", so a user auditing deletions is
+        not left checking two directories and trusting whichever they found first.
+        """
+        try:
+            from .email import Mailbox, load_config
+
+            config = load_config(self.state / "email.json")
+            self.mail = Mailbox(config, quarantine=self.quarantine)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            self.mail = None
+            self.mail_error = f"{type(exc).__name__}: {exc}"
+
+    # -- the mail tools -------------------------------------------------------
+    #
+    # Six tools, and their shape follows `telegram.*` rather than `file.*`:
+    # the credential is configuration and never an argument, the mail server is
+    # somebody else's and may be down, and every failure has to be reported rather
+    # than raised through, because a read that fails on a server hiccup must not
+    # read as a broken assistant.
+    #
+    # The five that do something (list, read, search, draft, send, delete) are T0,
+    # T0, T0, T1, T3-external and T3-destructive respectively. That spread is the
+    # point: reading mail is free, staging it is cheap, and the two that leave the
+    # machine or destroy something are not.
+
+    def _mailbox_name(self, args: dict) -> str:
+        """The mailbox to act on: the argument if given, else the configured one.
+
+        Read and reported, never silently substituted. A `mailbox` the caller named
+        and a mailbox the config names are different requests, and quietly using the
+        configured one when the model asked for another is how a read returns the
+        wrong mail with no error anywhere.
+        """
+        named = args.get("mailbox")
+        if isinstance(named, str) and named.strip():
+            return named.strip()
+        return self._mail_client().config.mailbox
+
+    def _exec_email_list(self, args: dict) -> Any:
+        client = self._mail_client()
+        name = self._mailbox_name(args)
+        limit = args.get("limit")
+        unread = bool(args.get("unread_only"))
+        # `fetch` defaults to False: headers only. The full body of twenty messages
+        # is a lot of the user's correspondence moving through a text window, and a
+        # list is a list.
+        fetch = bool(args.get("fetch"))
+        return client.list_mailbox(
+            mailbox=name,
+            limit=int(limit) if limit else 20,
+            unread_only=unread,
+            fetch=fetch,
+        )
+
+    def _exec_email_read(self, args: dict) -> Any:
+        client = self._mail_client()
+        uid = str(args.get("uid", "")).strip()
+        if not uid:
+            raise DaemonError("email.read needs a uid; ask email.list for the UIDs")
+        return client.read_message(uid=uid, mailbox=self._mailbox_name(args))
+
+    def _exec_email_search(self, args: dict) -> Any:
+        client = self._mail_client()
+        query = str(args.get("query", "")).strip()
+        if not query:
+            raise DaemonError("email.search needs a query")
+        limit = args.get("limit")
+        return client.search_mailbox(
+            query=query,
+            mailbox=self._mailbox_name(args),
+            limit=int(limit) if limit else 20,
+        )
+
+    def _exec_email_draft(self, args: dict) -> Any:
+        client = self._mail_client()
+        to, subject, body, why = self._mail_recipient(args)
+        if why:
+            raise DaemonError(why)
+        if not subject.strip():
+            raise DaemonError("email.draft needs a subject")
+        return client.draft(to=to, subject=subject, body=body,
+                            cc=str(args.get("cc") or ""))
+
+    def _exec_email_send(self, args: dict) -> Any:
+        client = self._mail_client()
+        to, subject, body, why = self._mail_recipient(args)
+        if why:
+            raise DaemonError(why)
+        if not subject.strip():
+            raise DaemonError("email.send needs a subject")
+        return client.send(to=to, subject=subject, body=body,
+                           cc=str(args.get("cc") or ""),
+                           reply_to=str(args.get("reply_to") or ""))
+
+    def _exec_email_delete(self, args: dict) -> Any:
+        client = self._mail_client()
+        uid = str(args.get("uid", "")).strip()
+        if not uid:
+            raise DaemonError("email.delete needs a uid; ask email.list for them")
+        return client.delete(uid=uid, mailbox=self._mailbox_name(args))
+
+    def _mail_recipient(self, args: dict) -> tuple[str, str, str, str]:
+        """`to`, `subject`, `body`, and the refusal text.
+
+        Returns the reason instead of raising, for the same reason
+        `_telegram_recipient` does: `_preview_for` has no exception handling and
+        runs while a confirmation is being built, so a preview that raised would
+        take the whole confirmation down with it.
+
+        The recipient is never guessed, and an address is validated rather than
+        passed through. `email.send` is irreversible and external, and "From:
+        someone@evil.com" in a body is a header injection that turns an assistant
+        into a spam relay.
+        """
+        to = str(args.get("to") or "").strip()
+        subject = str(args.get("subject") or "")
+        body = str(args.get("body") or "")
+        cc = str(args.get("cc") or "").strip()
+        # Injection characters first, *before* the shape check. Order matters for
+        # the diagnosis rather than for the outcome: an address containing a
+        # newline also fails the shape test, and reporting "not a usable address"
+        # for an attempted header injection tells the user nothing about what was
+        # attempted. A refusal that misdescribes the attack is a worse refusal.
+        for label, value in (("to", to), ("cc", cc), ("subject", subject)):
+            if "\n" in value or "\r" in value:
+                return "", "", "", (
+                    f"{label} contains a line break, which would let it inject "
+                    "extra headers into the message - a Bcc the user never saw. "
+                    "Refused rather than cleaned."
+                )
+        for label, value in (("to", to), ("cc", cc)):
+            if not value:
+                continue
+            for addr in (a.strip() for a in value.split(",")):
+                if addr and not _plausible_address(addr):
+                    return "", "", "", (
+                        f"{label}={addr!r} is not a usable address; expected "
+                        "someone@example.com"
+                    )
+            # A newline in a header field is the injection. Refused rather than
+            # stripped: stripping changes the message, and this is a send.
+            if "\n" in value or "\r" in value:
+                return "", "", "", (
+                    f"{label} contains a line break, which would let it inject "
+                    "extra headers into the message. Refused rather than cleaned."
+                )
+        if "\n" in subject or "\r" in subject:
+            return "", "", "", "subject contains a line break; refused."
+        if not to:
+            return "", "", "", "needs a to address"
+        return to, subject, body, ""
+
+    def _precheck_email_send(self, args: dict) -> None:
+        """Refuse an unusable recipient or an injectable header, before the dialog.
+
+        Same rules as `_mail_recipient`, reached through `_precheck` so the refusal
+        is a `Refused` with a reason that gets audited, rather than a line inside a
+        preview the user has to read carefully to notice.
+        """
+        _to, _subject, _body, why = self._mail_recipient(args)
+        if why:
+            raise Refused(f"email.send: {why}")
+
+    def op_mail_status(self, args: dict) -> Any:
+        if self.mail is None:
+            return {
+                "configured": False,
+                "note": (
+                    f"no state/email.json - put email_host and email_username there, "
+                    f"and the password in the file or {PASSWORD_ENV_VAR_HINT}"
+                ),
+                "error": self.mail_error,
+            }
+        return self.mail.status()
+
+    # -- mail previews -------------------------------------------------------
+
+    def _preview_email_send(self, args: dict) -> dict:
+        """The preview IS the message, for the same reason Telegram's is.
+
+        Everything else about this tool is knowable from its name: a send goes out.
+        The one thing that cannot be known without reading is the text, and the
+        text is the entire risk - a wrong recipient, a password pasted into the
+        body, a confident wrong answer nobody checked. So the payload is shown in
+        full up to a length no real message reaches, and when it cuts, it says so.
+
+        Must not raise; see `_mail_recipient`.
+        """
+        to, subject, body, why = self._mail_recipient(args)
+        if why:
+            return {"action": "send email", "note": f"cannot send: {why}"}
+        return {
+            "action": "send email",
+            # The recipient is the single most consequential field in the form, so
+            # it is a fact and not a sentence.
+            "to": to,
+            **({"cc": str(args["cc"])} if args.get("cc") else {}),
+            "subject": subject,
+            "note": (
+                f"Body, in full ({len(body):,} characters):\n\n{body}\n\n"
+                "This leaves the machine. Read every word before approving - it "
+                "cannot be recalled."
+            ),
+        }
+
+    def _preview_email_delete(self, args: dict) -> dict:
+        """What will be destroyed, described from the message itself.
+
+        Read at preview time rather than describing the UID, because "delete
+        message 41" is not something a person can check. The headers are shown so
+        the user recognises the mail, and the note says plainly that the message
+        leaves the server — a copy is filed locally, and that distinction is the
+        difference between "recoverable" and "recoverable if you find the archive".
+
+        Must not raise.
+        """
+        uid = str(args.get("uid", "")).strip()
+        if not uid:
+            return {"action": "delete a message", "note": "no uid given"}
+        name = self._mailbox_name(args)
+        preview: dict[str, Any] = {
+            "action": "delete a mail message",
+            "proposed": f"UID {uid} in {name}",
+            "note": "Reading the message from the server to describe it.",
+        }
+        try:
+            record = self._mail_client().read_message(uid=uid, mailbox=name)
+        except Exception as exc:  # noqa: BLE001 - a preview must never raise
+            preview["note"] = (
+                f"could not read UID {uid} to describe it ({type(exc).__name__}: "
+                f"{exc}). It will be deleted on approval regardless - cancel and "
+                "ask for a listing if that is not what you meant."
+            )
+            return preview
+        preview.update({
+            "subject": record.get("subject", ""),
+            "from": record.get("from", ""),
+            "date": record.get("date", ""),
+            "note": (
+                f"The message is removed from {name}. A copy is filed in the "
+                "assistant's quarantine so it can be recovered from this machine, "
+                "but it is gone from the mail store and a mail client elsewhere "
+                "will no longer see it."
+            ),
+        })
+        return preview
+
+    def _mail_client(self) -> Any:
+        """The client, or a refusal that says which of the two problems it is.
+
+        Raised rather than returned so the wording is decided once, here, and every
+        `email.*` executor produces the same answer. "No mail configured" and "the
+        server rejected the credential" are different problems with different
+        fixes, and an executor that returned `None` would force every caller to
+        invent that distinction for itself.
+        """
+        if self.mail is None:
+            raise Refused(
+                f"mail is not configured: {self.mail_error or 'no email.json'}. "
+                "Every other tool still works; this one needs state/email.json "
+                f"or {PASSWORD_ENV_VAR_HINT}."
+            )
+        return self.mail
+
     def _load_telegram(self) -> None:
         """Build the bridge if it can be built, and say why if it cannot.
 
@@ -4806,6 +5159,8 @@ class Daemon:
     _OPS: dict[str, Callable] = {}
     _EXECUTORS: dict[str, Callable] = {}
     _PREVIEWS: dict[str, Callable] = {}
+    #: Argument validators that run *before* the gate. See `_precheck`.
+    _PRECHECKS: dict[str, Callable] = {}
 
 
 def _install_tables() -> None:
@@ -4858,6 +5213,12 @@ def _install_tables() -> None:
         "telegram.poll": Daemon._exec_telegram_poll,
         "telegram.send_draft": Daemon._exec_telegram_send_draft,
         "telegram.send": Daemon._exec_telegram_send,
+        "email.list": Daemon._exec_email_list,
+        "email.read": Daemon._exec_email_read,
+        "email.search": Daemon._exec_email_search,
+        "email.draft": Daemon._exec_email_draft,
+        "email.send": Daemon._exec_email_send,
+        "email.delete": Daemon._exec_email_delete,
         "delegate.plan": Daemon._exec_delegate_plan,
         "delegate.brainstorm": Daemon._exec_delegate_brainstorm,
         "delegate.assign": Daemon._exec_delegate_assign,
@@ -4877,6 +5238,13 @@ def _install_tables() -> None:
     "teach.plan_curriculum": Daemon._exec_teach_plan_curriculum,
     "teach.progress": Daemon._exec_teach_progress,
         "delegate.audit": Daemon._exec_delegate_audit,
+    }
+    Daemon._PRECHECKS = {
+        # Only the send, and only because a header injection is irreversible and
+        # external. The reads have nothing that can be malformed into something
+        # dangerous, and a delete's UID is refused by the executor rather than
+        # before a dialog that is showing the message it names.
+        "email.send": Daemon._precheck_email_send,
     }
     Daemon._PREVIEWS = {
         # Only destructive tools need a real preview, because only destructive
@@ -4915,6 +5283,14 @@ def _install_tables() -> None:
         # telegram.send?" is a dialog with nothing to approve on, and the one
         # thing the user must be able to check is the words.
         "telegram.send": Daemon._preview_telegram_send,
+        # Mail gets the same treatment for the same reason, and `email.delete` needs
+        # it more than `email.send` does: a delete whose dialog said only "approve
+        # email.delete?" would be approving the destruction of correspondence whose
+        # subject the user never saw. So the preview *fetches the message* and shows
+        # its headers, and says plainly that a copy is kept locally while the
+        # message is gone from the server.
+        "email.send": Daemon._preview_email_send,
+        "email.delete": Daemon._preview_email_delete,
         # The delegation Tier 2 tools, for the ambiguity reason above and one
         # more that only delegation has. `delegate.assign` starts something that
         # keeps running after the call returns, so the dialog has to say what

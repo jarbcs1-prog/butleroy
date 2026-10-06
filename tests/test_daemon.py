@@ -193,23 +193,24 @@ def test_tool_check_predicts_but_never_acts_and_is_not_audited(dg: D.Daemon, wor
     # which is the case that matters: a check that reports a T3 as executable when
     # it could not run would let the user plan around a capability that is absent.
     #
-    # The example is *looked up* rather than named. It has been named three times
-    # now - `package.install`, then `file.empty_recycle_bin` - and each of those
-    # became false the day the tool it named gained an executor, so the assertion
-    # died twice for a reason that had nothing to do with what it tests. The
-    # property under test is "a destructive T3 with no executor reports
-    # executable: False", so the test asks for whatever currently has that
-    # property instead of assuming one still does.
+    # The example is *constructed*, not looked up. It was named twice - then
+    # `package.install`, then `file.empty_recycle_bin`, then `email.delete` - and
+    # each became false the day the tool it named gained an executor, so the
+    # assertion died three times for a reason that had nothing to do with what it
+    # tests. A lookup is a coincidence that happens to be true today; registering
+    # a spec the executor table has never heard of is the condition itself, and it
+    # keeps reproducing as the registry grows.
+    from assistant.policy import ToolSpec, Tier
     from assistant.tools import ALL_TOOLS
 
-    unrunnable = [s.name for s in ALL_TOOLS
-                  if s.destructive and s.tier.name == "IRREVERSIBLE"
-                  and s.name not in D.Daemon._EXECUTORS]
-    assert unrunnable, (
-        "no destructive T3 tool lacks an executor any more, so the case this "
-        "assertion covers is exercised by nothing. Build one that cannot run, "
-        "or delete the assertion and say so in the commit message.")
-    out2 = req(dg, "tool_check", tool=unrunnable[0], channel=CHANNEL_PC)
+    unrunnable = "test.only.unrunnable_destructive"
+    assert unrunnable not in ALL_TOOLS, "a real tool took the test's name"
+    assert unrunnable not in D.Daemon._EXECUTORS
+    dg.gate.register(
+        ToolSpec(unrunnable, Tier.IRREVERSIBLE, "no executor", destructive=True,
+                 parameters={"path": {"type": "str"}})
+    )
+    out2 = req(dg, "tool_check", tool=unrunnable, channel=CHANNEL_PC)
     # The tier verdict still comes back, and it is still right: a tool that
     # cannot run is not thereby safe. Only `executable` flips.
     assert out2["result"]["would"] == "confirm"

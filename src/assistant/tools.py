@@ -132,12 +132,53 @@ MESSAGING_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("telegram.poll", Tier.READ, "Read incoming Telegram updates"),
     ToolSpec("telegram.send_draft", Tier.REVERSIBLE_WRITE, "Stage a Telegram message for review"),
     ToolSpec("telegram.send", Tier.IRREVERSIBLE, "Send a Telegram message", external=True),
-    ToolSpec("email.list", Tier.READ, "List mail messages"),
-    ToolSpec("email.read", Tier.READ, "Read a mail message"),
-    ToolSpec("email.search", Tier.READ, "Search mail"),
-    ToolSpec("email.draft", Tier.REVERSIBLE_WRITE, "Write a draft, never sends"),
-    ToolSpec("email.send", Tier.IRREVERSIBLE, "Send an email", external=True),
-    ToolSpec("email.delete", Tier.IRREVERSIBLE, "Delete a mail message", destructive=True),
+    # The mailbox argument is `mailbox`, never `folder`, and that is measured
+    # rather than preferred. `policy._check_paths` screens any string argument
+    # whose key contains "dir" *or* "folder", so every real IMAP mailbox name is
+    # refused as a path outside every approved root:
+    #
+    #     mailbox = 'INBOX' -> allow     folder = 'INBOX' -> DENY
+    #     mailbox = 'Sent'  -> allow     folder = 'Sent'  -> DENY
+    #     mailbox = '[Gmail]/All Mail' -> allow  folder = ... -> DENY
+    #
+    # Carving "folder" out of the screen is the alternative and it is the trade
+    # D63 already rejected for `subdir`: a hole in the rule is still a hole, and a
+    # rule the model cannot express is not a rule.
+    #
+    # No credential argument anywhere in this group. A password that arrives as a
+    # tool argument is a password that lands in the append-only audit chain, and
+    # `email.read`'s body plus `email.send`'s words are exactly the arguments a
+    # preview must be able to show in full. The password lives in
+    # `state/email.json` or `LOCALAIZED_EMAIL_PASSWORD` and is never a parameter.
+    ToolSpec("email.list", Tier.READ, "List messages in a mailbox",
+             parameters={"mailbox": {"type": "str", "required": False},
+                         "limit": {"type": "int", "required": False},
+                         "unread_only": {"type": "bool", "required": False},
+                         "fetch": {"type": "bool", "required": False}}),
+    ToolSpec("email.read", Tier.READ, "Read one message by UID",
+             parameters={"uid": {"type": "str"},
+                         "mailbox": {"type": "str", "required": False}}),
+    ToolSpec("email.search", Tier.READ, "Search a mailbox",
+             parameters={"query": {"type": "str"},
+                         "mailbox": {"type": "str", "required": False},
+                         "limit": {"type": "int", "required": False}}),
+    # T1 because nothing irreversible happens: a draft sits in the Drafts folder
+    # until a human opens it and clicks send. Labelling it T3 would teach the user
+    # to approve dialogs reflexively, which is the cost D32 is about.
+    ToolSpec("email.draft", Tier.REVERSIBLE_WRITE,
+             "Write a draft to the Drafts folder; never sends",
+             parameters={"to": {"type": "str"}, "subject": {"type": "str"},
+                         "body": {"type": "str"},
+                         "cc": {"type": "str", "required": False}}),
+    ToolSpec("email.send", Tier.IRREVERSIBLE, "Send an email", external=True,
+             parameters={"to": {"type": "str"}, "subject": {"type": "str"},
+                         "body": {"type": "str"},
+                         "cc": {"type": "str", "required": False},
+                         "reply_to": {"type": "str", "required": False}}),
+    ToolSpec("email.delete", Tier.IRREVERSIBLE, "Delete a mail message",
+             destructive=True,
+             parameters={"uid": {"type": "str"},
+                         "mailbox": {"type": "str", "required": False}}),
 )
 
 # --------------------------------------------------------------------------

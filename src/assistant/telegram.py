@@ -40,6 +40,7 @@ shop, and T2 and T3 queue until you are back.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -101,7 +102,8 @@ class TelegramConfig:
     token in a log is a token in a file somebody will later paste into a chat.
     """
 
-    def __init__(self, token: str, allowed_chat_ids: tuple[int, ...]) -> None:
+    def __init__(self, token: str, allowed_chat_ids: tuple[int, ...], *,
+                 token_source: str = "unknown") -> None:
         if not token or ":" not in token:
             raise TelegramError("telegram_bot_token is missing or malformed")
         if not allowed_chat_ids:
@@ -113,38 +115,92 @@ class TelegramConfig:
             )
         self._token = token
         self.allowed_chat_ids = tuple(int(c) for c in allowed_chat_ids)
+        # Where the token came from. Not a secret - the *fact* that this machine
+        # holds one in plaintext is the useful part, and a credential nobody
+        # thinks about is one that stays on a disk for four years.
+        self._token_source = token_source
 
     def allows(self, chat_id: int | None) -> bool:
         return chat_id is not None and int(chat_id) in self.allowed_chat_ids
 
     def describe(self) -> dict[str, Any]:
-        """Everything except the token. This is what `status` is allowed to show."""
+        """Everything except the token. This is what `status` is allowed to show.
+
+        `token_source` is safe precisely because it names the *location* and never
+        the value. A test renders this dict, `repr()` and `str()` together and
+        asserts the token appears in none of them, because the leak that actually
+        happens is the one through `__repr__`.
+        """
         return {
             "api_host": API_HOST,
             "allowed_chat_ids": list(self.allowed_chat_ids),
             "long_poll_s": LONG_POLL_S,
+            "token_source": self._token_source,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - trivial, but load-bearing
         return f"<TelegramConfig {len(self.allowed_chat_ids)} chat id(s), token hidden>"
 
 
+#: The environment variable that may carry the token instead of the file.
+#: Spelled out in INSTALL.md §10.
+TOKEN_ENV_VAR = "LOCALAIZED_TELEGRAM_TOKEN"
+
+
 def load_config(path: Path) -> TelegramConfig:
-    """Read `state/telegram.json`. Raises rather than defaulting.
+    """Read the bridge's configuration. Raises rather than defaulting.
 
     A bridge that starts with no allowlist and quietly ignores everything looks
     identical to a working bridge with nobody talking to it, and the first is a
     bug while the second is a Tuesday.
+
+    The token may come from `LOCALAIZED_TELEGRAM_TOKEN` instead of the file, so
+    that the credential need not exist on disk at all. The allowlist always comes
+    from the file: it is configuration rather than a secret, and it belongs
+    somewhere a human edits it.
+
+    An environment token that is set but malformed is **refused**, not ignored.
+    Silently falling back to the file would make a typo in a variable look
+    exactly like one that worked, and the rotated credential would keep being the
+    old one. An environment token that is set to the empty string *is* ignored,
+    because a cleared variable is a recoverable misconfiguration and refusing it
+    would break a machine that had been working an hour ago.
     """
+    env_token = os.environ.get(TOKEN_ENV_VAR, "")
+    if env_token and ":" not in env_token:
+        raise TelegramError(
+            f"{TOKEN_ENV_VAR} is set but malformed - a Telegram bot token "
+            f"contains ':'. Refusing rather than silently falling back to "
+            f"{path}, so a typo cannot look like it worked."
+        )
+
     if not path.exists():
+        if env_token:
+            # The allowlist has nowhere to live without the file, and an empty
+            # one is refused at construction for a good reason.
+            raise TelegramError(
+                f"no telegram configuration at {path}, and {TOKEN_ENV_VAR} "
+                f"carries only the token. The file is still required for "
+                f"telegram_allowed_chat_ids."
+            )
         raise TelegramError(f"no telegram configuration at {path}")
+
     data = json.loads(path.read_text(encoding="utf-8"))
     try:
-        token = data["telegram_bot_token"]
         ids = data["telegram_allowed_chat_ids"]
     except KeyError as exc:
         raise TelegramError(f"{path} is missing {exc.args[0]!r}") from None
-    return TelegramConfig(token, tuple(ids))
+
+    if env_token:
+        return TelegramConfig(env_token, tuple(ids), token_source=TOKEN_ENV_VAR)
+    try:
+        token = data["telegram_bot_token"]
+    except KeyError as exc:
+        raise TelegramError(
+            f"{path} is missing {exc.args[0]!r}, and {TOKEN_ENV_VAR} is not set"
+        ) from None
+    return TelegramConfig(token, tuple(ids),
+                          token_source=f"{path} (plaintext on disk)")
 
 
 class TelegramBridge:

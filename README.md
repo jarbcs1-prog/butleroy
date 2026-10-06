@@ -6,9 +6,10 @@ A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs 
 
 | File | What it is |
 |------|------------|
-| **DECISIONS.md** | 21 numbered decisions with rationale and evidence. v1 is in git history. |
+| **DECISIONS.md** | 66 numbered decisions with rationale and evidence. v1 is in git history. |
 | **ARCHITECTURE.md** | Four planes, the VRAM arbiter, authority tiers, memory design |
 | **PLAN.md** | Seven phases with measurable gates |
+| **INSTALL.md** | How to install it. **Read §3 first** — one step is mandatory and counter-intuitive |
 | `AI_Assistant_Local.md` | The original source document. **Superseded** — retained for provenance only |
 
 ## The governing constraint
@@ -48,9 +49,12 @@ RTX 3060 12 GB · Ryzen 5 5600G (6c/6t) · 32 GB DDR4 · ~500 GB NVMe · Python 
 ```
 python -m assistant            # tray icon, Ctrl+Alt+Space, prompt window
 python -m assistant --check    # preflight only, no display needed
+locala --check                 # same, once installed
+verify_install.py              # prove the install actually works
 ```
 
-**Next:** the daemon survives restarts (D64) and one command starts the whole
-product (D65). Outstanding before it is production-ready: an install path and
-`INSTALL.md`, autostart, then `email.*` (6 tools) and `reflect.*` (4). See
-`PLAN.md` → "Immediate next action".
+**Next:** the daemon survives restarts (D64), one command starts the whole product
+(D65), and it installs and verifies (D66). Outstanding before it is
+production-ready: autostart is documented but not yet exercised across a real
+logon, then `email.*` (6 tools) and `reflect.*` (4). See `PLAN.md` →
+"Immediate next action".

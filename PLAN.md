@@ -521,6 +521,15 @@ for real and released on stop, measured from a second process
 window appearing correctly both need eyes on the screen. Recorded in D65 rather
 than asserted as passing.
 
+**It installs and verifies now (D66).** `pyproject.toml`, `INSTALL.md`, and
+`verify_install.py`, which exits 0 only if all seven checks pass — including one
+that *loads a model and generates a token*, because the prebuilt AVX-512 wheel
+imports cleanly and only faults on execution, so a verifier that stopped at the
+import would call a broken install healthy. `llama-cpp-python` is deliberately
+not a plain dependency and a test enforces it. `uv pip install -e .` resolves 4
+packages in 2.9 s because Plane A is pure stdlib. The Telegram token may now come
+from `LOCALAIZED_TELEGRAM_TOKEN` so it need never touch disk.
+
 **The real gap is breadth, not depth.** Measured, not estimated:
 
 ```

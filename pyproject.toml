@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locala"
+version = "0.3.0"
+description = "A 24/7 assistant that lives on one Windows machine, with all reasoning and all memory on-device."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Proprietary" }
+
+# The core set is deliberately almost empty.
+#
+# Plane A - the resident daemon, the policy gate, the VRAM arbiter, the audit
+# chain, the workspace manifests, the named-pipe transport - is pure stdlib.
+# That is not an accident and it is the property D1 rests on: the daemon holds
+# the gate with the model dead, which is why 24/7 costs a few hundred MB of RAM
+# and no VRAM. Anything that made `import assistant.daemon` pull in a model
+# runtime would break that argument at install time, long before anyone noticed.
+#
+# So the only third-party things the always-on process needs are the tray icon
+# and the image it draws itself. `pip install locala` is small and instant, and
+# it cannot silently become a multi-gigabyte download.
+#
+# *** llama-cpp-python is NOT here, and must not be added. ***
+# The prebuilt wheel on PyPI ships a ggml-cpu.dll compiled with AVX-512. A
+# Ryzen 5 5600G is Zen 3 and has none of it, so that wheel imports cleanly and
+# then dies with STATUS_ILLEGAL_INSTRUCTION on the first real instruction. A
+# plain dependency here would be a runtime that cannot execute on this machine,
+# installed by the one command a new user is told to run. It lives in the
+# `brain` extra and is built FROM SOURCE with GGML_NATIVE=OFF - see INSTALL.md
+# and DECISIONS.md D25. `python verify_install.py` proves the result.
+dependencies = [
+    "pystray>=0.19",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+# Plane B. The local brain. Needs the source build - see the note above.
+brain = [
+    "llama-cpp-python==0.3.35",
+]
+# Plane D speech: faster-whisper for STT on CPU/int8, piper for TTS.
+voice = [
+    "numpy>=1.26",
+    "sounddevice>=0.4",
+    "faster-whisper>=1.0",
+    "piper-tts>=1.2",
+]
+# The wake word. Built and measured, then abandoned on this machine (D57), but
+# the code is kept because the same scorer is what proved it does not fire here.
+wakeword = [
+    "openwakeword>=0.6",
+    "onnxruntime>=1.17",
+]
+test = [
+    "pytest>=8",
+]
+
+[project.scripts]
+locala = "assistant.launcher:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# The package is imported from src/ rather than installed, because the install
+# of record for this project is INSTALL.md, not pip. Without this the suite
+# fails at collection with "No module named assistant" on a fresh checkout -
+# which is how 1025 tests once looked like a broken environment rather than a
+# missing PYTHONPATH.
+pythonpath = ["src"]
+testpaths = ["tests"]

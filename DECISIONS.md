@@ -2447,3 +2447,130 @@ Suite after: **1047 passed, 3 skipped, 47 subtests.** Plane A's load-bearing
 invariant still holds - importing `daemon`, `launcher`, `tray` and `overlay`
 pulls in no llama.cpp, no torch, no onnxruntime and no faster-whisper, so the
 assistant is still a few hundred MB with no VRAM (D1).
+
+---
+
+## D66 - The install path was the last place D25 could still bite
+
+Everything ran, and there was no way to install any of it. No `pyproject.toml`,
+no requirements file, no `INSTALL.md`, and a suite that failed at collection on a
+fresh checkout with `No module named assistant` unless `PYTHONPATH` was set by
+hand. The whole thing was runnable from one directory, by one person, who
+happened to have set it up.
+
+### The trap, and why a comment was not enough
+
+The obvious way to write a manifest is also the dangerous one. Declare
+`llama-cpp-python` as a dependency and `pip install .` fetches the prebuilt
+wheel - the one whose `ggml-cpu.dll` is compiled with AVX-512 and dies with
+`STATUS_ILLEGAL_INSTRUCTION` on this Ryzen 5 5600G. So a dependency line would
+have been a runtime that cannot execute on this machine, installed by the exact
+command a new user is told to run, failing later inside llama.cpp with a message
+that names nothing about the install.
+
+The tempting fix is a comment in the file. D36 is the argument against that: a
+constraint that is only written down is a constraint that something can
+overwrite, and the test suite is the only thing in this project that has never
+quietly stopped working. So `tests/test_install.py` asserts `llama-cpp-python`
+is **not** in `[project].dependencies`, and fails with a message that says where
+it does belong. The comment explains it to the next reader; the test prevents it.
+
+### The core dependency set is almost empty, and that is the architecture
+
+`pystray` and `pillow`. That is the whole thing, and it follows from D1 rather
+than from minimalism: Plane A is pure stdlib, which is the *reason* a 24/7
+daemon costs a few hundred MB and no VRAM. Measured per module before writing a
+single line:
+
+| Module | Third-party |
+|---|---|
+| `daemon`, `policy`, `ipc`, `audit`, `arbiter`, `manifest`, `grammar`, `obsidian`, `delegate` | **none** |
+| `tray` | `pystray`, `PIL` |
+| `overlay` | `tkinter` (stdlib) |
+| `brain`, `brain_server` | `llama_cpp` |
+| `speech` | `faster_whisper`, `piper`, `numpy` |
+| `audio` | `openwakeword`, `sounddevice`, `numpy` |
+
+So `locala` installs in **2.9 s**, resolves 4 packages, and cannot quietly become
+a multi-gigabyte download for a tray icon. The heavy planes are extras (`brain`,
+`voice`, `wakeword`), each independently skippable, and the tests assert
+torch/faster-whisper/onnxruntime/librosa stay out of the core - because an
+install that pulled them in would break D1 at install time, long before anyone
+noticed.
+
+### A verifier that imports is not a verifier
+
+`verify_install.py` replaces a 6-line `check_install.py` that printed versions and
+stopped. Its check that matters is `inference`, and the reason it exists is the
+same trap: **the AVX-512 wheel imports perfectly and only faults on first
+execution.** A verifier that stopped at `import llama_cpp` would report a broken
+install as healthy.
+
+```
+[ ok ] python     3.11.14, 64-bit
+[ ok ] imports    assistant.* imports; no model runtime loaded
+[ ok ] no_ports   no TCP listener; transport is named pipes only
+[ ok ] isa        ggml-cpu.dll: 10/984 EVEX-shaped (1.02%), under the 10% limit
+[ ok ] daemon     preflight ok: 26 audit records verify, no listening ports
+[ ok ] models     5 model file(s), 13.04 GB
+[ ok ] inference  Qwen3.5-0.8B-Q4_0.gguf: generated 8 chars in 0.9s, 25/25 layers on GPU
+```
+
+Three things in there are decisions rather than code:
+
+1. **`isa` measures a ratio, not a count.** A `0x62` byte is also the `BOUND`
+   opcode and turns up in ordinary code and data - D25's own control DLL had
+   *more* `0x62` bytes than our build and was clean. The threshold is 10 %,
+   sitting in a gap between 76.7 % (broken) and 2.74 % (control), because a
+   threshold in the middle of a real gap is not a guess about someone else's
+   build. Tested against a synthetic EVEX library planted byte by byte, and
+   against a large library full of `0x62` bytes with none EVEX-shaped - the
+   guard is shown catching the failure mode, not merely present.
+2. **`inference` asserts on llama.cpp's own `offloaded N/N layers to GPU` line**,
+   captured by dup2'ing the real stderr, and **fails when the line is missing**
+   rather than falling back to something weaker. Partial offload is silent CPU
+   spill on six cores. `Llama.n_gpu_layers` does not exist in 0.3.35 - asking for
+   `-1` leaves `0x7FFFFFFF` on `model_params`, which is what we *requested*, not
+   what we *got*. The first draft of this file printed exactly that `None` and
+   called it a result, which is D38's shape again: it compiled, it ran, and it
+   reported nothing. `phase0_gate.py` already had the right helper; reusing it
+   beat writing a second one.
+3. **A missing model skips rather than fails.** 13 GB of weights are not shipped.
+   A verifier that failed on their absence would report a good install as broken,
+   and the user would learn to ignore it.
+
+### The credential, reduced rather than excused
+
+`state/telegram.json` held a live bot token in plaintext. It was gitignored, which
+is not the same as secret. Now `LOCALAIZED_TELEGRAM_TOKEN` may carry it, so it
+need never exist on disk; the allowlist stays in the file, because it is
+configuration rather than a credential and belongs somewhere a human edits it.
+And `describe()` reports *where the token came from* - naming the location, never
+the value - so "this machine holds a credential in plaintext" is a fact `status`
+can show rather than something nobody thinks about for four years.
+
+An environment token that is **malformed** is refused rather than ignored:
+falling back to the file would make a typo in a variable look exactly like one
+that worked, and the rotated credential would keep being the old one. An
+environment token that is **empty** is ignored, because a cleared variable is
+recoverable and refusing it would break a machine that was working an hour ago.
+
+There is deliberately **no command that writes the token.** A feature that writes
+a credential is a feature that can leak one; rotation is @BotFather plus one edit.
+
+### Two small things the suite was silently paying for
+
+- **`pythonpath = ["src"]` in `pyproject.toml`.** Until then the suite failed at
+  collection with `No module named assistant` unless `PYTHONPATH` was exported -
+  which is how 1025 tests once looked like a broken environment rather than a
+  missing setting. Now `pytest` alone works from a fresh checkout.
+- **460 KB of download logs untracked**, and `check_install.py` + `probe_cpu.py`
+  deleted as unreferenced and superseded. The two `build_phase0b*.log` files stay
+  tracked on purpose: PLAN.md cites them, and attempt 1 failing is the more
+  useful record than attempt 2 succeeding (D29). `.gitignore` now says so
+  explicitly, with a negated pattern, because `*.log` is exactly the kind of
+  rule that quietly swallows the evidence it was meant to spare.
+
+Suite after: **1068 passed, 3 skipped, 47 subtests**, with no `PYTHONPATH` set.
+`uv pip install -e .` resolves 4 packages in 2.9 s, leaves the D25 build
+untouched, and produces a working `locala` command.

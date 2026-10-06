@@ -1,5 +1,0 @@
-GET Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf - 6396325152 bytes
-GET mmproj-F16.gguf - 918166080 bytes
-VERIFIED Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf: 6396325152 bytes
-VERIFIED mmproj-F16.gguf: 918166080 bytes
-RESULT: ALL FILES VERIFIED against the Hugging Face byte counts

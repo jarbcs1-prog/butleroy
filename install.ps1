@@ -462,7 +462,17 @@ function Invoke-Verify {
         Add-Result 'verify' 'fail' "exit $code"
         return $false
     }
-    Write-Ok 'verify_install.py exit 0 - all seven checks pass'
+    # Say how many actually ran. "all seven checks pass" was left over from
+    # before brain_surface was added, so the installer claimed a count that did
+    # not match its own output - on the very run meant to prove the install
+    # trustworthy. Measured 2026-10-13.
+    $checkCount = (Select-String -Path (Join-Path $Root 'verify_install.py') `
+                    -Pattern '^\s*Check\("' -AllMatches).Count
+    if ($checkCount -gt 0) {
+        Write-Ok "verify_install.py exit 0 - all $checkCount checks pass"
+    } else {
+        Write-Ok 'verify_install.py exit 0'
+    }
     Add-Result 'verify' 'ok' 'exit 0'
     return $true
 }

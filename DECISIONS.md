@@ -4812,3 +4812,72 @@ installed. INSTALL.md was right and I was wrong, which cost two test failures
 
 A directory-existence check used to infer "is this package installed" is only
 correct when the package is a directory. For a single-module package it is not.
+---
+
+## D88 - The installer shipped a build script whose own dependency was not in it
+
+Recompiling the installer after D87 surfaced a packaging defect that no test
+could have found, because the thing missing was a file the tests never load.
+
+`butleroy.iss` shipped `build_phase0b.bat` but **not** `build_rollback.ps1`. Since
+D84 that batch does nothing except delegate its entire transaction:
+
+```
+powershell -File "%~dp0build_rollback.ps1" -Mode build -Root "%~dp0."
+```
+
+So in any installed tree the brain build dies with *cannot find
+build_rollback.ps1* - and `install_self_test.ps1` is structurally incapable of
+noticing, because it only regexes the text of install.ps1 and never runs a build.
+
+**Found by cross-checking**, not by reading: extract every filename the shipped
+scripts reference, subtract what `.iss` ships, and look at what is left. That
+found three, of which one was real:
+
+| referenced | referenced by | shipped? |
+|---|---|---|
+| `build_rollback.ps1` | `build_phase0b.bat` | **NO** - a `.ps1`, not covered by the `*.md` glob |
+| `ARCHITECTURE.md` | `install.ps1` | yes, via `Source: *.md` |
+| `PLAN.md` | `install.ps1` | yes, via `Source: *.md` |
+
+The general form: **a glob that happens to cover today's files is not a manifest.**
+`*.md` looked fine and would have kept looking fine.
+
+Note what this cost. The shipped `Butleroy-Setup-0.3.0.exe` predated D84 entirely,
+so it contained neither the transaction nor this fix. It was recompiled twice in
+this session and the size moved 3,402,640 -> 3,421,789 bytes.
+
+### Cannot verify the compiled package's contents here
+
+ISCC exits 0 and reports nothing for a missing `Source` - a missing file is a hard
+compile error, so exit 0 does mean every listed Source was found. But I could not
+*list the built archive*: `innounp` is not installed and 7-Zip 26.04 reports
+`Cannot open the file as archive`, because Inno Setup 6+ uses a compression 7-Zip
+does not read. The +19 KB size delta is consistent with the added script and is not
+proof. **Verifying the payload needs a human to run Setup.exe and look**, or
+`innounp` installed. Recorded as unverified rather than asserted.
+
+### Also: the installer claimed a check count that did not exist
+
+`install.ps1` printed *"verify_install.py exit 0 - all seven checks pass"*. There
+are eight. The line predated `brain_surface` and was never updated - so on the run
+whose entire purpose is to attest the install is trustworthy, it attested a count
+that did not match its own output one line above. It now counts the `Check(...)`
+entries in the source rather than hardcoding a number.
+
+### Full default-switch run
+
+`install.ps1 -Root G:\localaized`, no brain / voice / model / autostart:
+
+| step | result |
+|---|---|
+| venv | skipped - *"existing venv works"* |
+| package | `.` |
+| brain / models / autostart | correctly reported as not done |
+| verify_install.py | **8 passed, 0 failed, exit 0** |
+| summary | `INSTALLED.` |
+
+It also printed an honest caveat rather than claiming success: *"no brain was built,
+so the assistant cannot answer questions."* A default install therefore reports
+itself as **not usable**, which is correct - the brain is opt-in and the CPU cannot
+use the wheel (D87).

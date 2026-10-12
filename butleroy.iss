@@ -84,6 +84,12 @@ Name: "desktopshortcut"; Description: "Create a desktop shortcut"; GroupDescript
 Source: "{#InstallRoot}\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#InstallRoot}\install_self_test.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#InstallRoot}\build_phase0b.bat"; DestDir: "{app}"; Flags: ignoreversion
+; build_phase0b.bat delegates its whole transaction to this. Shipping the batch
+; without it means the brain build dies in an installed tree with "cannot find
+; build_rollback.ps1" - and nothing in install_self_test.ps1 would notice,
+; because that suite never runs a build. Found by diffing the files the shipped
+; scripts reference against this Source list, 2026-10-13 (D88).
+Source: "{#InstallRoot}\build_rollback.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#InstallRoot}\download_fast_tier.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#InstallRoot}\download_deep_tier.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#InstallRoot}\pyproject.toml"; DestDir: "{app}"; Flags: ignoreversion

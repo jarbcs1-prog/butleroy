@@ -36,3 +36,7 @@ _skbuild/
 *.log
 !build_phase0b.log
 !build_phase0b_attempt1.log
+# Inno Setup places its uninstaller in the install root, which for this
+# project IS the repo root (in-place install, policy.SELF_PATHS). These are
+# live files - deleting them breaks the uninstaller - so they are ignored,
+# never removed.

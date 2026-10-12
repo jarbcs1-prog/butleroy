@@ -40,3 +40,4 @@ _skbuild/
 # project IS the repo root (in-place install, policy.SELF_PATHS). These are
 # live files - deleting them breaks the uninstaller - so they are ignored,
 # never removed.
+unins000.*

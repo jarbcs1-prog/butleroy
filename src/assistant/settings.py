@@ -180,6 +180,33 @@ class ModelsSection(Section):
 
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
 
+        # The choice controls. Until these existed the section was a viewer: it
+        # showed which model answered `fast` and which answered `deep`, and Save
+        # re-persisted exactly what Load had read, so neither could be changed.
+        #
+        # The options are the models **already in `models/`**, not a text box for
+        # an arbitrary path. `modelconfig` stores a filename relative to
+        # `models/` on purpose - a checkout that moves must not invalidate the
+        # config - and `_SAFE_NAME` rejects anything else. A path field would be
+        # a control the daemon refuses on every keystroke. Copying a new file
+        # into `models/` is a different operation and needs an op that does not
+        # exist yet.
+        self._selectors: dict[str, Any] = {}
+        for tier in ("fast", "deep"):
+            line = tk.Frame(body, bg=c["slate"])
+            line.pack(fill="x", padx=16, pady=(4, 0))
+            self.widgets.append(line)
+            tk.Label(line, text=f"{tier} tier", fg=c["sage"], bg=c["slate"],
+                     font=("Segoe UI", 9), width=10, anchor="w").pack(side="left")
+            self.widgets.append(line.winfo_children()[-1])
+            picker = W.Select(
+                line, "", options=("",), width=52,
+                on_change=lambda value, t=tier: self._choose(t, value),
+            )
+            picker.pack(side="left", fill="x", expand=True)
+            self.widgets.append(picker)
+            self._selectors[tier] = picker
+
         row = tk.Frame(body, bg=c["slate"])
         row.pack(fill="x", padx=16, pady=(12, 14))
         self.widgets.append(row)
@@ -214,6 +241,71 @@ class ModelsSection(Section):
 
     # -- data ---------------------------------------------------------------
 
+    def _choose(self, tier: str, name: str) -> None:
+        """A tier was re-assigned in the window. Update the table Save will send.
+
+        Deliberately does not write on its own. The brand kit reserves brass for
+        things that are *acting*, and a config edit is audited at T1 - so it is
+        the Save button that puts it on the wire, and this only stages it. It also
+        refreshes the list, or the list would keep showing the old pairing beside a
+        control that already says otherwise.
+        """
+        if not name or tier not in self._tiers:
+            return
+        # A load must never register as a user edit. `Select.set_options` falls
+        # back to the first option when the current one is not offered, and that
+        # fires `on_change` through the StringVar trace - so populating the
+        # dropdowns during a load silently rewrote `fast` to the alphabetically
+        # first model on disk. It surfaced as the list showing the *deep* model
+        # for both tiers. Loading is not choosing.
+        if getattr(self, "_loading", False):
+            return
+        current = self._tiers[tier]
+        if current.get("model") == name:
+            return
+        # need_bytes is the session's lease ceiling, not a property of the model,
+        # so it is carried across untouched. Losing it would silently change what
+        # the arbiter permits.
+        self._tiers[tier] = {**current, "model": name}
+        self._say(f"{tier} tier set to {name} - press Save to apply", "brass")
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        """Redraw the list from `self._tiers`.
+
+        Split out so a staged change and a reload cannot become two different
+        renderings of the same state.
+        """
+        self.listbox.delete(0, "end")
+        for name in sorted(self._tiers):
+            tier = self._tiers[name]
+            size = self._size_of(tier.get("model", ""))
+            self.listbox.insert(
+                "end",
+                f"  {name:<6} {tier.get('model','?')}\n"
+                f"         lease {tier.get('need_bytes', 0) / 1024 ** 3:.1f} GiB"
+                f"   on disk {size / 1024 ** 3:.1f} GiB",
+            )
+
+    def _offered(self) -> list[str]:
+        """Every model on disk, as `model_config` reports them.
+
+        Tolerates both shapes the payload has taken - a list of names, and a list
+        of dicts with a name. Assuming one and being wrong empties the dropdown,
+        which reads as "there are no models" rather than as a bug.
+        """
+        names: list[str] = []
+        for entry in self._models or []:
+            if isinstance(entry, str):
+                name = entry
+            elif isinstance(entry, dict):
+                name = entry.get("name") or entry.get("model") or ""
+            else:
+                name = str(entry)
+            if name and name not in names:
+                names.append(name)
+        return sorted(names)
+
     def _load(self, call: Callable[..., dict]) -> None:
         """Ask the daemon. Never touch the file from here.
 
@@ -237,16 +329,21 @@ class ModelsSection(Section):
         self._tiers = result.get("tiers") or {}
         self._provenance = result.get("provenance", "")
 
-        self.listbox.delete(0, "end")
-        for name in sorted(self._tiers):
-            tier = self._tiers[name]
-            size = self._size_of(tier.get("model", ""))
-            self.listbox.insert(
-                "end",
-                f"  {name:<6} {tier.get('model','?')}\n"
-                f"         lease {tier.get('need_bytes', 0) / 1024 ** 3:.1f} GiB"
-                f"   on disk {size / 1024 ** 3:.1f} GiB",
-            )
+        self._refresh_list()
+
+        # Fill the two pickers. `set_options` keeps the current value when it is
+        # still offered, so a reload after a staged-but-unsaved change does not
+        # silently discard it.
+        offered = self._offered()
+        self._loading = True
+        try:
+            for tier, picker in getattr(self, "_selectors", {}).items():
+                picker.set_options(offered or ("",))
+                assigned = (self._tiers.get(tier) or {}).get("model", "")
+                if assigned and assigned in offered:
+                    picker.set(assigned)
+        finally:
+            self._loading = False
 
         self._say(self._provenance_note(), "sage" if self._provenance == "file"
                   else "amber")

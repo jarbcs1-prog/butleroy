@@ -4812,6 +4812,77 @@ installed. INSTALL.md was right and I was wrong, which cost two test failures
 
 A directory-existence check used to infer "is this package installed" is only
 correct when the package is a directory. For a single-module package it is not.
+
+---
+
+## D88 - The installer shipped a build script whose own dependency was not in it
+
+Recompiling the installer after D87 surfaced a packaging defect that no test
+could have found, because the thing missing was a file the tests never load.
+
+`butleroy.iss` shipped `build_phase0b.bat` but **not** `build_rollback.ps1`. Since
+D84 that batch does nothing except delegate its entire transaction:
+
+```
+powershell -File "%~dp0build_rollback.ps1" -Mode build -Root "%~dp0."
+```
+
+So in any installed tree the brain build dies with *cannot find
+build_rollback.ps1* - and `install_self_test.ps1` is structurally incapable of
+noticing, because it only regexes the text of install.ps1 and never runs a build.
+
+**Found by cross-checking**, not by reading: extract every filename the shipped
+scripts reference, subtract what `.iss` ships, and look at what is left. That
+found three, of which one was real:
+
+| referenced | referenced by | shipped? |
+|---|---|---|
+| `build_rollback.ps1` | `build_phase0b.bat` | **NO** - a `.ps1`, not covered by the `*.md` glob |
+| `ARCHITECTURE.md` | `install.ps1` | yes, via `Source: *.md` |
+| `PLAN.md` | `install.ps1` | yes, via `Source: *.md` |
+
+The general form: **a glob that happens to cover today's files is not a manifest.**
+`*.md` looked fine and would have kept looking fine.
+
+Note what this cost. The shipped `Butleroy-Setup-0.3.0.exe` predated D84 entirely,
+so it contained neither the transaction nor this fix. It was recompiled twice in
+this session and the size moved 3,402,640 -> 3,421,789 bytes.
+
+### Cannot verify the compiled package's contents here
+
+ISCC exits 0 and reports nothing for a missing `Source` - a missing file is a hard
+compile error, so exit 0 does mean every listed Source was found. But I could not
+*list the built archive*: `innounp` is not installed and 7-Zip 26.04 reports
+`Cannot open the file as archive`, because Inno Setup 6+ uses a compression 7-Zip
+does not read. The +19 KB size delta is consistent with the added script and is not
+proof. **Verifying the payload needs a human to run Setup.exe and look**, or
+`innounp` installed. Recorded as unverified rather than asserted.
+
+### Also: the installer claimed a check count that did not exist
+
+`install.ps1` printed *"verify_install.py exit 0 - all seven checks pass"*. There
+are eight. The line predated `brain_surface` and was never updated - so on the run
+whose entire purpose is to attest the install is trustworthy, it attested a count
+that did not match its own output one line above. It now counts the `Check(...)`
+entries in the source rather than hardcoding a number.
+
+### Full default-switch run
+
+`install.ps1 -Root G:\localaized`, no brain / voice / model / autostart:
+
+| step | result |
+|---|---|
+| venv | skipped - *"existing venv works"* |
+| package | `.` |
+| brain / models / autostart | correctly reported as not done |
+| verify_install.py | **8 passed, 0 failed, exit 0** |
+| summary | `INSTALLED.` |
+
+It also printed an honest caveat rather than claiming success: *"no brain was built,
+so the assistant cannot answer questions."* A default install therefore reports
+itself as **not usable**, which is correct - the brain is opt-in and the CPU cannot
+use the wheel (D87).
+
 ---
 
 ## D89 - The widget kit was real, correct, and completely unexercised
@@ -4910,3 +4981,74 @@ is a daemon change rather than a window change.
 
 Models, Voices, Workspaces and Advanced stand as D89 described them: read-only, or
 near enough.
+---
+
+## D91 - A committed decision entry went missing from the file, and only a whole-file test noticed
+
+`test_the_decision_numbers_are_contiguous_and_start_at_one` failed on D88. The entry
+was **committed** in 7bbe67c and verified present in that commit's blob, and it was
+**gone from the working tree** later, with D89 and D90 committed after it. The
+entry did not merely lose its heading; it vanished from the file entirely, and
+nothing noticed until a test that reads the whole log ran at the end of a long
+suite.
+
+Restored from `git show 7bbe67c:DECISIONS.md` rather than rewritten from memory,
+because a decision record is a record of what was decided, not of what I now
+remember deciding.
+
+**The general form: an identifier that a human typed is a claim, not a fact.**
+Contiguity and presence are properties of the whole file; no single entry can
+check either. And the diff between "committed" and "on disk" is where a tool that
+appears to have worked silently did not - the same class as the `Add-Content` that
+appeared to succeed while writing nothing.
+
+**The general form: a sequential identifier that is written by hand is a
+counter, not a fact.** Contiguity is a property of the file, and no single entry
+can check it; only something reading all of them can, which is exactly why that
+test exists. It is doing its job - it is the one test in this file that noticed.
+
+Restored in its chronological position rather than appended at the end, so the
+log reads in the order things were decided.
+---
+
+## D92 - Models is operable: a tier can now be reassigned from the window
+
+The first section of the rebuild, and the smallest honest version of it.
+
+`ModelsSection` built a note, a `Listbox`, a detail label and two buttons -
+`Reload` and `Save`. **`Save` re-persisted the table `_load` had just read**, so
+there was no way to alter a tier assignment at all. `tests/test_settings_models.py`
+was written first and **failed with `found 0 choice control(s)`** before a line of
+product code changed - which is the discipline the rest of this rebuild follows,
+and the direct answer to the session's recurring failure mode of tests agreeing
+with code that does the wrong thing.
+
+Now: one `W.Select` per tier, offering the models actually in `models/`, staged
+into `_tiers` on change and written by the existing `model_config_set` op. No new
+daemon surface.
+
+**It is deliberately not a path text box.** `modelconfig` stores a filename
+*relative to* `models/` so that a checkout which moves does not invalidate the
+config, and `_SAFE_NAME` rejects anything outside
+`^[A-Za-z0-9][A-Za-z0-9._- ]{0,180}\.gguf$`. A path field would be a control the
+daemon refuses on every keystroke. Copying a file into `models/` is a different
+operation and needs an op that does not exist.
+
+### A bug I introduced and caught within the same run
+
+Populating the dropdowns during `_load` rewrote the **fast** tier to the
+alphabetically first model on disk, and the list came up showing the *deep* model
+for both tiers. Cause: `Select.set_options` falls back to the first option when
+the current one is not offered, and that fires `on_change` through the `StringVar`
+trace. So **loading was registering as a user edit.**
+
+Fixed with an `_loading` guard around population, because the correct invariant is
+that a load is not a choice. Caught by an existing test -
+`test_the_tiers_are_rendered_into_the_list` - which is a reminder that the old
+suite was not worthless; it was simply silent about the affordance.
+
+`need_bytes` is carried across untouched: it is the session's lease ceiling, not
+a property of the model, and dropping it would silently change what the arbiter
+permits on the next turn. A test asserts that.
+
+Suite: **1423 passed, 3 skipped, exit 0.**

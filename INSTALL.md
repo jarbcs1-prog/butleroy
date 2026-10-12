@@ -63,11 +63,14 @@ Do not "fix" it by editing `pyvenv.cfg` while the build is running. If you ever 
 
 ## 3. Why the source build is mandatory
 
-**The prebuilt `llama-cpp-python` wheel cannot execute on this CPU.** Do not
-install it, and do not "fix" a working runtime by reinstalling.
+**There is no `llama-cpp-python` wheel to install — on PyPI or anywhere.** The
+package ships one source tarball and zero wheels (verified against the PyPI JSON
+API). So "don't install the wheel" is the easy half; the half that actually bites
+is that **naming it as a dependency makes the package manager compile it**, with
+llama-cpp-python's own defaults rather than the flags this CPU needs.
 
-The wheel ships a `ggml-cpu.dll` compiled with **AVX-512**. A Ryzen 5 5600G is
-Zen 3 and has none. The library imports perfectly and then dies with
+That build produces a `ggml-cpu.dll` compiled with **AVX-512**. A Ryzen 5 5600G
+is Zen 3 and has none. The library imports perfectly and then dies with
 `STATUS_ILLEGAL_INSTRUCTION` (`0xc000001d`) on the first real instruction — on
 CPU *and* CUDA, which is what makes it so confusing to diagnose. Measured:
 
@@ -137,7 +140,7 @@ Extras, each optional and each independently skippable:
 
 | Extra | Brings | Needed for |
 |---|---|---|
-| `brain` | `llama-cpp-python` | inference — **build step 4 still applies** |
+| `brain` | *nothing — it is a marker* | **inference, which is build step 4, not a pip install** |
 | `voice` | `numpy`, `sounddevice`, `faster-whisper`, `piper-tts` | TTS and STT on CPU |
 | `wakeword` | `openwakeword`, `onnxruntime` | the wake word (abandoned on this machine, D57) |
 | `test` | `pytest` | the suite |
@@ -145,6 +148,15 @@ Extras, each optional and each independently skippable:
 ```powershell
 uv pip install --python .venv\Scripts\python.exe -e ".[brain,voice,test]"
 ```
+
+`brain` is intentionally empty. **llama-cpp-python publishes no wheel on PyPI** —
+one source tarball, zero wheels — so listing it as a dependency does not install a
+binary, it makes `uv` **compile** it with llama-cpp-python's defaults instead of
+ours, which yields a `ggml-cpu.dll` carrying AVX-512 that this CPU cannot execute
+(76.73 % EVEX-shaped, measured). Worse, on a machine with a cold uv cache that
+install fails outright, because `install.ps1` deliberately provides no compiler —
+see D87 for the exact failure. Build it with step 4 and prove it with
+`verify_install.py`.
 
 ## 6. Models
 

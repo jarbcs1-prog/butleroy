@@ -23,24 +23,48 @@ license = { text = "Proprietary" }
 # and the image it draws itself. `pip install butleroy` is small and instant, and
 # it cannot silently become a multi-gigabyte download.
 #
-# *** llama-cpp-python is NOT here, and must not be added. ***
-# The prebuilt wheel on PyPI ships a ggml-cpu.dll compiled with AVX-512. A
-# Ryzen 5 5600G is Zen 3 and has none of it, so that wheel imports cleanly and
-# then dies with STATUS_ILLEGAL_INSTRUCTION on the first real instruction. A
-# plain dependency here would be a runtime that cannot execute on this machine,
-# installed by the one command a new user is told to run. It lives in the
-# `brain` extra and is built FROM SOURCE with GGML_NATIVE=OFF - see INSTALL.md
-# and DECISIONS.md D25. `python verify_install.py` proves the result.
+# *** llama-cpp-python is NOT here, nor in ANY extra below. ***
+# It is NOT in the core dependencies, and it is deliberately not in the `brain`
+# extra either. That extra used to list it, and listing it was a bug - see below.
+#
+# llama-cpp-python 0.3.35 publishes NO wheel on PyPI. One sdist, zero wheels
+# (checked against the PyPI JSON API). So naming it as a dependency does not
+# install a prebuilt binary; it makes the package manager COMPILE it, using
+# llama-cpp-python's own defaults and not our flags. On this machine that
+# produced a ggml-cpu.dll at 76.73% EVEX-shaped - AVX-512, which a Ryzen 5 5600G
+# (Zen 3) cannot execute. It imports cleanly and then dies with
+# STATUS_ILLEGAL_INSTRUCTION on the first real instruction.
+#
+# Worse, it broke the installer. install.ps1 runs `uv pip install -e .[brain]`
+# and deliberately does NOT initialise MSVC (install.ps1:155 - a probe that
+# initialised it would mutate the shell's environment). With no wheel to
+# download, that install has to compile, and with no compiler it fails:
+#   Running 'nmake' '-?' failed: no such file or directory
+#   CMake Error: CMAKE_C_COMPILER not set, after EnableLanguage
+# Measured on 2026-10-13, deleting .venv and reinstalling from scratch. It had
+# only ever "worked" because uv's cache held a wheel from an earlier attempt -
+# one built WITHOUT our flags, hence the AVX-512 above. install.ps1 -WithBrain
+# was structurally broken on any machine with a cold cache.
+#
+# So the single flag-controlled path is build_phase0b.bat. It calls vcvars64
+# itself, pins CMAKE_CUDA_COMPILER, and passes GGML_NATIVE=OFF, GGML_AVX512=OFF,
+# AVX2=ON and CMAKE_CUDA_ARCHITECTURES=86 - the only place those flags exist.
+# Nothing that merely names a dependency can reproduce them.
+#
+# `brain` is kept as an empty extra because install.ps1 passes `.[brain]` and a
+# missing extra is a hard error. It is a marker for "Plane B, built separately",
+# not a package list. See INSTALL.md and DECISIONS.md D25, D84, D87.
 dependencies = [
     "pystray>=0.19",
     "pillow>=10",
 ]
 
 [project.optional-dependencies]
-# Plane B. The local brain. Needs the source build - see the note above.
-brain = [
-    "llama-cpp-python==0.3.35",
-]
+# Plane B, the local brain. INTENTIONALLY EMPTY - see the long note above.
+# Do not add llama-cpp-python here. Installing it as a dependency compiles it
+# with the wrong flags, or fails outright on a machine without MSVC on PATH.
+# Build it with: .\build_phase0b.bat   then prove it with: verify_install.py
+brain = []
 # Plane D speech: faster-whisper for STT on CPU/int8, piper for TTS.
 voice = [
     "numpy>=1.26",

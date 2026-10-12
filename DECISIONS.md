@@ -4703,3 +4703,112 @@ know is fine — which is a stronger claim than "under 10 %".
 The transaction from D84 was exercised on its **success** path as well as its
 failure path: snapshot 51 files, build, install, `snapshot removed`, exit 0. Until
 now only the rollback path had ever been run, on an induced failure.
+---
+
+## D87 - Deleting .venv found the bug two test suites had been protecting
+
+Phase B made the install chain trustworthy by fixing its *machinery*. This is the
+defect that machinery was hiding, and deleting `.venv` found it in about six
+minutes. Everything above was correct and none of it mattered.
+
+### What happened
+
+Recreate `.venv` from nothing using install.ps1's own sequence. Step 2 died:
+
+```
+Building llama-cpp-python==0.3.35
+*** scikit_build_core 1.1.1 using CMake 4.0.0 (wheel)
+CMake Error at CMakeLists.txt:3 (project):
+  Running 'nmake' '-?' failed: no such file or directory
+CMake Error: CMAKE_C_COMPILER not set, after EnableLanguage
+```
+
+### Root cause
+
+**llama-cpp-python 0.3.35 publishes NO wheel on PyPI.** One sdist, zero wheels
+(checked against the PyPI JSON API). So naming it as a dependency does not install
+a prebuilt binary - it instructs the package manager to **compile** it, with
+llama-cpp-python's defaults and not ours.
+
+`install.ps1` deliberately does not initialise MSVC, and says why at line 155:
+*"Probed by existence - actually initialising it is what the build script does,
+and a probe that initialises it here would leave this shell's environment
+mutated."* Sound reasoning, wrong conclusion: its `uv pip install -e .[brain]`
+at line 257 always needs a compiler, and `build_phase0b.bat` - the only thing
+that supplies one - does not run until line 303.
+
+**So `install.ps1 -WithBrain` was structurally broken on any machine with a cold
+uv cache.** It had only ever appeared to work because uv's cache held a wheel
+from an earlier attempt - one built *without* our flags, which measures **76.73%
+EVEX**, i.e. the AVX-512 artifact D25 warns about. The install path was leaning
+on a poisoned wheel.
+
+### The part that matters most: the tests enforced the bug
+
+`tests/test_install.py` did not merely fail to catch this. It **required** it:
+
+```python
+def test_the_brain_extra_is_where_llama_cpp_python_lives(pyproject):
+    """It has to be *somewhere*. Declaring it nowhere and saying nothing is how
+    a new machine ends up unable to run inference with no error to trace."""
+    assert "llama-cpp-python" in " ".join(extras["brain"]).lower()
+```
+
+The reasoning was sound - "declaring it nowhere with no explanation is how a
+machine silently cannot run inference" - but the premise was wrong. There was no
+wheel to declare. So the test protected the broken design, which is why a green
+suite and a broken installer coexisted for as long as they did.
+
+`install_self_test.ps1` passed 18/18 throughout, and could not have caught it:
+it sets `$src = Get-Content $Engine -Raw` and every case is a regex against the
+**text** of install.ps1. It can prove a line is present. It can never prove the
+line works. A behavioural defect in a script it only reads as a string is
+invisible to it by construction.
+
+### The fix
+
+`llama-cpp-python` now appears in **no dependency list at all**. `brain` is kept
+as an intentionally empty extra because install.ps1 passes `.[brain]` and a
+missing extra is a hard error. `build_phase0b.bat` is the single flag-controlled
+path - it calls vcvars64 itself and passes GGML_NATIVE=OFF, GGML_AVX512=OFF,
+AVX2=ON, CMAKE_CUDA_ARCHITECTURES=86. Nothing that merely *names* a dependency
+can reproduce those flags.
+
+Two tests replace the one above:
+
+- `test_llama_cpp_python_is_named_by_no_dependency_list` - scans core and every
+  extra. Gate-checked both ways: re-adding it to the extra, and to core, are
+  both caught.
+- `test_no_dependency_requires_a_compiler_to_install` - encodes the *rule* rather
+  than the one package name, so the next wheel-less dependency is caught by a
+  rule instead of by someone deleting a working .venv.
+
+### Verified from nothing
+
+| step | result |
+|---|---|
+| `uv venv --python 3.11 .venv` | exit 0, CPython 3.11.9 |
+| `uv pip install -e .[brain,test]` | **exit 0 in 1.62s, 10 packages, no compiler on PATH** |
+| `verify_install.py` before the build | **correctly fails 3 checks** - no brain yet, with a message naming D25 |
+| `build_phase0b.bat` | **exit 0**, real compile, 26m 23s, all six DLL hashes changed |
+| `probe_isa.py` | 1.73% EVEX, below the 2.15% known-good control |
+| `verify_install.py` | 8 passed, 0 failed, exit 0 |
+
+That second row is the whole fix. The previous run failed the same line in 5
+seconds; this one succeeds with no compiler anywhere in the environment.
+
+The pre-build `verify_install` failure is also worth noting as a *good* result:
+with no `llama_cpp` present it refused to call the install healthy and said so by
+name, instead of the previous behaviour where a half-present package passed.
+
+### An error of my own, in the same hour
+
+I claimed the verified venv was `.[brain,test]`, not `.[brain,voice,test]`, on the
+evidence of a probe reporting `sounddevice: False`. The probe was wrong:
+**`sounddevice` ships as a single module file `sounddevice.py`, not a package
+directory**, so `Test-Path ".../sounddevice"` is False in a venv that has it
+installed. INSTALL.md was right and I was wrong, which cost two test failures
+(`piper` missing) that had nothing to do with the work.
+
+A directory-existence check used to infer "is this package installed" is only
+correct when the package is a directory. For a single-module package it is not.

@@ -117,15 +117,89 @@ def test_there_is_a_console_script_and_it_resolves(pyproject: dict) -> None:
         )
 
 
-def test_the_brain_extra_is_where_llama_cpp_python_lives(pyproject: dict) -> None:
-    """It has to be *somewhere*. Declaring it nowhere and saying nothing is how
-    a new machine ends up unable to run inference with no error to trace."""
-    extras = pyproject["project"].get("optional-dependencies", {})
-    assert "brain" in extras, (
-        "the brain extra must exist and carry llama-cpp-python, so `butleroy[brain]` "
-        "is a documented, correct instruction"
+def test_llama_cpp_python_is_named_by_no_dependency_list(pyproject: dict) -> None:
+    """It must appear in NO dependency list - not core, not any extra.
+
+    This test previously asserted the opposite: that `llama-cpp-python` WAS in
+    the `brain` extra. That assumption was wrong in a way that broke installs,
+    and the test enforced it, so the bug was protected rather than caught.
+
+    llama-cpp-python 0.3.35 publishes no wheel on PyPI - one sdist, zero wheels.
+    So naming it as a dependency does not install a prebuilt binary; it makes
+    the package manager COMPILE it, with llama-cpp-python's defaults and not
+    ours. That produced a ggml-cpu.dll at 76.73% EVEX-shaped - AVX-512, which
+    this Zen 3 CPU cannot execute (D25).
+
+    Worse, it broke the installer outright. install.ps1 runs
+    `uv pip install -e .[brain,voice]` and deliberately does not initialise
+    MSVC, so with no wheel to download that install has to compile with no
+    compiler available and fails at `CMAKE_C_COMPILER not set`. Measured
+    2026-10-13 by deleting .venv and reinstalling from scratch. It had only
+    ever appeared to work because uv's cache held a wheel built without our
+    flags.
+
+    The single flag-controlled path is build_phase0b.bat: it calls vcvars64
+    itself and passes GGML_NATIVE=OFF, GGML_AVX512=OFF, AVX2=ON and
+    CMAKE_CUDA_ARCHITECTURES=86. Nothing that merely names a dependency can
+    reproduce those flags.
+    """
+    project = pyproject["project"]
+    extras = project.get("optional-dependencies", {})
+
+    lists: dict[str, list[str]] = {"dependencies": project.get("dependencies", [])}
+    for name, items in extras.items():
+        lists[f"optional-dependencies.{name}"] = items
+
+    offenders = [
+        f"{where}: {item}"
+        for where, items in lists.items()
+        for item in items
+        if "llama-cpp-python" in item.lower()
+    ]
+    assert not offenders, (
+        "llama-cpp-python must not be named by any dependency list - PyPI has no "
+        f"wheel for it, so any package manager asked to install it will compile it "
+        f"with the wrong flags and fail on a machine without MSVC. Offending: "
+        f"{offenders}. Build it with build_phase0b.bat instead (D25, D84, D87)."
     )
-    assert "llama-cpp-python" in " ".join(extras["brain"]).lower()
+
+    # The extra itself must stay, because install.ps1 passes `.[brain]` and a
+    # missing extra is a hard error. It is a marker, not a package list.
+    assert "brain" in extras, (
+        "the brain extra must still exist - install.ps1 installs `.[brain]`, and a "
+        "missing extra is a hard error. It is intentionally empty."
+    )
+    assert not extras["brain"], (
+        "the brain extra must stay empty; the brain is built by build_phase0b.bat, "
+        "not installed by name"
+    )
+
+
+def test_no_dependency_requires_a_compiler_to_install(pyproject: dict) -> None:
+    """A dependency that has no wheel turns `pip install` into a build step.
+
+    install.ps1 does not initialise MSVC before installing dependencies, and
+    deliberately so (install.ps1:155 - a probe that initialised it would mutate
+    the shell's environment). So the manifest must only name packages that
+    install from a wheel. llama-cpp-python is the one that violated this; this
+    test exists so the next one is caught by a name and a rule rather than by
+    deleting a working .venv.
+    """
+    project = pyproject["project"]
+    extras = project.get("optional-dependencies", {})
+    all_reqs = list(project.get("dependencies", []))
+    for items in extras.values():
+        all_reqs.extend(items)
+
+    # Packages with no PyPI wheel for cp311/win_amd64, which therefore must not
+    # be named as dependencies. Verified against the PyPI JSON API 2026-10-13.
+    source_only = {"llama-cpp-python"}
+    named = sorted({r for r in all_reqs if r.split(">")[0].split("=")[0].split("[")[0].strip().lower() in source_only})
+    assert not named, (
+        f"{named} publish no wheel on PyPI, so naming them turns dependency install "
+        f"into a compile step that needs MSVC, which install.ps1 does not provide. "
+        f"Install them via their build script instead."
+    )
 
 
 def test_the_optional_extras_cover_what_the_modules_import(pyproject: dict) -> None:

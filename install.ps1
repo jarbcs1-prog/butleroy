@@ -26,8 +26,10 @@
     (D73). install_self_test.ps1 asserts this is refused anywhere else.
 
 .PARAMETER WithBrain
-    Build llama-cpp-python from source. Off by default: ~20 min, and the
-    prebuilt wheel cannot execute on this CPU (D25).
+    Build llama-cpp-python from source. Off by default: ~20 min, and there is
+    no alternative - PyPI publishes a source tarball and zero wheels, so any
+    package manager asked to install it compiles it with the wrong flags and
+    produces a binary this CPU cannot execute (D25, D87).
 
 .PARAMETER WithVoice
     Install the voice extras (piper TTS, faster-whisper STT). CPU-only.
@@ -265,7 +267,7 @@ function Install-Package {
 }
 
 # ---------------------------------------------------------------------------
-# 3. The brain build. Off by default, and never from a wheel.
+# 3. The brain build. Off by default. No wheel exists to install - PyPI has one
 # ---------------------------------------------------------------------------
 
 function Install-Brain {
@@ -273,17 +275,25 @@ function Install-Brain {
     if (-not $CudaRoot) { Write-Err 'no CUDA toolkit; cannot build'; return $false }
     $venvPy = Join-Path $Root '.venv\Scripts\python.exe'
 
-    # The warning is not decoration. The prebuilt wheel imports cleanly and then
-    # dies with STATUS_ILLEGAL_INSTRUCTION on this CPU, because its ggml-cpu.dll
-    # is compiled with AVX-512 that a Ryzen 5 5600G (Zen 3) cannot execute (D25).
-    # A user who skips this step gets a daemon that starts and cannot answer.
+    # The warning is not decoration. llama-cpp-python publishes NO wheel on PyPI -
+    # one sdist, zero wheels - so there is nothing to install and nothing to
+    # skip. Asking any package manager for it makes it COMPILE, with
+    # llama-cpp-python's defaults rather than ours, which produces a
+    # ggml-cpu.dll carrying AVX-512 that a Ryzen 5 5600G (Zen 3) cannot execute.
+    # That build imports perfectly and then dies with STATUS_ILLEGAL_INSTRUCTION
+    # on the first real instruction. This step is the only one that passes the
+    # right flags. A user who skips it gets a daemon that starts and cannot
+    # answer. (D25, D87)
     Write-Host ''
-    Write-Host '  WHY THIS IS NOT OPTIONAL AND NOT FROM A WHEEL:' -ForegroundColor Yellow
-    Write-Host '  The prebuilt llama-cpp-python wheel ships a ggml-cpu.dll compiled' -ForegroundColor Yellow
-    Write-Host '  with AVX-512. A Ryzen 5 5600G (Zen 3) has none of it, so that' -ForegroundColor Yellow
-    Write-Host '  library imports perfectly and then dies with STATUS_ILLEGAL_' -ForegroundColor Yellow
-    Write-Host '  INSTRUCTION on the first real instruction - on CPU and CUDA' -ForegroundColor Yellow
-    Write-Host '  alike. It must be built from source. (DECISIONS.md D25)' -ForegroundColor Yellow
+    Write-Host '  WHY THIS STEP, AND WHY NO PACKAGE MANAGER CAN DO IT FOR YOU:' -ForegroundColor Yellow
+    Write-Host '  llama-cpp-python publishes NO wheel on PyPI - one source tarball,' -ForegroundColor Yellow
+    Write-Host '  zero wheels. So there is nothing to install. Naming it as a' -ForegroundColor Yellow
+    Write-Host '  dependency makes the package manager COMPILE it with default' -ForegroundColor Yellow
+    Write-Host '  flags, yielding a ggml-cpu.dll with AVX-512 that this Ryzen 5' -ForegroundColor Yellow
+    Write-Host '  5600G (Zen 3) cannot execute: it imports perfectly and then dies' -ForegroundColor Yellow
+    Write-Host '  with STATUS_ILLEGAL_INSTRUCTION on the first real instruction.' -ForegroundColor Yellow
+    Write-Host '  This step passes the flags that make it correct.' -ForegroundColor Yellow
+    Write-Host '  (DECISIONS.md D25, D87)' -ForegroundColor Yellow
     Write-Host '  Roughly 20 minutes.' -ForegroundColor Yellow
     Write-Host ''
 

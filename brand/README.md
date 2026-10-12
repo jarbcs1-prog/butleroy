@@ -230,7 +230,7 @@ about, so it is left visible rather than tidied.
 | Voices | **partly built** (D76) - installed/known voices and the default are shown; `Use voice`, `Save`. **Download, import and remove are specified below and do not exist.** |
 | Speech | **not built** - push-to-talk, mute, wake word |
 | Workspaces | **partly built** (D77) - a list and `Approve folder.`, `Reload`. **Revoke, danger level and allowed tiers do not exist.** |
-| Authority | **partly built** (D78) - attended state and `Step back (unattended)`. **The tier ladder, the ceiling control, the pending list and the what-would-happen checker do not exist.** |
+| Authority | **built but not operable** (D78) - the tier ladder (four `Badge.for_tier` rows), attended state, `Step back (unattended)`, the "Waiting on you" pending list, and the "What would happen if…" `tool_check` predictor. **The session ceiling is displayed but cannot be changed from the window — the daemon has no op for it.** |
 | Advanced | **built** (D79) - read-only diagnostics: brain, mail, vault, reflection, paths, and the audit tail. Being redesigned; see below. |
 
 #### The control inventory, measured 2026-10-13

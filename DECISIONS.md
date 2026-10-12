@@ -4871,3 +4871,42 @@ own measurement error:
 Two further Tk API assumptions of mine were simply wrong in this build:
 `winfo_master` does not exist on a widget (the attribute is `.master`), and
 `tk.Button(parent, "text")` mis-parses positionally.
+---
+
+## D90 - Correction: Authority is the most complete tab, and my inventory said the opposite
+
+D89 recorded that `Badge.for_tier()` "is called from nowhere in `settings.py`"
+and that Authority lacked the tier ladder, the pending list and the checker. **All
+three claims are false.** AuthoritySection already has all of them.
+
+The cause is my own regex. I counted widgets with `W\.Badge\(`, and the code
+writes `W.Badge.for_tier(` — so a classmethod call never matched the pattern, and
+`Badge` reported zero. Same mistake, twice in one session: an earlier count used
+`W\.(Entry|Checkbutton|...)` and missed `W.Field`, `W.Select` and `W.Toggle`
+entirely. Both times I reported the miss as a product defect.
+
+**Corrected inventory** (`W\.\w+` captured regardless of what follows, plus raw
+`tk.` controls):
+
+| Section | `W.*` | `tk.Entry` | Lists / checkboxes / option menus |
+|---|---|---|---|
+| Models | Button x1 | 0 | 1 |
+| Voices | Button x1 | 0 | 2 |
+| Workspaces | Button x1 | 0 | 3 |
+| **Authority** | **Badge x1, Button x2** | **1** | 0 |
+| Advanced | Button x1 | 0 | 0 |
+
+Authority is the most complete section in the window. It reaches four daemon ops —
+`status`, `session_set_attended`, `confirm_list` and `tool_check` — and renders the
+ladder, the pending list and the predictor.
+
+**The one real gap is smaller than I said and larger than "nothing":** the session
+ceiling is *displayed* (`headline` reads `ceiling T3` from `status`) but there is
+no control for it, and **the daemon has no op to set one at all**. `op_session_set_attended`
+is documented as narrowing-only — it refuses `attended=True` rather than ignoring
+it, on the grounds that a caller able to grant itself unattended execution is
+itself the bug. Adding a ceiling op therefore needs the same care as that one, and
+is a daemon change rather than a window change.
+
+Models, Voices, Workspaces and Advanced stand as D89 described them: read-only, or
+near enough.

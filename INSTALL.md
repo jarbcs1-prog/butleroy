@@ -176,7 +176,7 @@ Piper voices (`.onnx`) go in `models/` too.
 [ ok ] python     3.11.9, 64-bit
 [ ok ] imports    assistant.* imports; no model runtime loaded
 [ ok ] no_ports   no TCP listener; transport is named pipes only
-[ ok ] isa        ggml-cpu.dll: 10/984 EVEX-shaped (1.02%), under the 10% limit
+[ ok ] isa        ggml-cpu.dll: 17/980 EVEX-shaped (1.73%), under the 10% limit
 [ ok ] brain_surface  llama_cpp exposes Llama and LlamaGrammar, as brain.py imports them
 [ ok ] daemon     preflight ok: 42 audit records verify, no listening ports
 [ ok ] models     5 model file(s), 13.04 GB: Qwen3.5-0.8B-Q4_0.gguf, ...

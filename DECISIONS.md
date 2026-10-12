@@ -4639,3 +4639,67 @@ refs/original/refs/heads/master -> 4df7df8
 
 General form: **create the backup ref under `refs/`, never as a tag that the rewrite
 command also enumerates.** A backup you have to reason about is not a backup.
+---
+
+## D86 - B3: the first repair-free baseline, and a build that exits 0 without building anything
+
+### The finding that nearly made this a false pass
+
+The first B3 run returned **exit 0 in four seconds**. That is not a fast build;
+it is not a build at all:
+
+```
+Resolved 6 packages in 543ms
+Prepared 1 package in 11ms
+Installed 1 package in 140ms
+```
+
+`uv` caches the **built wheel**, so a second identical invocation resolves and
+installs without invoking a compiler. Every DLL was byte-identical afterwards
+(sha256 verified on all six), and `verify_install.py` was green — on the old
+binary. Nothing in the script distinguishes "compiled successfully" from "served
+from cache", so the gate would have passed on a build that never ran.
+
+`BUTLEROY_FORCE_REBUILD=1` sets `UV_NO_CACHE=1`. The genuine run resolved in
+19.36s and then compiled for ~13 minutes with three `nvcc.exe` and one `ninja.exe`
+resident, and **all six DLL hashes changed**.
+
+**Unverified risk this exposed:** uv's cache key derives from the source and its
+build requirements. `CMAKE_ARGS` is *ours*, not llama-cpp-python's, so whether it
+participates in that key is unknown. If it does not, a cached wheel can be reused
+across a change of build flags — quietly reintroducing exactly the D25 AVX-512
+fault that changing those flags exists to prevent. Anyone changing a build flag
+must use `BUTLEROY_FORCE_REBUILD=1`.
+
+### The gate, all four parts
+
+| gate | result |
+|---|---|
+| `build_phase0b.bat` exits 0 | **0**, after a real compile |
+| DLLs actually rebuilt | **6 of 6 hashes changed**; `ggml-cuda.dll` 69,445,120 -> 71,276,032 |
+| `probe_isa.py` ~1 % EVEX, not the wheel's 76.7 % | **1.73 %** (17/980) |
+| `verify_install.py` exits 0 | **8 passed, 0 failed, exit 0** |
+| `test_brain.py` | **39 passed**, against the freshly compiled runtime |
+
+This is the first runtime in this project's history with **no repair in it**, and
+the first time the D82 `CMAKE_CUDA_COMPILER` fix has run to completion rather than
+merely resolving.
+
+### The ISA ratio now has a control, and it passes on its own terms
+
+`probe_isa.py` hard-coded `CUDA\v12.8\bin\cudart64_12.dll` as its calibration
+sample. This machine carried no such file, so every run printed a bare `missing:`
+line and the calibration silently did nothing — a diagnostic that reports while
+measuring nothing. It now discovers a control from `CUDA_PATH`, falling back to the
+machine registry, and degrades with an explanatory note if there is none.
+
+The result is stronger evidence than a bare ratio. `ggml-cpu.dll` measures
+**1.73 %** EVEX-shaped against a **known-good, definitely-not-AVX-512** control
+(`cudart64_13.dll`) at **2.15 %**. Our build is *below* the noise floor of a DLL we
+know is fine — which is a stronger claim than "under 10 %".
+
+### Why this matters beyond one clean build
+
+The transaction from D84 was exercised on its **success** path as well as its
+failure path: snapshot 51 files, build, install, `snapshot removed`, exit 0. Until
+now only the rollback path had ever been run, on an induced failure.

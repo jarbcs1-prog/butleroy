@@ -20,7 +20,43 @@ import sys
 LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Lib",
                    "site-packages", "llama_cpp", "lib")
 
-CONTROL = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\cudart64_12.dll"
+def find_control():
+    """A DLL that is certainly NOT AVX-512 compiled, to calibrate how much
+    0x62 noise ordinary code and data produce.
+
+    Discovered from CUDA_PATH rather than hard-coded. This used to point at
+    CUDA\\v12.8, which this machine had not carried for some time, so every run
+    printed a bare "missing:" line and the calibration silently did nothing -
+    a diagnostic that reports while measuring nothing. It will rot again on the
+    next toolkit upgrade if the version stays in the source.
+
+    Not part of the gate: the SUSPECT line below is what verify_install.py's
+    `isa` check asserts on. Losing the control costs calibration, not the result.
+    Returns None if no suitable DLL can be found.
+    """
+    import glob
+    roots = []
+    for var in ("CUDA_PATH",):
+        v = os.environ.get(var)
+        if v:
+            roots.append(v)
+    # CUDA_PATH is usually set machine-wide, not in the current process.
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment") as k:
+            v, _ = winreg.QueryValueEx(k, "CUDA_PATH")
+            if v:
+                roots.append(v)
+    except Exception:
+        pass
+    for root in roots:
+        # cudart lives in bin\\x64 on modern toolkits; bin held zero runtime DLLs here.
+        for sub in ("bin\\x64", "bin"):
+            hits = sorted(glob.glob(os.path.join(root, sub, "cudart64_*.dll")))
+            if hits:
+                return hits[-1]
+    return None
 
 
 def count_evex(path):
@@ -38,7 +74,14 @@ def count_evex(path):
     return len(data), bare, evex
 
 
+CONTROL = find_control()
+
 for path in (os.path.join(LIB, "ggml-cpu.dll"), CONTROL):
+    if path is None:
+        print("note: no calibration DLL found (set CUDA_PATH). "
+              "The SUSPECT ratio below is still valid - only the noise "
+              "baseline is missing.")
+        continue
     if not os.path.exists(path):
         print(f"missing: {path}")
         continue

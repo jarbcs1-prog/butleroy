@@ -49,7 +49,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Root,
 
-    [string] $Package = 'llama-cpp-python==0.3.35'
+    [string] $Package = 'llama-cpp-python==0.3.35',
+
+    [switch] $NoCache
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,6 +113,27 @@ switch ($Mode) {
         Push-Location $Root
         try {
             $had = Save-Snapshot
+
+            # A cache hit here is silent and total. uv caches the *built wheel*, so
+            # a second identical build resolves and installs in about four seconds
+            # and exits 0 without invoking a compiler once. Measured 2026-10-13:
+            # "Prepared 1 package in 11ms", every DLL byte-identical afterwards.
+            # That reads as a successful build and is not one.
+            #
+            # Risk to be aware of when trusting a cached wheel: uv's cache key is
+            # derived from the source and its build requirements. The CMake flags
+            # in CMAKE_ARGS (GGML_NATIVE, CMAKE_CUDA_ARCHITECTURES, AVX512 off)
+            # are ours, not llama-cpp-python's, so whether they participate in that
+            # key is UNVERIFIED here. If they do not, a cached wheel can be reused
+            # across a change of build flags - which would reintroduce exactly the
+            # D25 AVX-512 failure a flags change is meant to prevent.
+            if ($NoCache) {
+                $env:UV_NO_CACHE = '1'
+                Say 'cache DISABLED (UV_NO_CACHE=1). Expect ~20 min of real compiling.'
+            } else {
+                Say 'cache enabled - if this finishes in seconds, no compilation happened.'
+                Say 'Use -NoCache to force a genuine rebuild.'
+            }
 
             Write-Host '  [build] compiling llama-cpp-python from source (this takes ~20 min)'
             & uv pip install --python $venvPy --no-binary llama-cpp-python `

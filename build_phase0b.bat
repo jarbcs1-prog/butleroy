@@ -115,5 +115,9 @@ REM
 REM -Root carries a trailing "." on purpose: %~dp0 ends in a backslash, and a
 REM backslash immediately before a closing quote escapes it, so "-Root "%~dp0""
 REM arrives in PowerShell as G:\localaized"\ - a mangled path.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_rollback.ps1" -Mode build -Root "%~dp0."
+REM BUTLEROY_FORCE_REBUILD=1 makes this a genuine rebuild. Without it uv
+REM serves its cached wheel, which exits 0 in seconds and compiles nothing.
+set NOCACHE=
+if defined BUTLEROY_FORCE_REBUILD set NOCACHE=-NoCache
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_rollback.ps1" -Mode build -Root "%~dp0." %NOCACHE%
 exit /b %ERRORLEVEL%

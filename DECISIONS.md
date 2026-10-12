@@ -4395,3 +4395,198 @@ each one.
 
 The general form: **a script that treats a tool's progress chatter as a failure
 will fail on success, and it will look like the tool failed.**
+
+---
+
+## D83 - The Tcl abort was measured, not found, and the gate that would have "fixed" it was invalid
+
+Phase 1 of the completion plan set out to make the suite trustworthy by root-causing
+the intermittent `STATUS_BREAKPOINT`. It was attempted under the systematic-debugging
+discipline — no fix without root cause first — and **it did not succeed.** What
+follows is what was measured, what was disproved, and why the gate written into
+the plan was the wrong gate.
+
+### The measurement, which is the durable part
+
+| Phase | Runs | Crashes |
+|---|---|---|
+| baseline | 5 | **1** |
+| locate (stopped at 6) | 6 | **0** |
+| **total** | **11** | **1** |
+
+**~9 % overall, not the 20 % first measured.** The baseline's 1-in-5 was taken while
+other suites were running and while files were being edited. A fault in *garbage
+collection timing* is exactly the class that shifts under load, so the 20 % was
+probably inflated by my own contention rather than reflecting the suite.
+
+**This immediately invalidated the plan's gate.** It required "three consecutive
+clean full-suite runs". At a 9 % rate that outcome has probability
+`0.91³ ≈ 75 %` **by chance alone**. Three green runs is therefore not evidence of a
+fix, and the plan would have accepted an unfixed fault three times out of four. The
+correct gate for a 9 % intermittent is ~30 runs (chance of a false all-clear
+`0.91³⁰ ≈ 6 %`) — which is why this was not simply retried until it went green.
+
+### Two hypotheses, both disproved
+
+**H1 — "the blanket collect frees another thread's Tcl interpreter."**
+`gc.collect()` at `settings.py:1513` collects all process-wide cyclic garbage, so a
+cycle holding another thread's interpreter is finalised on the settings Tk thread,
+and Tcl deletes its async handler from a non-owning thread.
+
+Supporting evidence, which is real: `gc.collect()` appears in **exactly one place
+in all of `src/`**, and that place is the only site of every one of the four fault
+reports. `overlay.py:901 _release_widgets` nulls six attributes and **never
+collects** — so HANDOFF §5 claim 7, which states that `_release_widgets` "must keep
+collecting on the Tk thread", describes `settings.py` and is false of `overlay.py`.
+
+Disproved by reproduction: 8 real `Overlay` show/destroy cycles followed by 3
+`Settings` show/destroy cycles — the topology the suite actually produces, in the
+order the suite produces it — **exits 0**, with and without the collect. So the
+mechanism as stated does not reproduce in isolation.
+
+**H2 — "it is the main-thread Tk interpreter from `test_widgets_real`."**
+Disproved by reading the suite's own ordering rather than guessing it:
+`test_widgets_real.py` runs at **99–100 %**, long after `test_settings_real.py`
+(~71 %). Its root is created *after* every settings window has been destroyed and
+cannot cause a 67 % abort. I had built H2 on a 5 %-granularity `-q` progress line
+without checking; the `-v` run corrected it in one pass.
+
+### The one lead not proven
+
+Catching a run mid-flight at **67 % inside `test_prompt_served.py`** — while
+`test_settings_real.py` has not started — is consistent with a Settings Tk thread
+finalising *long after its own test returned*, i.e. a race between a lingering
+thread's finalisation and an unrelated collection point. That would explain the
+intermittency mechanically.
+
+**It is a single observation of a *passing* run's position, not a captured crash.**
+It is recorded as a lead, not a cause, and nothing was changed on the strength of it.
+
+### The harness failures, which cost more than the fault did
+
+Three, all of which produced confident-looking wrong answers rather than errors:
+
+1. **A feedback loop wrote 4 GB.** The summary did
+   `Select-String -Path $out … | Tee-Object -FilePath $out -Append` — reading a
+   file while appending to it. 2.6 M lines of its own output.
+2. **Five "runs" that never ran.** `Start-Process -PassThru -NoNewWindow` returns
+   an **empty** `.ExitCode`, so every verdict printed `EXIT :`, and all five
+   stamped the same second. A crash rate was briefly reported from **zero**
+   measurements. Caught before it reached a commit.
+3. **A harness that hid the evidence it collected.** It deleted non-crash logs, so
+   try 2's ordinary `exit 1` failure cannot be attributed to a test. That failure
+   remains **unexplained** and is a loose end, not a closed one.
+
+And one product-adjacent one: a first instrumentation edit made
+`_release_widgets` nested inside a method taking no `self` — a call-time
+`NameError` waiting to happen. It was reverted rather than committed; the
+diagnostic, had it worked, used `DEBUG_SAVEALL` so it could not have caused the
+crash it was measuring.
+
+### Standing instructions for whoever picks this up
+
+- **Reproduce before theorising.** The fault did not appear in 10 of 11 runs. Any
+  hypothesis formed without a reproduction in hand is a guess.
+- **Measure the rate before trusting any gate.** 3 runs proves nothing at 9 %.
+- **H1's asymmetry is a real finding regardless of this fault.** `settings.py`
+  collects, `overlay.py` does not, and HANDOFF §5 claim 7 states the collect as a
+  blanket structural rule. Whichever way this fault eventually goes, that
+  asymmetry and that sentence need reconciling.
+- **Do not add a `gc.collect()` anywhere new.** It is already the only
+  process-wide collect on a worker thread in the codebase.
+
+**Not fixed. Narrowed to a lead, measured at ~9 %, with two hypotheses disproved
+and one unexplained non-crash failure outstanding.**
+
+---
+
+## D84 - Phase B: the build is now a transaction, and a batch file silently stopped executing
+
+Phase B was two items, both about *trustworthy machinery* rather than features.
+Both closed. Both are worth reading, because the interesting content is not the
+fix — it is how many ways a "working" script can be lying.
+
+### B2 — `verify_install.py` could not see the damage it was written to catch
+
+On D82 an interrupted uninstall left `llama_cpp` missing six `.py` files with every
+DLL still present. `import llama_cpp` succeeded, **all seven checks passed**, and 20
+tests then failed on an `AttributeError` naming the *test's own* probe line. A
+verifier that only executes the model reports a half-broken install as healthy.
+
+`brain_surface` now asserts the names `brain.py` actually imports.
+
+**And it caught me.** My first draft demanded `LlamaToken` and `LlamaContext`, which
+0.3.35 does not export at top level, so it failed a *perfectly healthy* install. I
+had guessed an API surface instead of measuring it. A verifier that names
+requirements the product does not have is a wolf nobody listens to. The check now
+asserts `Llama` and `LlamaGrammar` — the two names a grep of `src/` actually finds.
+
+Gate: 8/8 healthy; renaming `__init__.py` away makes it fail *by name*; restores
+clean. Note the gate is "it catches the real damage", not "it returns green".
+
+### B1 — the build destroyed the runtime before knowing it could rebuild it
+
+`uv pip install --reinstall-package` removes the installed package **before** it
+builds the replacement. Anything that stops the build for an unrelated reason — a
+locked DLL, a full disk, a killed process — leaves a half-uninstalled runtime.
+
+The build is now a transaction in `build_rollback.ps1 -Mode build`: snapshot, build,
+restore on any non-zero exit, cleanup, propagate the code. `build_phase0b.bat` sets
+up the toolchain and then makes exactly one call.
+
+#### Why the transaction could not live in the batch file
+
+Not a style preference. Three measurements:
+
+1. Parenthesised blocks containing `xcopy` paths with trailing backslashes are
+   mis-parsed by `cmd`. The script ran to the end, exited with the build's own code,
+   and printed **not one restore line**. A rollback that silently does nothing is
+   worse than none, because it is believed.
+2. Rewritten with `goto` labels and correct CRLF endings, `cmd` **still stopped
+   executing the instant `uv` returned.** Every statement after it was skipped.
+   No restructuring inside the batch could ever have worked — which is why the
+   transaction is now PowerShell, with one cmd boundary and no post-build logic.
+3. `$PSScriptRoot` as a parameter default arrives **empty** under `powershell
+   -File`, so every derived path was empty and the caller carried on and built
+   anyway. `-Root` is now mandatory and checked.
+
+Gate, on the shipped files: the batch runs, `uv` simulates the D82 incident (removes
+the package, then fails), and the output is snapshot 51 files → induced failure →
+restored 51 files → snapshot removed → **exit 9 propagated** → 8/8 verify_install.
+
+#### The trap that cost the most: `write` emits LF, and `cmd` cannot read labels in LF
+
+`build_phase0b.bat` was rewritten with the `write` tool and came out **130 bare-LF
+lines and 1 CRLF**. `cmd` cannot locate `goto :label` targets in an LF file, so the
+script fell off the end. That single byte-order fact was the real cause of *every*
+"the batch silently stopped" symptom in this phase, and I spent several rounds
+chasing it as a logic error.
+
+**Standing rule: any `.bat` or `.cmd` written by an agent must be normalised to CRLF
+and the byte counts verified before it is trusted.** PowerShell does not care, which
+is exactly why this hid — the `.ps1` worked fine throughout.
+
+### What I damaged doing this, and how it was repaired
+
+Reporting this because it happened to the live install, not to a scratch copy.
+
+While isolating the batch bug I ran a throwaway probe that called the rollback
+script's `snapshot` mode. `snapshot` **deletes the existing backup first** — by
+design, so a stale one is never reused. The probe ran after an earlier gate stub had
+already deleted `llama_cpp`, so the snapshot recorded nothing, the one good copy was
+gone, and **the venv was left without `llama_cpp`.**
+
+Repaired from `.uvcache\archive-v0\HXItqT0wSltXrXbP`. The choice was not a guess:
+
+| archive | `ggml-cuda.dll` | meaning |
+|---|---|---|
+| `HjUTllOYLHkKGEsz` | **859 MB** | fat prebuilt wheel, `sm_600..900` — the AVX-512 build D25 exists to avoid |
+| `HXItqT0wSltXrXbP` | **69 MB** | our source build: one arch (`sm_86`), `AVX512=OFF` |
+
+Re-verified rather than assumed: `verify_install.py` **8 passed, 0 failed, exit 0**,
+including real GPU inference (8 chars, 25/25 layers) and the `isa` check at 1.02 %
+EVEX; `test_brain.py` **39 passed**.
+
+**Lesson worth keeping:** a rollback script whose `snapshot` deletes the previous
+backup must not be callable by a probe. It is a destructive primitive, and I gave a
+diagnostic tool a path to it.

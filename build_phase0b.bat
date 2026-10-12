@@ -79,17 +79,41 @@ REM several times slower and far larger. Must be explicit.
 set CMAKE_ARGS=-G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CCACHE=OFF -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX2=ON -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DGGML_CUDA_ARCHITECTURES=86 -DGGML_CUDA_FA_ALL_QUANTS=ON -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF
 
 REM Project-local cache: the shared uv cache is 37.6 GB and is contended.
-set UV_CACHE_DIR=G:\localaized\.uvcache
+set UV_CACHE_DIR=%~dp0.uvcache
 
-cd /d G:\localaized
+REM Relative to this script, not a hard-coded literal. install.ps1 calls this, and
+REM a hard-coded G:\localaized meant the build ran in the wrong tree if the
+REM checkout moved. D82 fixed the same class of staleness in the download script.
+cd /d "%~dp0"
 
 echo === cmake args: %CMAKE_ARGS% ===
 echo === jobs: %CMAKE_BUILD_PARALLEL_LEVEL% ===
 echo.
 
-uv pip install --python .venv\Scripts\python.exe --no-binary llama-cpp-python --reinstall-package llama-cpp-python llama-cpp-python==0.3.35
-set BUILD_EXIT=%ERRORLEVEL%
-
-echo.
-echo === Phase 0b build finished with exit code %BUILD_EXIT% ===
-exit /b %BUILD_EXIT%
+REM ===========================================================================
+REM The build is a TRANSACTION and it lives in build_rollback.ps1, not here.
+REM
+REM `uv pip install --reinstall-package` removes the installed package BEFORE it
+REM builds the replacement, so a build failing for any reason unrelated to the
+REM build - a locked DLL, a full disk, a killed process - leaves a
+REM half-uninstalled runtime. On 2026-10-13 that happened for real here: six
+REM .py files of llama_cpp gone, every DLL present, import still fine,
+REM verify_install.py still green, and 20 tests failing on an AttributeError
+REM naming the TEST's own probe line. (D82.)
+REM
+REM It could not be written in batch. Measured, not assumed:
+REM   * cmd mis-parses parenthesised blocks holding xcopy paths with trailing
+REM     backslashes - the script ran to the end and printed not one restore line.
+REM   * Rewritten with goto labels and proper CRLF endings, cmd STILL stopped
+REM     executing the instant `uv` returned. Everything after it was skipped, so
+REM     no restructuring inside this file could ever have worked.
+REM
+REM Hence exactly one line of batch follows, and it only propagates the code.
+REM A rollback that silently does nothing is worse than none, because it is
+REM believed - so if you add build logic below this line, verify it runs.
+REM
+REM -Root carries a trailing "." on purpose: %~dp0 ends in a backslash, and a
+REM backslash immediately before a closing quote escapes it, so "-Root "%~dp0""
+REM arrives in PowerShell as G:\localaized"\ - a mangled path.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_rollback.ps1" -Mode build -Root "%~dp0."
+exit /b %ERRORLEVEL%

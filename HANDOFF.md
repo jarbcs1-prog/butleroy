@@ -65,10 +65,13 @@ Every number below was measured, not remembered.
 
 ```
 tests        1412 passed, 3 skipped, 47 subtests   (measured 2026-10-13, exit 0,
-             2m52s on a quiet machine - D82)
-             CAVEAT, and it is not optional: an adjacent run aborted at 67% with
-             the intermittent Tcl fault below, so this figure is a measurement of
-             ONE run, not a property of the tree. Zero known failures as of D82.
+             2m52s on a quiet machine - D82). Zero known failures.
+             CAVEAT: a full-suite run can abort instead, at ~67%, with the
+             intermittent Tcl fault in §5 claim 6. Measured rate **~9 %**
+             (1 crash in 11 runs, D83) - so this is a measurement of ONE run, not
+             a property of the tree. Do not run the suite three times and call
+             the fault fixed: at 9 %, three clean runs happen 75 % of the time by
+             chance alone (D83).
              The 3 skips are the speech slow tests: BUTLEROY_SLOW_TESTS=1.
              D82 rewrote the last failing test, which asserted a *volume*
              property (that the temp path has two spellings) rather than a code
@@ -331,13 +334,36 @@ future edit could quietly undo:
    below doing its job and still aborting. Narrowed, not fixed: `test_settings_real.py`
    alone (40 passed), the four real-Tk files together (86 passed), and all 35 files
    preceding it plus `test_settings_real.py` (1041 passed) each exit 0, so no subset
-   containing it reproduces. The trigger is therefore *after* `test_settings_real.py`
-   (file-index 35 of 49), not in it. Two subsequent full runs completed with exit 0,
-   so it remains intermittent and unrooted. Do not call it fixed.
+   containing it reproduces.
+
+   **Update (D83) — the definitive state. Still UNFIXED, now measured.** Phase 1 of
+   the completion plan attacked this under systematic-debugging and did not root-cause
+   it. Rate: **1 crash in 11 full-suite runs ≈ 9 %**, and the 20 % first measured was
+   inflated by my own concurrent load — a GC-timing fault is load-sensitive. Two
+   hypotheses were formed and **both disproved** by reproduction (D83 has the detail).
+   One lead survives: a run caught at 67 % inside `test_prompt_served.py`, before
+   `test_settings_real.py` has even started, is consistent with a Settings Tk thread
+   finalising long after its own test returned. Single observation, not proof.
+
+   **Do not use "three clean runs" as a fix signal.** At 9 %, `0.91³ ≈ 75 %` — three
+   green runs happens by chance three times out of four.
+
+   **One real finding stands regardless:** `gc.collect()` exists in exactly one place
+   in `src/` — `settings.py:1513` — and `overlay.py:901` does **not** collect, though
+   claim 7 states the collect as a blanket rule. That asymmetry and that sentence need
+   reconciling whichever way this fault goes.
 7. **`_release_widgets` must keep collecting on the Tk thread.** Nulling the widget
    attributes is not sufficient on its own — the `after` callbacks and the event
    queue leave reference cycles, and only the cyclic collector breaks them. Delete
    the `gc.collect()` and the interpreter dies at shutdown on the wrong thread.
+
+   **Two qualifications added in D83, and the first one matters more than the rule
+   it qualifies.** First: this is true of `settings.py` and **false of
+   `overlay.py`**, which has no collect at all — so `settings.py:1513` is the only
+   process-wide collect on a worker thread in the whole codebase. Second: **that
+   same line is where every one of the four recorded `0x80000003` aborts fires**, so
+   "keep collecting here" and "this may be what aborts" are the same statement. Do
+   not add another `gc.collect()` anywhere without reading D83 first.
 
 5. **`G:\localaized` is a path, not a name — do not "tidy" it.** D73 renamed the
    product everywhere a user can reach it and deliberately left the directory. The

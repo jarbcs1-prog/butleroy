@@ -286,11 +286,57 @@ def check_daemon() -> Result:
 #: Advertised order. `inference` is last because it is the only one that needs
 #: a model on disk, and a verifier that stops early hides the checks that would
 #: have explained why.
+def check_brain_surface() -> Result:
+    """The `llama_cpp` *Python* layer must be intact, not just its DLLs.
+
+    `check_inference` loads a model and generates a token, which exercises the
+    native side. It cannot see damage confined to the Python wrapper — and on
+    2026-10-13 that is exactly what happened: an interrupted uninstall removed
+    six `.py` files (`__init__.py`, `_ctypes_extensions.py`, `_ggml.py`,
+    `_internals.py`, `_logger.py`, `_utils.py`) and left every DLL in place. The
+    result was that `import llama_cpp` *succeeded*, all seven checks below passed,
+    and 20 tests failed on `AttributeError: module 'llama_cpp' has no attribute
+    '__version__'` — an error naming the test's own probe line, neither the missing
+    files nor the interrupted build.
+
+    So a verifier that only executes the model reports a half-broken install as
+    healthy. This check names the attributes the product actually imports, so the
+    failure says which file is missing instead.
+    """
+    # Exactly the names the product imports (measured with grep, not guessed:
+    # src/assistant/brain.py imports Llama and LlamaGrammar, and nothing else), plus
+    # the module that loads the DLL. An earlier draft of this check also demanded
+    # LlamaToken and LlamaContext and failed a perfectly healthy install, because
+    # 0.3.35 exports neither at top level. A verifier that names requirements the
+    # product does not have is a verifier that cries wolf, and a wolf is ignored.
+    required = ("Llama", "LlamaGrammar")
+    try:
+        import llama_cpp
+    except Exception as exc:  # noqa: BLE001 - the reason is the point
+        return Result("brain_surface", False,
+                      f"llama_cpp will not import at all: {exc!r}. Build it from "
+                      f"source - see INSTALL.md (D25)")
+    missing = [name for name in required if not hasattr(llama_cpp, name)]
+    if missing:
+        return Result(
+            "brain_surface", False,
+            f"llama_cpp imported but is missing {missing} - the names brain.py "
+            f"imports. The native libraries are present (isa and inference can "
+            f"still pass), so this is the Python wrapper: an interrupted install "
+            f"or a partial rebuild. Reinstall with `uv pip install --python "
+            f".venv\\Scripts\\python.exe --reinstall-package llama-cpp-python "
+            f"--no-binary llama-cpp-python`.",
+        )
+    return Result("brain_surface", True,
+                  "llama_cpp exposes Llama and LlamaGrammar, as brain.py imports them")
+
+
 CHECKS: tuple[Check, ...] = (
     Check("python", check_python),
     Check("imports", check_imports),
     Check("no_ports", check_no_ports),
     Check("isa", check_isa),
+    Check("brain_surface", check_brain_surface),
     Check("daemon", check_daemon),
     Check("models", check_models),
     Check("inference", check_inference),

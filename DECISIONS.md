@@ -4232,11 +4232,166 @@ property, and it is the more interesting half of this decision:** the right fix 
 probably to point it at a path with two spellings, or to assert the *gate's* behaviour
 given a synthetic pair, rather than to configure the volume.
 
-**The intermittent Tcl abort is narrowed, not fixed.** One reproduction on 2026-10-13:
-`0x80000003` from `settings.py:1513 _release_widgets` during `Garbage-collecting` —
+**The intermittent Tcl abort is narrowed, not fixed.** Two reproductions on 2026-10-13,
+both `0x80000003` from `settings.py:1513 _release_widgets` during `Garbage-collecting` —
 that is, D80's own fix (claim 7 in §5) aborting while doing its job. Subset runs, each
 exit 0: `test_settings_real.py` alone (40 passed), the four real-Tk files together
-(86 passed), and all 35 files preceding `test_settings_real.py` plus that file
-(1041 passed). Since it sits at file-index 35 of 49 and nothing containing it
-reproduces, the trigger is **after** it, not in it. Two subsequent full runs completed
-exit 0, so it is intermittent and still unrooted. Recorded, not called solved.
+(86 passed), all 35 files preceding `test_settings_real.py` plus that file (1041 passed),
+the two real-Tk files plus the three overlay files (110 passed), and the pair alone three
+times consecutively (70 each). It sits at file-index 35 of 49 and no subset containing it
+reproduces, so the trigger is **after** it, not in it. Three subsequent full runs
+completed exit 0. Intermittent and still unrooted. Recorded, not called solved.
+
+### One of the four reproductions in this project's history was mine
+
+While checking that `build_phase0b.bat` now resolves `nvcc` on a v13.4 machine
+instead of the hard-coded v13.3, I ran it against a live venv. It removed the
+installed package and then failed with `Access is denied` on `ggml-base.dll`,
+because a pytest process I had running in the background still held the file.
+
+`llama_cpp` was left **half-uninstalled**: six `.py` files gone
+(`__init__.py`, `_ctypes_extensions.py`, `_ggml.py`, `_internals.py`,
+`_logger.py`, `_utils.py`), every DLL intact. The symptom was the most confusing
+one available — `import llama_cpp` *succeeded*, `verify_install.py` still passed
+all seven checks because the DLLs it exercises were fine, and 20 `test_brain`
+tests failed on `AttributeError: module 'llama_cpp' has no attribute '__version__'`,
+an error naming the test's probing line rather than the missing files.
+
+Repaired from uv's archive cache after confirming `llama_cpp.py` matched
+byte-for-byte between cache and install (179,029 bytes), so the restored files
+were the ones the interrupted uninstall had removed. The alternative — a full
+20-minute source rebuild — would have replaced files that were never wrong.
+
+Two things should exist and do not:
+
+- `build_phase0b.bat` should build into a temporary location and swap on success,
+  rather than removing the working runtime *before* it knows the build will
+  succeed. The uninstall-before-install is what made a file lock destructive.
+- `verify_install.py`'s `imports` check would have caught this instantly if it
+  asserted the *module surface* (`Llama`, `LlamaGrammar`) rather than only that
+  a model loads through the native side. A verifier that executes a model cannot
+  see damage confined to the Python wrapper.
+
+Recorded because the tempting next line in a log is "flaky", and this was not
+flaky - it was a real, self-inflicted regression that a green
+`verify_install.py` reported as healthy.
+
+---
+
+## D82 - The last failing test asserted a volume, not a code property
+
+`test_delegate_ops.py::test_an_approved_root_is_found_however_it_is_spelled` was the
+suite's only remaining failure. Its body:
+
+```python
+long_form = str(tempfile.gettempdir())
+assert len(policy._spellings(long_form)) > 1, \
+    "only one spelling exists for this path; the test would pass for free"
+```
+
+Measured cause: `fsutil 8dot3name query` reports **8dot3 name creation DISABLED** on
+C:, and `%~sI` for the temp dir returns the long form unchanged. So no path on that
+volume has two spellings, `_spellings` correctly returns one, and **no correct
+implementation of the gate could satisfy the assertion.** The guard the author
+wrote — "the test would pass for free" — was doing exactly its job.
+
+### The fix is in the test, and the reason is the point
+
+The test means to cover a real bug: the manifest stored a root in the 8.3 short
+form while `Path.resolve()` produced the long form, `normcase` touched neither,
+and the gate told the user an approved workspace was outside every approved
+workspace — naming roots they had approved a moment earlier (D61). That is a
+property of *`policy._spellings` and the gate*, and none of it depends on the
+volume.
+
+So `GetLongPathNameW` is now stubbed (`_fake_short_spelling`), the manifest holds
+a synthetic short root, and the caller resolves to the long one. The assertion
+that mattered is kept and strengthened: a sibling sharing the prefix
+(`Approved Root2` vs `Approved Root`) must still be **refused**, so a gate that
+ignored roots entirely cannot pass. A second test covers `_norm`'s promise that a
+nonexistent path still compares exactly.
+
+**Two mutations, both caught:**
+
+| Mutation | Result |
+|---|---|
+| `_spellings` stops adding the `GetLongPathNameW` spelling | test fails (the bug itself) |
+| `_spellings` returns extra spellings (widening) | test fails (the prefix sibling is wrongly accepted) |
+
+The second is the one that matters. A test asserting "the gate accepts both
+spellings" passes against a gate that accepts *everything*; asserting a sibling is
+still refused is what makes it load-bearing.
+
+Enabling 8.3 name creation on C: would also have turned it green. That was
+rejected: it is a volume-level change with a real performance cost, made to
+satisfy a test that was asking the wrong question. **A test that asserts a machine
+setting reports the machine.** This is the same failure as D43 — output that is
+valid where it is produced and unusable where it is consumed — and the same
+correction applies.
+
+Measured after the fix: `test_delegate_ops.py` 65 passed (was 63 passed and 1
+failed) and `test_decisions_log.py` 6 passed with D1..D82 contiguous. A full suite
+run on a quiet machine: **1412 passed, 3 skipped, 47 subtests, exit 0**, in 2m52s.
+
+That figure is quoted with its caveat attached, because it is not a stable result:
+an adjacent run aborted at 67 % with the Tk fault recorded in D81. **This is the
+third time in this project a number I had measured has been the wrong one to quote**
+— D72 committed `1217 passed` from the start of a session rather than the end, and
+D81's first draft of its own paragraph said `1410 passed, 0 failed` before the run
+had finished. A green full-suite run is evidence, not a property of the tree.
+
+### Two stale constants that would have broken a real install
+
+Writing the installer surfaced both, and neither would have failed loudly:
+
+- **`build_phase0b.bat` pinned `CMAKE_CUDA_COMPILER` to `CUDA\v13.3`** on a machine
+  whose toolkit is v13.4. It now honours an inherited `CMAKE_CUDA_COMPILER`, then
+  `CUDA_PATH`, then the historical v13.3, and **fails with a message naming the
+  path it tried** rather than dying inside CMake.
+- **`download_fast_tier.ps1` hard-coded `$Out = 'G:\localaized\models'`** — the
+  installer had just refused every root except that one, and then would have
+  downloaded to a literal regardless of where it was pointed. It now defaults to
+  `$PSScriptRoot`.
+
+### The installer, and why it is a script with a GUI on top
+
+`install.ps1` is the install. `butleroy.iss` compiles to a 3.2 MB `Setup.exe` that
+does three things: collects four choices, passes them as switches, shows the
+output. No install logic lives in the `.iss`, because a second implementation of
+an install is a second thing that can be wrong without the first one being wrong
+(D61) — and the brain build is 20 minutes inside a `vcvars64` shell, which is not
+something to hide behind a wizard.
+
+Three choices are load-bearing:
+
+- **The install root is not offered.** `DisableDirPage=yes` in the `.iss`, and
+  `Assert-InstallRoot` in the engine, which exits 2 with the reason.
+  `policy.SELF_PATHS` names `G:\localaized` literally; installing elsewhere
+  silently stops the assistant denying itself write access to its own source,
+  and **nothing fails**, because the tests asserting the refusal compare a string
+  to the same string. Both sides check, and `install_self_test.ps1` asserts
+  `policy.py` still names it.
+- **No venv is bundled.** This session's venv was built under one Windows account
+  and broke under another precisely because interpreter paths are hard-coded.
+  Shipping `.venv/` would ship that failure.
+- **`verify_install.py` is the gate, and the engine's exit code tracks it** — not
+  the engine's optimism. `-SkipVerify` prints "unverified" rather than success.
+
+`install_self_test.ps1` holds the installer to 18 assertions, including that the
+AVX-512 warning is *reachable* (not merely present in the file), that no code path
+installs `llama-cpp-python` without `--no-binary`, and that weights are downloaded
+rather than embedded.
+
+### A PowerShell trap worth recording
+
+With `$ErrorActionPreference = 'Stop'`, **a native command that writes to stderr
+raises a terminating `NativeCommandError` even when it succeeded.** `uv` prints
+"Resolved 4 packages" on stderr; `llama.cpp` prints its own diagnostics there. The
+first version of the installer therefore reported `uv pip install failed` — with the
+message "Resolved 4 packages" printed as the error — and aborted at the step that
+proves the install works. Every native call is now bracketed with
+`$ErrorActionPreference = 'Continue'`, and the test asserts the bracket exists for
+each one.
+
+The general form: **a script that treats a tool's progress chatter as a failure
+will fail on success, and it will look like the tool failed.**

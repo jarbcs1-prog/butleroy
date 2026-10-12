@@ -39,7 +39,30 @@ set CMAKE_MAKE_PROGRAM=%VSCMD_ROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake
 REM Pin both compilers explicitly. "Newest on PATH" is how attempt 1 ended up with
 REM nvcc 13.3 from a PATH that also listed 13.2, and an unpinned CUDA compiler
 REM makes a build unreproducible for no benefit.
-set CMAKE_CUDA_COMPILER=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe
+REM
+REM Honour an already-pinned compiler, then CUDA_PATH, then the historical v13.3.
+REM An installer (install.ps1 -WithBrain) sets CMAKE_CUDA_COMPILER to what it
+REM detected, and this hard-coded v13.3 was silently overriding it on a machine
+REM whose toolkit is v13.4 - the build would have failed on a path that no longer
+REM exists, with an error that says nothing about a stale constant.
+if not defined CMAKE_CUDA_COMPILER (
+  if defined CUDA_PATH (
+    if exist "%CUDA_PATH%\bin\nvcc.exe" (
+      set CMAKE_CUDA_COMPILER=%CUDA_PATH%\bin\nvcc.exe
+    ) else (
+      echo FAILED: CUDA_PATH is set to "%CUDA_PATH%" but there is no bin\nvcc.exe there
+      exit /b 1
+    )
+  ) else (
+    set CMAKE_CUDA_COMPILER=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe
+  )
+)
+if not exist "%CMAKE_CUDA_COMPILER%" (
+  echo FAILED: nvcc not found at "%CMAKE_CUDA_COMPILER%"
+  echo   Set CUDA_PATH or CMAKE_CUDA_COMPILER and re-run.
+  exit /b 1
+)
+echo === nvcc: %CMAKE_CUDA_COMPILER% ===
 
 REM The fix for the original crash. GGML_NATIVE=OFF stops -march=native baking the
 REM build machine's instruction set in; GGML_AVX512=OFF is explicit

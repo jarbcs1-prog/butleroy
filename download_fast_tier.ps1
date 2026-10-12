@@ -6,11 +6,17 @@
 # partial transfer) - producing a GGUF that loads and then generates nonsense
 # rather than an error. Expected sizes come from the Hugging Face tree API.
 
+param(
+    # Default to this script's own directory rather than a hard-coded literal.
+    # install.ps1 calls this, and a hard-coded G:\localaized here meant the
+    # installer downloaded to a path it had just refused to install to.
+    [string] $Out = (Join-Path $PSScriptRoot 'models'),
+    [string] $Log = (Join-Path $PSScriptRoot 'download_fast_tier.log')
+)
+
 $ErrorActionPreference = 'Continue'
 
 $Repo = 'HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive'
-$Out = 'G:\localaized\models'
-$Log = 'G:\localaized\download_fast_tier.log'
 
 # filename -> exact expected byte count, from https://huggingface.co/api/models/<id>/tree/main
 $Wanted = [ordered]@{

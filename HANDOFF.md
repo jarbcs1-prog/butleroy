@@ -64,13 +64,16 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1410 passed, 1 failed, 3 skipped, 47 subtests   (~2m51s, no PYTHONPATH)
-             Measured 2026-10-13, full suite, exit 1 (D81) - run twice, both identical.
-             The 1 failure is tests/test_delegate_ops.py::
-             test_an_approved_root_is_found_however_it_is_spelled, which is NOT a code
-             defect: it asserts the temp path has two spellings and 8.3 name creation
-             is disabled on C:, so its own guard refuses to pass for free. See D81.
+tests        1412 passed, 3 skipped, 47 subtests   (measured 2026-10-13, exit 0,
+             2m52s on a quiet machine - D82)
+             CAVEAT, and it is not optional: an adjacent run aborted at 67% with
+             the intermittent Tcl fault below, so this figure is a measurement of
+             ONE run, not a property of the tree. Zero known failures as of D82.
              The 3 skips are the speech slow tests: BUTLEROY_SLOW_TESTS=1.
+             D82 rewrote the last failing test, which asserted a *volume*
+             property (that the temp path has two spellings) rather than a code
+             property. 8.3 name creation is disabled on C:, so no path there
+             ever had two, and no correct code could satisfy it.
              The previous figure here read "1411 passed, 3 skipped" and was stale in two
              ways at once: a wrong count, and a claim that 40 tests were run by
              tests/test_settings_isolated.py - a file D80 deleted in 6687475. Those

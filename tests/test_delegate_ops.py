@@ -653,19 +653,76 @@ def test_a_changed_goal_changes_the_payload_hash(wired):
 # ------------------------------------------------------------------ policy
 
 
-def test_an_approved_root_is_found_however_it_is_spelled():
-    """The manifest stores the root as typed - on this machine the 8.3 short
-    form - while `Path.resolve()` produces the long form. `normcase` touches
-    neither, so the gate reported an approved workspace as outside every
-    approved workspace."""
+def _fake_short_spelling(monkeypatch, long_for: dict[str, str]) -> None:
+    """Make `policy._spellings` see an 8.3 short form where there is none.
+
+    `GetLongPathNameW` turns the *short* form into the long one, and that is the
+    direction the bug ran in: the manifest held `C:\\Users\\PCPRIN~1\\...` while
+    `Path.resolve()` produced `C:\\Users\\PC Principal\\...`. So the map is keyed
+    by the short path `_spellings` will ask about, and valued with the long form
+    the API would return.
+
+    **Why this is faked, and why that is the fix rather than a dodge:** the
+    original version asserted `len(_spellings(tempfile.gettempdir())) > 1`, which
+    is a property of the *volume*, not of the code. It passed on a machine with
+    8.3 name creation on and failed on one with it off — `fsutil 8dot3name query`
+    reports DISABLED here, so no path on C: has two spellings and the assertion
+    could not be satisfied by any correct code. A test that asserts a machine
+    setting reports the machine, not the gate. Enabling 8.3 to satisfy it would
+    be configuring the box to make a test green.
+    """
+    import ctypes
+
+    def fake_get_long(path, buf, size):  # noqa: ANN001 - ctypes signature
+        wide = long_for.get(path, path)
+        if len(wide) + 1 > size:
+            return 0
+        buf.value = wide
+        return len(wide) + 1
+
+    monkeypatch.setattr(ctypes.windll.kernel32, "GetLongPathNameW",
+                        fake_get_long, raising=True)
+
+
+def test_an_approved_root_is_found_however_it_is_spelled(monkeypatch, tmp_path):
+    """A root stored in the 8.3 short form must still match the long form.
+
+    The failure this covers was a false refusal: the user approved a workspace,
+    and the gate told them it was outside every approved workspace, naming roots
+    they had approved a moment earlier.
+    """
     from assistant import tools
-    long_form = str(tempfile.gettempdir())
-    assert len(policy._spellings(long_form)) > 1, \
-        "only one spelling exists for this path; the test would pass for free"
-    gate = tools.default_gate([long_form])
-    assert gate.path_refusal(os.path.join(long_form, "inside.txt")) is None
-    for spelling in policy._spellings(long_form):
+
+    long_root = str(tmp_path / "Approved Root")
+    short_root = str(tmp_path / "APPROVE~1")
+    _fake_short_spelling(monkeypatch, {policy._norm(short_root): long_root})
+
+    spellings = policy._spellings(short_root)
+    assert len(spellings) > 1, "the fake produced no second spelling; the test is vacuous"
+    assert policy._norm(long_root) in spellings, spellings
+
+    # Stored as typed - the short form, which is what the manifest holds.
+    gate = tools.default_gate([short_root])
+    # Resolved by the caller to the long form, which is what a path check sees.
+    assert gate.path_refusal(os.path.join(long_root, "inside.txt")) is None
+    assert gate.path_refusal(os.path.join(short_root, "inside.txt")) is None
+    for spelling in spellings:
         assert gate.path_refusal(spelling) is None, spelling
+
+    # And the accommodation is not a widening: a sibling with the same prefix is
+    # still refused. Without this the fake above would pass a gate that ignored
+    # roots entirely.
+    assert gate.path_refusal(os.path.join(str(tmp_path / "Approved Root2"),
+                                          "inside.txt")) is not None
+
+
+def test_spellings_never_lose_the_plain_form():
+    """`_norm`'s promise: a path that does not exist still compares exactly.
+
+    `GetLongPathNameW` needs the path to exist, so it is a spelling to *try*.
+    """
+    for path in (r"C:\ws\does\not\exist", r"C:\ws\also-missing\a.txt"):
+        assert policy._norm(path) in policy._spellings(path), path
 
 
 def test_containment_is_not_a_string_prefix():

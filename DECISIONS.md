@@ -3653,9 +3653,15 @@ still in `brand/README.md` as specifications, and there is no code for them. The
 in `self.widgets` and `self.named` - so the next five are the same shape and one new
 file each.
 
-### The Tk tests run in a subprocess, and why that is not a workaround
+### The Tk tests ran in a subprocess, and why that was not a workaround
 
-`tests/test_settings_real.py` is run by `tests/test_settings_isolated.py`, in a
+> **Superseded by D80, corrected in D81.** `tests/test_settings_isolated.py` was
+> **deleted** in commit `6687475`, so the child process described below no longer
+> exists. `test_settings_real.py` (40 tests) and `test_widgets_real.py` (30) now run
+> in-process in the parent suite. This section is retained as the reasoning for that
+> decision and for the abort it was working around, which is still intermittent.
+
+`tests/test_settings_real.py` was run by `tests/test_settings_isolated.py`, in a
 child process. The tests themselves are ordinary; the containment is about the
 *process exit code*.
 
@@ -3737,9 +3743,10 @@ that is too narrow does not fail loudly; it fails confidently, about the wrong t
 and a green test is the most reassuring possible wrong answer.
 
 Suite after: **1294 passed, 22 skipped, 47 subtests**, exit 0 (1236 before).
-Nineteen of the 22 skips are `test_settings_real.py`, which is executed by
-`test_settings_isolated.py` in a subprocess and passes there; the other three are the
-speech slow tests. New tests: 29 for the config module, 21 for the ops, 19 for the
+Nineteen of the 22 skips were `test_settings_real.py`, which was executed by
+`test_settings_isolated.py` in a subprocess and passed there; the other three were the
+speech slow tests. (Both parts of that sentence are now false — D80 deleted the
+subprocess wrapper and D81 recorded the measured correction.) New tests: 29 for the config module, 21 for the ops, 19 for the
 window (run out of process), 6 for the decision log, and 2 for the isolation itself.
 
 ---
@@ -4144,3 +4151,92 @@ One test was wrong on the first attempt and worth recording: it withdrew the roo
 a withdrawn root reports width 1 for its children, so the meter-stretches test measured
 60 px at every window size and failed for a reason that had nothing to do with the
 meter. The root is now positioned off-screen instead.
+
+---
+
+## D81 - The docs still described a subprocess wrapper that D80 deleted
+
+D80 removed `tests/test_settings_isolated.py` and the import-time display probe that
+motivated it. Five places kept describing the deleted file as though it were still
+running the Tk tests in a child process:
+
+| Location | Claim |
+|---|---|
+| `HANDOFF.md` §3 | "40 of the 43 skips are `test_settings_real.py`, which is run by `test_settings_isolated.py` in a subprocess… They are NOT unrun - 19 of them pass in the child." |
+| `DECISIONS.md` (D77-era) | "The Tk tests run in a subprocess" — a whole subsection arguing for containment that no longer exists |
+| `DECISIONS.md` (same section, tail) | "19 of the 22 skips are `test_settings_real.py`, which is executed by `test_settings_isolated.py` in a subprocess and passes there" |
+| `tests/test_settings_real.py:19` | "**This module is run inside a subprocess by `test_settings_isolated.py`.**" |
+| `tests/test_widgets_real.py:3` | "Run by `test_settings_isolated.py` in a subprocess" |
+
+### Why this one mattered more than a stale figure
+
+A wrong number decays, and §6 already has a rule about that: write the run it came from.
+This was worse, because it asserted a **safety net that is gone**. A reader of the old
+HANDOFF line would conclude the settings window is protected against the Tcl abort by
+subprocess containment, and that 40 of its tests are skips rather than passes. Both are
+false since D80: `test_settings_real.py` (40) and `test_widgets_real.py` (30) run
+**in-process** and all pass. Worse, removing the containment was the *fix* for the
+D75-D80 abort class, so the docs described the pre-fix state as the current one.
+
+The evidence is unambiguous and checked rather than inferred: `git log --all
+--diff-filter=D -- tests/test_settings_isolated.py` returns `6687475`, and
+`git show 6687475 --stat` lists `tests/test_settings_isolated.py | 95 ------`. The file
+was deleted on purpose, in the same commit that fixed the probe. **No test failed to
+catch this, because nothing asserts that documentation matches the tree.**
+
+### The count was wrong for a third, unrelated reason
+
+The same line claimed `1411 passed, 3 skipped`. Measured on 2026-10-13 with a working
+venv and CUDA on PATH, full suite, run twice with identical results:
+**1410 passed, 1 failed, 3 skipped, 47 subtests**, exit 1. The 3 skips are the speech
+slow tests (`BUTLEROY_SLOW_TESTS=1`), which §3 had already correctly attributed — it just
+also attributed 40 skips to the wrapper that D80 deleted, so the two halves of that
+sentence could not both be true. The single failure is the 8.3 test below.
+
+Note the method, because it is this file's own §6 rule applied to itself: the first
+draft of this paragraph said *1410 passed, 0 failed, 4 skipped, exit 0*, written before
+the run finished. It was wrong in three of four numbers, in the flattering direction,
+and was corrected only because the measured line was read back before committing. A
+remembered count and a measured count agree far less often than they should.
+
+### What was found while fixing it
+
+**`CUDA_PATH` is a hard runtime prerequisite, and it is not written down anywhere as
+one.** D26 says the CUDA runtime must be on PATH or `import llama_cpp` fails outright.
+That is true and load-bearing: with the CUDA Toolkit absent, exactly the 20 tests in
+`tests/test_brain.py` fail on `FileNotFoundError: Could not find module
+'…\llama.dll' (or one of its dependencies)`, and the *only* signal is that message. The
+DLL exists; a dependency of it (`cublas64_13.dll`) does not, which is why the message
+names the wrong file. This is D43 in a new medium — generator output that is legal in
+the generator's own language and unusable by its consumer — and it is the third time in
+this project that a "missing file" error has really meant "missing *dependency*".
+
+### The two failures that are not defects, and the one that is not fixed
+
+`test_obsidian.py::test_refuses_to_write_through_a_junction_in_a_parent` failed on
+`WinError 1314` — `os.symlink` needs the create-symlink privilege, which the account
+did not hold. **Fixed by enabling Developer Mode**; the file is 43/43 after. No code
+changed, which is the correct answer: the test asserts a containment property and the
+environment, not the code, was what refused.
+
+`test_delegate_ops.py::test_an_approved_root_is_found_however_it_is_spelled` still
+fails, and it is **not** fixed here. It asserts `len(policy._spellings(tempdir)) > 1`
+and fails with *"only one spelling exists for this path; the test would pass for free"*.
+Measured cause: 8.3 short-name creation is **disabled on C:** (`fsutil 8dot3name query`
+reports state 1, and `%~sI` for the temp dir returns the long form unchanged), so the
+path has exactly one spelling. The test's own guard is doing its job — it is refusing to
+assert a property it cannot currently observe. Enabling 8.3 name creation on C: is a
+machine-level change with a real performance cost on some volumes, so it is not done
+unilaterally. **This is a test that asserts a machine property rather than a code
+property, and it is the more interesting half of this decision:** the right fix is
+probably to point it at a path with two spellings, or to assert the *gate's* behaviour
+given a synthetic pair, rather than to configure the volume.
+
+**The intermittent Tcl abort is narrowed, not fixed.** One reproduction on 2026-10-13:
+`0x80000003` from `settings.py:1513 _release_widgets` during `Garbage-collecting` —
+that is, D80's own fix (claim 7 in §5) aborting while doing its job. Subset runs, each
+exit 0: `test_settings_real.py` alone (40 passed), the four real-Tk files together
+(86 passed), and all 35 files preceding `test_settings_real.py` plus that file
+(1041 passed). Since it sits at file-index 35 of 49 and nothing containing it
+reproduces, the trigger is **after** it, not in it. Two subsequent full runs completed
+exit 0, so it is intermittent and still unrooted. Recorded, not called solved.

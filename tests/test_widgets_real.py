@@ -1,9 +1,8 @@
 """The widget set, on a real Tk.
 
-Run by `test_settings_isolated.py` in a subprocess, for the same reason the settings
-window is: a worker-thread Tk root in this build can leave Tcl's async handler to be
-deleted at interpreter shutdown, and the process then exits `-2147483645` *after every
-test has passed*.
+Run in-process. The `test_settings_isolated.py` subprocess wrapper that used to contain
+this file was deleted in D80 (6687475), which removed the import-time display probe that
+caused it — so this module is no longer special-cased, and 30 tests run here directly.
 
 The assertions here are deliberately about **meaning** rather than appearance. Whether
 the kit looks right cannot be asserted - that was checked by screenshotting it and

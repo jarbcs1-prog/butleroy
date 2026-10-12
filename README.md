@@ -17,7 +17,7 @@ A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs 
 
 | File | What it is |
 |------|------------|
-| **DECISIONS.md** | 66 numbered decisions with rationale and evidence. v1 is in git history. |
+| **DECISIONS.md** | 81 numbered decisions with rationale and evidence. v1 is in git history. |
 | **ARCHITECTURE.md** | Four planes, the VRAM arbiter, authority tiers, memory design |
 | **PLAN.md** | Seven phases with measurable gates |
 | **INSTALL.md** | How to install it. **Read §3 first** — one step is mandatory and counter-intuitive |
@@ -71,7 +71,7 @@ verify_install.py              # prove the install actually works
 
 | | |
 |---|---|
-| Tests | **1167 pass**, 3 skipped, 47 subtests — no `PYTHONPATH` needed |
+| Tests | **1410 pass**, 1 fail, 3 skipped, 47 subtests — no `PYTHONPATH` needed. The 1 failure is a machine property (8.3 names disabled on C:), not a defect; see DECISIONS.md D81 |
 | Install | `uv pip install -e .` in 2.9 s; `verify_install.py` exits 0 |
 | Restart | The daemon survives restarts (D64) |
 | Launch | One command starts tray + chord + prompt window (D65, D67) |

@@ -16,17 +16,20 @@ shared fixture has to guarantee its own preconditions, and the ways it failed we
 `KeyError: 'models'` in whichever test happened to run next — an error naming the
 fixture rather than the cause. Isolated windows are boring and deterministic.
 
-**This module is run inside a subprocess by `test_settings_isolated.py`.** Not for
-speed. In this Python/Tk build, a worker-thread Tk root that has been created and
-destroyed can leave Tcl's async handler to be deleted at interpreter shutdown, on
-the main thread — `Tcl_AsyncDelete: async handler deleted by the wrong thread`, and
-the process exits `-2147483645` *after every test has passed*. It is not a leak: the
-release tests below assert nothing is retained, bare tkinter handles forty such
-roots without complaint, and the count at which it appears is not stable. What is
-stable is that a Tcl interpreter outliving its owning thread is this environment's
-problem, not a property of the product. Containing it in a subprocess means it is
-*observable* (a non-zero exit code, reported) instead of silently turning a green run
-into a red one.
+**This module runs in-process.** It used to be run inside a subprocess by
+`test_settings_isolated.py`, for a good reason: in this Python/Tk build, a worker-thread
+Tk root that has been created and destroyed can leave Tcl's async handler to be deleted
+at interpreter shutdown, on the main thread — `Tcl_AsyncDelete: async handler deleted by
+the wrong thread`, and the process exits `-2147483645` *after every test has passed*. It
+was not a leak: the release tests below assert nothing is retained, bare tkinter handles
+forty such roots without complaint, and the count at which it appears is not stable.
+
+That containment is **gone as of D80 (6687475)**, which deleted
+`test_settings_isolated.py` along with the import-time display probe that had motivated
+it. These tests are no longer skipped and no longer run in a child — all 40 run in the
+parent suite. The abort is therefore not contained any more, and D81 recorded one
+reproduction on 2026-10-13 (`0x80000003` in `settings.py:1513 _release_widgets`). It is
+intermittent and not root-caused; see HANDOFF §5 structural claim 6.
 """
 
 from __future__ import annotations

@@ -64,15 +64,24 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1411 passed, 3 skipped, 47 subtests   (~2m52s, no PYTHONPATH needed)
-             40 of the 43 skips are tests/test_settings_real.py, which is run
-             by tests/test_settings_isolated.py in a subprocess (see structural
-             claim 6 in §5). They are NOT unrun - 19 of them pass in the child.
-             The other 3 are the speech slow tests: BUTLEROY_SLOW_TESTS=1.
+tests        1410 passed, 1 failed, 3 skipped, 47 subtests   (~2m51s, no PYTHONPATH)
+             Measured 2026-10-13, full suite, exit 1 (D81) - run twice, both identical.
+             The 1 failure is tests/test_delegate_ops.py::
+             test_an_approved_root_is_found_however_it_is_spelled, which is NOT a code
+             defect: it asserts the temp path has two spellings and 8.3 name creation
+             is disabled on C:, so its own guard refuses to pass for free. See D81.
+             The 3 skips are the speech slow tests: BUTLEROY_SLOW_TESTS=1.
+             The previous figure here read "1411 passed, 3 skipped" and was stale in two
+             ways at once: a wrong count, and a claim that 40 tests were run by
+             tests/test_settings_isolated.py - a file D80 deleted in 6687475. Those
+             tests now run in-process and all pass; they are not skips and are not
+             skipped behind a subprocess.
+             CUDA_PATH must be set or 20 tests in tests/test_brain.py fail on import
+             (D26); see D81.
 verify_install.py  7 passed, 0 failed, 0 skipped  exit 0
 tools        61 registered · 61 with executors · 0 unimplemented
              (every registered tool can run; reflect.* closed it, D71)
-decisions    D1..D80, contiguous, none missing - and now *tested*
+decisions    D1..D81, contiguous, none missing - and now *tested*
              (tests/test_decisions_log.py), because a hand-kept
              figure was wrong: D74 was cited by a source file and
              did not exist
@@ -313,6 +322,15 @@ future edit could quietly undo:
    interaction between these files and the rest of the suite that a three-file run
    does not reproduce. It has not recurred in three consecutive full runs, and it is
    recorded rather than called solved.
+
+   **Update (D81):** one more abort was reproduced on 2026-10-13 — `0x80000003` from
+   `settings.py:1513 _release_widgets` during `Garbage-collecting`, i.e. claim 7
+   below doing its job and still aborting. Narrowed, not fixed: `test_settings_real.py`
+   alone (40 passed), the four real-Tk files together (86 passed), and all 35 files
+   preceding it plus `test_settings_real.py` (1041 passed) each exit 0, so no subset
+   containing it reproduces. The trigger is therefore *after* `test_settings_real.py`
+   (file-index 35 of 49), not in it. Two subsequent full runs completed with exit 0,
+   so it remains intermittent and unrooted. Do not call it fixed.
 7. **`_release_widgets` must keep collecting on the Tk thread.** Nulling the widget
    attributes is not sufficient on its own — the `after` callbacks and the event
    queue leave reference cycles, and only the cyclic collector breaks them. Delete
@@ -496,19 +514,28 @@ Local assistant 0.3.0 that is empty white") was the one that cracked it.
 
 **Decisions.** New findings go in `DECISIONS.md` as `## Dn - <title that states
 the finding, not the topic>`. Rationale and evidence, including the wrong
-hypotheses and what they cost. The numbering is load-bearing: all 71 are
+hypotheses and what they cost. The numbering is load-bearing: all 81 are
 contiguous. When a plan line turns out to be wrong on the record, correct the line
 and say so — do not quietly overwrite it.
 
 ## 7. Quick commands
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q        # 1095 tests, ~2m34s
+.\.venv\Scripts\python.exe -m pytest -q        # 1414 tests, ~2m51s
+                                         # CUDA_PATH must be set (D26, D81) or 20 brain tests fail
 .\.venv\Scripts\python.exe verify_install.py   # exit 0 = install is real
 .\.venv\Scripts\python.exe -m assistant        # start the product
 .\.venv\Scripts\python.exe -m assistant --check # preflight, no display
 .\.venv\Scripts\python.exe phase0_gate.py      # CUDA + Qwen3.5 gate (needs the model)
 .\.venv\Scripts\python.exe probe_isa.py        # D25 standing smoke test: CPU can execute
+```
+
+**Set `CUDA_PATH` first, in every shell.** It is set at machine scope by the CUDA
+installer, but a shell that was already open when you installed it will not have it,
+and the failure is a `llama.dll` message that names the wrong file:
+
+```powershell
+$env:CUDA_PATH = [Environment]::GetEnvironmentVariable('CUDA_PATH','Machine')
 ```
 
 Two probes written this session live in the temp dir rather than the repo, because

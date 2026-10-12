@@ -494,7 +494,8 @@ produce a permanent rule. The assistant cannot write its own policy even if inst
 4. **Coding** - done (D61). The brain writes code when asked, and `delegate.*` hands a unit of work to a tracked worker subprocess and reads the result back.
 5. **Pedagogy** - done (D62). `teach.*` is six tools and a teaching ledger: `teach.progress` reads it with no model at all, and the other five stream prose, which is why they are T2 rather than the READ they were declared as. **All five capability items the user named are now built.**
 
-Current state: **1167 tests pass, 3 skipped, 47 subtests. Phases 0-6 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 61 tool executors covering administration, delegation, teaching, files, mail and reflection, and the whole tool registry are done.
+Current state: **1410 tests pass, 1 fail, 3 skipped, 47 subtests** (measured 2026-10-13,
+D81; the 1 failure asserts a machine property, not a code property). **Phases 0-6 closed** (voice closed by D57 without hands-free; push-to-talk is the voice input). The tray, hotkey, presence, T3 confirmation, quarantine, grammar-first brain as a disposable leased child, the tkinter overlay, the Telegram bridge, the Obsidian bridge, 61 tool executors covering administration, delegation, teaching, files, mail and reflection, and the whole tool registry are done.
 
 **The daemon could not restart until D64, and that outranks everything below.**
 `Daemon.__init__` minted a fresh authkey per construction while `store_authkey`

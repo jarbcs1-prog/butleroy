@@ -4590,3 +4590,52 @@ EVEX; `test_brain.py` **39 passed**.
 **Lesson worth keeping:** a rollback script whose `snapshot` deletes the previous
 backup must not be callable by a probe. It is a destructive primitive, and I gave a
 diagnostic tool a path to it.
+## D85 - The 32 recent commits were attributed to the wrong name, and fixing that cost a trap
+
+`git config --global user.name` was unset, so every commit in this session had to
+pass `GIT_AUTHOR_*`/`GIT_COMMITTER_*` per invocation. Those commits were authored
+as **`John B.`** while the GitHub account is **`jarbcs1-prog`**. Both names now
+resolve to one identity:
+
+```
+user.name  = jarbcs1-prog
+user.email = jarbcs1@gmail.com      (unchanged - that is what ties commits to the account)
+```
+
+Rewrote the **32** `John B.` commits with `git filter-branch --env-filter`,
+changing author *and* committer. Verified afterwards:
+
+| check | result |
+|---|---|
+| tree SHA | `88f6452f` before **and** after — byte-identical content |
+| `OpenCode <opencode@local>` commits | 56 before, 56 after, **56/56 SHAs preserved** |
+| total commits | 89 (88 + the B3 mechanism commit made during the rewrite) |
+| the 32 rewritten | now `jarbcs1-prog <jarbcs1@gmail.com>` |
+
+So the rewrite touched authorship only. Nothing in the tree moved, and the older
+history was left byte-for-byte alone rather than swept along.
+
+### The 56 `OpenCode <opencode@local>` commits were deliberately NOT rewritten
+
+They were genuinely made under an agent identity, and relabelling them would assert
+something untrue about who wrote them. If they should carry the same identity, that
+is a separate decision and it should be made on purpose.
+
+### The trap: `filter-branch` rewrote the backup tag I had just made
+
+I created `pre-rewrite-johnb-4df7df8` pointing at the pre-rewrite HEAD, then ran
+`filter-branch --tag-name-filter cat -- --all`. That rewrote the tag too, so it
+pointed at the **new** history — a backup ref that silently backs up nothing, and a
+rollback command that looks correct and restores the wrong thing.
+
+The tag has been deleted. The real pre-rewrite ref, which `filter-branch` keeps
+outside `--all`'s reach:
+
+```
+refs/original/refs/heads/master -> 4df7df8
+```
+
+**Rollback:** `git reset --hard refs/original/refs/heads/master`
+
+General form: **create the backup ref under `refs/`, never as a tag that the rewrite
+command also enumerates.** A backup you have to reason about is not a backup.

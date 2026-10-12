@@ -4814,70 +4814,60 @@ A directory-existence check used to infer "is this package installed" is only
 correct when the package is a directory. For a single-module package it is not.
 ---
 
-## D88 - The installer shipped a build script whose own dependency was not in it
+## D89 - The widget kit was real, correct, and completely unexercised
 
-Recompiling the installer after D87 surfaced a packaging defect that no test
-could have found, because the thing missing was a file the tests never load.
+Before rebuilding any settings surface on `widgets.py`, it had to be established
+that `widgets.py` works. It had never been established.
 
-`butleroy.iss` shipped `build_phase0b.bat` but **not** `build_rollback.ps1`. Since
-D84 that batch does nothing except delegate its entire transaction:
+**Measured 2026-10-13:** `settings.py` instantiates **seven** of the module's nine
+widgets, and all seven are `Button`. `Field`, `Select`, `Toggle`, `Badge`,
+`Meter`, `Panel`, `ListRow` and `Dialog` are used **nowhere in the product**, and
+**no test instantiated any of them**. So the kit D80 introduced could be entirely
+broken and all 1413 tests would still pass - the same failure shape as D87.
 
-```
-powershell -File "%~dp0build_rollback.ps1" -Mode build -Root "%~dp0."
-```
+`brand/README.md` says *"The sections use it - seven ad-hoc button blocks and the
+tier rows collapsed into it - so the kit is load bearing rather than a parallel
+implementation."* Only the button blocks are true. `Badge.for_tier()`, which the
+same file calls *"how the authority model becomes visible"*, is called from
+nowhere in `settings.py`.
 
-So in any installed tree the brain build dies with *cannot find
-build_rollback.ps1* - and `install_self_test.ps1` is structurally incapable of
-noticing, because it only regexes the text of install.ps1 and never runs a build.
+### It works, and it matches the kit
 
-**Found by cross-checking**, not by reading: extract every filename the shipped
-scripts reference, subtract what `.iss` ships, and look at what is left. That
-found three, of which one was real:
+Rendered and photographed rather than assumed. All nine construct, pack, and lay
+out; the tier badges render in their four correct colours (T0 verdigris, T1 sage,
+T2 amber, T3 rust); the four button variants are visually distinct; the Meter
+reports its figure as text. `tests/test_widgets_render.py` now holds that floor -
+7 tests, and **gate-checked by mutation**: collapsing `TIER_COLOUR` to one colour
+and making an unknown tier inherit a visible token both make it fail.
 
-| referenced | referenced by | shipped? |
-|---|---|---|
-| `build_rollback.ps1` | `build_phase0b.bat` | **NO** - a `.ps1`, not covered by the `*.md` glob |
-| `ARCHITECTURE.md` | `install.ps1` | yes, via `Source: *.md` |
-| `PLAN.md` | `install.ps1` | yes, via `Source: *.md` |
+### One real off-spec, found by the test rather than by reading
 
-The general form: **a glob that happens to cover today's files is not a manifest.**
-`*.md` looked fine and would have kept looking fine.
+`BUTTON_H = 36` is declared, exported in `__all__`, and **never applied**. A
+Button's height is set by its font metrics and measures **34 px**. `INPUT_H = 40`
+has the same problem. The constant is documentation, not behaviour. The test
+therefore asserts the kit's own 32 px floor - *"nothing interactive is under 32"* -
+rather than the nominal 36, because making a 2 px cosmetic gap red would train
+everyone to ignore the file. Not fixed: it is cosmetic, and the floor that matters
+is asserted.
 
-Note what this cost. The shipped `Butleroy-Setup-0.3.0.exe` predated D84 entirely,
-so it contained neither the transaction nor this fix. It was recompiled twice in
-this session and the size moved 3,402,640 -> 3,421,789 bytes.
+### Three false defects I nearly recorded
 
-### Cannot verify the compiled package's contents here
+Worth writing down, because each looked exactly like a real bug and each was my
+own measurement error:
 
-ISCC exits 0 and reports nothing for a missing `Source` - a missing file is a hard
-compile error, so exit 0 does mean every listed Source was found. But I could not
-*list the built archive*: `innounp` is not installed and 7-Zip 26.04 reports
-`Cannot open the file as archive`, because Inno Setup 6+ uses a compression 7-Zip
-does not read. The +19 KB size delta is consistent with the added script and is not
-proof. **Verifying the payload needs a human to run Setup.exe and look**, or
-`innounp` installed. Recorded as unverified rather than asserted.
+1. **The four badges rendered identically grey.** `for_tier` is a **classmethod on
+   `Badge`** (`Badge.for_tier(parent, tier)`), not a module-level function. My
+   probe called `W.for_tier(t)`, got an AttributeError, and substituted `"sage"`
+   for every tier - manufacturing a broken-looking tier map.
+2. **The Panel content sat at the bottom with a huge gap.** `Panel` owns an
+   internal **`body`** frame carrying `expand=True`. I packed into the Panel
+   itself, so `body` absorbed the slack. The layout was fine.
+3. **A misfiled child is not "squeezed".** I asserted that a child packed on the
+   Panel is squeezed; measured, such a child is 34 px, exactly like a correctly
+   packed one. It simply stacks above the body. The test now asserts what is
+   actually true - that `panel.body` is the container - and says why the earlier
+   claim sounded right and was false.
 
-### Also: the installer claimed a check count that did not exist
-
-`install.ps1` printed *"verify_install.py exit 0 - all seven checks pass"*. There
-are eight. The line predated `brain_surface` and was never updated - so on the run
-whose entire purpose is to attest the install is trustworthy, it attested a count
-that did not match its own output one line above. It now counts the `Check(...)`
-entries in the source rather than hardcoding a number.
-
-### Full default-switch run
-
-`install.ps1 -Root G:\localaized`, no brain / voice / model / autostart:
-
-| step | result |
-|---|---|
-| venv | skipped - *"existing venv works"* |
-| package | `.` |
-| brain / models / autostart | correctly reported as not done |
-| verify_install.py | **8 passed, 0 failed, exit 0** |
-| summary | `INSTALLED.` |
-
-It also printed an honest caveat rather than claiming success: *"no brain was built,
-so the assistant cannot answer questions."* A default install therefore reports
-itself as **not usable**, which is correct - the brain is opt-in and the CPU cannot
-use the wheel (D87).
+Two further Tk API assumptions of mine were simply wrong in this build:
+`winfo_master` does not exist on a widget (the attribute is `.master`), and
+`tk.Button(parent, "text")` mis-parses positionally.

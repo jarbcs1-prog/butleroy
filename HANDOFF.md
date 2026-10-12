@@ -64,7 +64,9 @@ idle, which on Windows is the only reliable way to return VRAM.
 Every number below was measured, not remembered.
 
 ```
-tests        1412 passed, 3 skipped, 47 subtests   (measured 2026-10-13, exit 0,
+tests        1413 passed, 3 skipped, 47 subtests   (measured 2026-10-13, exit 0,
+             on a .venv deleted and rebuilt from NOTHING that morning - D87. The
+             count rose from 1412 because one manifest test became two.)
              2m52s on a quiet machine - D82). Zero known failures.
              CAVEAT: a full-suite run can abort instead, at ~67%, with the
              intermittent Tcl fault in §5 claim 6. Measured rate **~9 %**

@@ -1,7 +1,7 @@
 # Installing
 
 The assistant runs on **one Windows 11 machine**: RTX 3060 12 GB, Ryzen 5 5600G
-(6c/6t), 32 GB DDR4, Python 3.11, CUDA 13.3. Everything below has been run on
+(6c/6t), 32 GB DDR4, Python 3.11.9, CUDA 13.4. Everything below has been run on
 that machine and the numbers are from it.
 
 There is one step here that is genuinely unusual, and it is not optional. Read
@@ -43,6 +43,24 @@ cd G:\localaized
 uv venv --python 3.11 .venv
 ```
 
+**The base interpreter, for the record.** This venv was created by a uv-managed
+CPython and its `pyvenv.cfg` was later repointed at the system install:
+
+```
+home = C:\Program Files\Python311
+version_info = 3.11.14      <- stale; see below
+```
+
+`C:\Program Files\Python311\python.exe` is **3.11.9**, and so is the venv's
+interpreter (`sys.version` and `sys.base_prefix` both confirm it). The
+`version_info` line is leftover metadata from the original creation and is **not**
+what runs — `verify_install.py` reads the live `sys.version_info`, and nothing in
+`install.ps1` or `verify_install.py` parses `pyvenv.cfg`. So the discrepancy is
+cosmetic; the number to trust is `3.11.9`.
+
+Do not "fix" it by editing `pyvenv.cfg` while the build is running. If you ever do,
+`home` is the field that decides where the base interpreter is found.
+
 ## 3. Why the source build is mandatory
 
 **The prebuilt `llama-cpp-python` wheel cannot execute on this CPU.** Do not
@@ -78,6 +96,32 @@ which is the single biggest lever on a 6-core build.
 It must end with **`exit code 0`**. Logs land in `build_phase0b.log`;
 `build_phase0b_attempt1.log` is kept deliberately, because the first attempt
 failing is the more useful record.
+
+> **Exit code 0 does not mean it compiled.** uv caches the *built wheel*, so a
+> second identical run resolves and installs in about **four seconds** and exits 0
+> without invoking a compiler once. Measured 2026-10-13: `Prepared 1 package in
+> 11ms`, and every DLL byte-identical (sha256) afterwards. If you need a genuine
+> rebuild:
+>
+> ```powershell
+> $env:BUTLEROY_FORCE_REBUILD = '1'
+> .\build_phase0b.bat
+> ```
+>
+> That sets `UV_NO_CACHE=1` for the build. Treat anything finishing in seconds as
+> a cache hit, and check the clock — a real build is ~20 minutes.
+>
+> One caveat worth knowing: uv's cache key comes from the source and its build
+> requirements. The CMake flags above are *ours*, not llama-cpp-python's, so
+> whether they participate in that key is **unverified**. If they do not, a cached
+> wheel can be reused across a change of build flags — which would quietly
+> reintroduce exactly the AVX-512 failure a flags change exists to prevent. This is
+> the strongest practical argument for `BUTLEROY_FORCE_REBUILD=1` after changing any
+> flag.
+
+The build is a **transaction**: `build_rollback.ps1` snapshots `llama_cpp`, and any
+non-zero exit restores it and re-propagates the code. A failed build costs ~20
+minutes, never a working brain (D84).
 
 ## 5. Install the package
 
@@ -129,16 +173,17 @@ Piper voices (`.onnx`) go in `models/` too.
 ```
 
 ```
-[ ok ] python     3.11.14, 64-bit
+[ ok ] python     3.11.9, 64-bit
 [ ok ] imports    assistant.* imports; no model runtime loaded
 [ ok ] no_ports   no TCP listener; transport is named pipes only
 [ ok ] isa        ggml-cpu.dll: 10/984 EVEX-shaped (1.02%), under the 10% limit
-[ ok ] daemon     preflight ok: 26 audit records verify, no listening ports
-[ ok ] models     5 model file(s), 13.04 GB
-[ ok ] inference  Qwen3.5-0.8B-Q4_0.gguf: generated 8 chars in 0.9s, 25/25 layers on GPU
+[ ok ] brain_surface  llama_cpp exposes Llama and LlamaGrammar, as brain.py imports them
+[ ok ] daemon     preflight ok: 42 audit records verify, no listening ports
+[ ok ] models     5 model file(s), 13.04 GB: Qwen3.5-0.8B-Q4_0.gguf, ...
+[ ok ] inference  Qwen3.5-0.8B-Q4_0.gguf: generated 8 chars in 1.0s, 25/25 layers on GPU
 ```
 
-Exit code 0 only if all seven pass. Two of them are the ones that matter:
+Exit code 0 only if all eight pass. Two of them are the ones that matter:
 
 - **`isa`** reads the built `ggml-cpu.dll` and fails if it was compiled for
   AVX-512. The threshold is 10 % of EVEX-shaped sites; the gap is enormous
@@ -306,8 +351,13 @@ Worth knowing before you use it:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-1047 tests, ~2.5 minutes. No `PYTHONPATH` needed — `pythonpath = ["src"]` is in
+1412 tests, ~3 minutes. No `PYTHONPATH` needed — `pythonpath = ["src"]` is in
 `pyproject.toml`. Three speech tests are skipped unless `BUTLEROY_SLOW_TESTS=1`.
+
+A full run can instead abort at ~67% with a Tcl `0x80000003` from
+`settings.py:1513`. That one is **unresolved** — measured at ~9% of runs, with
+two hypotheses disproved (D83). It is not fixed, so do not read three clean runs
+as a fix: at 9%, `0.91³ ≈ 75%` happens by chance alone.
 
 ---
 
@@ -318,7 +368,7 @@ Worth knowing before you use it:
 | `STATUS_ILLEGAL_INSTRUCTION` / `0xc000001d` | prebuilt AVX-512 wheel | rebuild from source, step 4. `verify_install.py` `isa` names it |
 | `No CUDA toolset found` | CMake picked the VS generator | use Ninja; `build_phase0b.bat` pins it (D29) |
 | `CMAKE_BUILD_TYPE=` empty, slow build | VS generator is multi-config | use Ninja **and** pin `-DCMAKE_BUILD_TYPE=Release` |
-| `import llama_cpp` fails outright | CUDA runtime not on PATH | add `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin` |
+| `import llama_cpp` fails outright | CUDA runtime not on PATH | add `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4\bin\x64` — **not** `bin`, which on this toolkit holds zero runtime DLLs (`cudart64_13.dll` and 25 others live in `bin\x64`) |
 | `FileExistsError: authkey.bin` | a daemon is already running | expected; it refuses to share a state directory (D64) |
 | chord does nothing, tray is fine | `Ctrl+Alt+Space` is an IME toggle | the tray says so in red; open the prompt from the icon |
 | audit chain does not verify | state was tampered with, or two daemons raced | **read `state\audit.jsonl` before doing anything else** |

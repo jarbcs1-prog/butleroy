@@ -226,12 +226,56 @@ about, so it is left visible rather than tidied.
 
 | Section | State |
 |---|---|
-| Models | **built** (D74/D75) - tiers, models on disk, lease ceilings, save |
-| Voices | **built** (D76) - installed/known, default, whisper model, download, import, remove |
+| Models | **partly built** (D74/D75) - tiers, models on disk and lease ceilings are *displayed*; `Save` re-persists the table it read. **No way to add, remove, or point at a path.** |
+| Voices | **partly built** (D76) - installed/known voices and the default are shown; `Use voice`, `Save`. **Download, import and remove are specified below and do not exist.** |
 | Speech | **not built** - push-to-talk, mute, wake word |
-| Workspaces | **built** (D77) - approve/revoke folders, danger level, allowed tiers |
-| Authority | **built** (D78) - the tier ladder, ceiling, attended state, pending list, and a what-would-happen checker |
-| Advanced | **built** (D79) - read-only diagnostics: brain, mail, vault, reflection, paths, and the audit tail |
+| Workspaces | **partly built** (D77) - a list and `Approve folder.`, `Reload`. **Revoke, danger level and allowed tiers do not exist.** |
+| Authority | **partly built** (D78) - attended state and `Step back (unattended)`. **The tier ladder, the ceiling control, the pending list and the what-would-happen checker do not exist.** |
+| Advanced | **built** (D79) - read-only diagnostics: brain, mail, vault, reflection, paths, and the audit tail. Being redesigned; see below. |
+
+#### The control inventory, measured 2026-10-13
+
+Counting `W.Button(` call sites in `settings.py` — the whole of the settings
+window's interactivity:
+
+| Section | Buttons | `Field` / `Select` / `Toggle` / `Badge` / `Meter` / `ListRow` / `Panel` / `Dialog` |
+|---|---|---|
+| Models | `Reload`, `Save` | **none** |
+| Voices | `Use voice`, `Save` | **none** |
+| Workspaces | `Approve folder.`, `Reload` | **none** |
+| Authority | `Step back (unattended)`, `Reload` | **none** |
+| Advanced | `Reload` | **none** |
+
+So the window uses **seven of the nine widgets in `widgets.py`, and all seven are
+`Button`.** `Field`, `Select`, `Toggle`, `Badge`, `Meter`, `Panel`, `ListRow` and
+`Dialog` are built, tested, and **never instantiated by the settings window** —
+which is why this file describes the kit as load-bearing for a surface that does
+not yet use it. `Badge.for_tier()` is called from nowhere in `settings.py`.
+
+**Why this table was wrong.** The version above this one marked four sections
+**built** and listed affordances — download, import, remove; revoke, danger level,
+allowed tiers; the tier ladder, the ceiling, the pending list, the checker — that
+have never existed. It was written from the intent rather than from the
+measurement, which is the same mistake this file criticises elsewhere in its own
+"27 ops with no way in" section. The specification is kept above and is real; the
+state column now distinguishes what is built from what is specified.
+
+#### Why the tests did not catch it
+
+`tests/test_settings_real.py` has 17 cases and they are good ones: lifecycle, daemon
+round-trips, save semantics, degraded states, widget release on disposal. **Not one
+asserts that a section contains an affordance for the thing it is named after.**
+A settings window that faithfully renders a read-only configuration satisfies
+every one of them. The same shape as D87, where the suite proved a mechanism worked
+while the thing a user actually needed went unasserted.
+
+#### The redesign of Advanced
+
+Advanced is being rebuilt rather than extended: 487 lines producing one `Reload`
+button and no input widgets is the wrong shape for a settings tab, read-only or
+not. Its diagnostics are worth keeping — they are the only place a user can see
+what the daemon believes — but they belong grouped by subject with real
+affordances for the ops that currently have no way in (see the 27 below).
 
 #### The 27 ops with no way in, grouped
 

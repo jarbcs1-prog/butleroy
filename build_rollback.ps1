@@ -66,6 +66,49 @@ $venvPy = Join-Path $Root '.venv\Scripts\python.exe'
 
 function Say([string] $m) { Write-Host "  [rollback] $m" }
 
+# Same measurement and same 10% limit as probe_isa.py and verify_install.py's
+# `isa` check, so the three agree rather than three tools disagreeing.
+$script:EvexLimitPct = 10.0
+
+function Get-EvexRatio([string] $Path) {
+    $data = [IO.File]::ReadAllBytes($Path)
+    $bare = 0; $evex = 0
+    for ($i = 0; $i -lt $data.Length; $i++) {
+        if ($data[$i] -ne 0x62) { continue }
+        $bare++
+        if ($i + 2 -ge $data.Length) { continue }
+        $p0 = $data[$i + 1]; $p1 = $data[$i + 2]
+        if (($p0 -band 0x08) -eq 0 -and ($p0 -band 0x07) -in @(1, 2, 3) -and ($p1 -band 0x08) -ne 0) { $evex++ }
+    }
+    if ($bare -eq 0) { return $null }
+    return ($evex / $bare) * 100
+}
+
+function Test-PoisonedRuntime {
+    # True when the installed ggml-cpu.dll looks like the prebuilt AVX-512 wheel.
+    $dll = Join-Path $site 'llama_cpp\lib\ggml-cpu.dll'
+    if (-not (Test-Path $dll)) { return $null }
+    $pct = Get-EvexRatio $dll
+    if ($null -eq $pct) { return $null }
+    return [bool] ($pct -gt $script:EvexLimitPct)
+}
+
+function Write-PoisonWarning([double] $pct) {
+    Write-Host ''
+    Write-Host '  ################################################################'
+    Write-Host '  # THE RUNTIME YOU JUST RESTORED IS THE PREBUILT AVX-512 WHEEL. #'
+    Write-Host '  # It imports cleanly and then dies on first token with         #'
+    Write-Host '  # STATUS_ILLEGAL_INSTRUCTION on this Zen 3 CPU. See D25.      #'
+    Write-Host '  # This counts as restored, but it is NOT a working brain.      #'
+    Write-Host '  #                                                              #'
+    Write-Host '  # Build it properly:                                          #'
+    Write-Host '  #   cd G:\localaized                                           #'
+    Write-Host '  #   $env:BUTLEROY_FORCE_REBUILD = ''1''                         #'
+    Write-Host '  #   .\build_phase0b.bat                                        #'
+    Write-Host '  ################################################################'
+    Write-Host ''
+}
+
 function Save-Snapshot {
     if (Test-Path $backup) { Remove-Item $backup -Recurse -Force }
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
@@ -77,7 +120,20 @@ function Save-Snapshot {
     }
     Copy-Item $pkg $bkPkg -Recurse -Force
     if (Test-Path $dist) { Copy-Item $dist $bkDist -Recurse -Force }
-    Say "snapshotted llama_cpp ($((Get-ChildItem $bkPkg -Recurse -File).Count) files)"
+
+    # Know what we just saved. On a FRESH install the only llama_cpp present is
+    # the wheel that `.[brain]` pulled, and restoring that is restoring a
+    # runtime that cannot run. Recording it here means Restore-Snapshot can say
+    # so out loud instead of reporting a cheerful success.
+    $poisoned = Test-PoisonedRuntime
+    if ($poisoned) {
+        $pct = Get-EvexRatio (Join-Path $site 'llama_cpp\lib\ggml-cpu.dll')
+        Say ("snapshot is the PREBUILT AVX-512 WHEEL ({0:N2}% EVEX > {1:N0}% limit)." -f $pct, $script:EvexLimitPct)
+        Say 'A rollback would restore a runtime that cannot execute on this CPU.'
+        Set-Content (Join-Path $backup 'POISONED') $pct
+    } else {
+        Say "snapshotted llama_cpp ($((Get-ChildItem $bkPkg -Recurse -File).Count) files)"
+    }
     return $true
 }
 
@@ -96,6 +152,23 @@ function Restore-Snapshot {
         Copy-Item $bkDist $dist -Recurse -Force
     }
     Say "restored llama_cpp ($((Get-ChildItem $pkg -Recurse -File).Count) files). Verify with: .venv\Scripts\python.exe verify_install.py"
+
+    # A restore is only a success if what came back can actually run. During a
+    # fresh install the snapshot is the AVX-512 wheel, so "restored 38 files"
+    # would be true and useless. Re-measure rather than trust the copy.
+    $wasPoisoned = Test-Path (Join-Path $backup 'POISONED')
+    if ($wasPoisoned) {
+        $pct = Get-Content (Join-Path $backup 'POISONED')
+        Write-PoisonWarning ([double] $pct)
+    } else {
+        $now = Test-PoisonedRuntime
+        if ($now) {
+            $pct = Get-EvexRatio (Join-Path $site 'llama_cpp\lib\ggml-cpu.dll')
+            Write-PoisonWarning $pct
+        } else {
+            Say 'restored runtime measures clean (under the AVX-512 limit).'
+        }
+    }
     return $true
 }
 

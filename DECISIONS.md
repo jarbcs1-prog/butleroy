@@ -5166,3 +5166,41 @@ Screenshot correction: the handoff's recipe (scale the bbox by
 scales at 200%, so every computed crop landed on the wrong window.
 Full-screen grab then crop is what worked; the factor to distrust is the one
 Tk reports, not the arithmetic.
+---
+
+## D96 - Three small borrowings from OpenJarvis, and the refusals around them
+
+OpenJarvis (Stanford's local-first framework, surveyed at F:\OpenJarvis) was
+examined for anything worth adopting: voice, UI surfaces, trust machinery.
+Most of it fails this project's filters — cloud backends, a skill loader,
+vector memory, a server, a second desktop app — each contradicting D1, the
+local-only rule, or solo-maintainer scale. Two suspected takeaways reversed:
+OpenJarvis has no wake-word engine at all, and its recorder
+(single-threshold `record_until_silence`) is a subset of `audio.py`'s
+hysteresis gate. Three items survived, all small and all read-only:
+
+* Tray "Waiting on you" (`tray.py`: `WatchPending` + `_waiting` menu item).
+  The tray never polled `confirm_list`, so a confirmation arriving while the
+  overlay was hidden sat unseen. The watcher toasts on a rising edge only;
+  steady, falling, and dead-daemon polls are silent. Every poll goes through
+  `Tray.call` (actor=tray, audited path), and it notifies only — approval
+  stays in the overlay, per the D31 note already in the file. No tooltip
+  mutation from the poll thread: `notify()` is the thread-safe channel.
+  Fifteen seconds because confirmations wait minutes; `confirm_list` is a
+  read, so no audit record per poll. Lifecycle in `start()`/`stop()`; the
+  headless path returns before `start()`, so headless never polls.
+* `_redact` secret shapes (`daemon.py`). The name rule missed secrets pasted
+  into generically-named values (`body`, `reason`). JWT, bearer, and vendor
+  prefixes are a second net — high-precision shapes only, deliberately not
+  emails or paths, which the audit record needs to stay useful.
+* Audit-tail filter (Advanced). A `Field` + button re-rendering the cached
+  40 rows locally; filtering asks the daemon nothing, so it cannot change
+  anything whatever is typed.
+
+Refused, not overlooked: a scheduler (unattended execution before the
+Authority ceiling op exists is the exact bug class `session_set_attended`
+documents — D-steps before features); a skill loader (every tool earns its
+gate individually; a loader bypasses that review); standing energy telemetry
+(joules drive no decision this system makes — the 9B tier wants one measured
+run, not a subsystem); a command palette (viable, but it needs its own
+read-op allowlist decision first, and the D95 refused list stays refused).

@@ -55,7 +55,14 @@ class AdvDaemon:
         if op == "reflect_overlay":
             return {"ok": True, "result": {"chars": 0}}
         if op == "audit_tail":
-            return {"ok": True, "result": []}
+            return {"ok": True, "result": [
+                {"timestamp": "2026-10-07T12:00:00.000000+00:00",
+                 "actor": "tray", "tool": "voice_config.set",
+                 "tier": "T1", "decision": "allow"},
+                {"timestamp": "2026-10-07T12:01:00.000000+00:00",
+                 "actor": "user", "tool": "workspace.add",
+                 "tier": "T1", "decision": "allow"},
+            ]}
         if op == "workspace_covers":
             if kwargs.get("path", "").startswith("G:/approved"):
                 return {"ok": True, "result": {
@@ -222,6 +229,9 @@ def test_the_new_affordances_change_nothing(win) -> None:
     _field(section).set(daemon.approved)
     _button(section, "Check path").invoke()
     _button(section, "What the model was given").invoke()
+    field, button = _tail_filter_widgets(section)
+    field.set("workspace")
+    button.invoke()
     _pump(section.widgets[0])
 
     writes = {
@@ -273,4 +283,50 @@ def test_advanced_content_scrolls_instead_of_clipping(win) -> None:
         )
     assert any(type(w).__name__ == "Scrollbar" for w in _walk(section)), (
         "a viewport with no scrollbar is a trap, not a fix"
+    )
+
+
+def _tail_filter_widgets(section: object):
+    field = button = None
+    for w in _walk(section):
+        if type(w).__name__ == "Field" and w.label.cget("text") == "Filter":
+            field = w
+        if type(w).__name__ == "Button" and w.cget("text") == "Filter":
+            button = w
+    return field, button
+
+
+def test_advanced_filters_the_audit_tail(win) -> None:
+    """The tail is 40 rows of mono text; without a filter it is looked at,
+    not read. A substring filter over the row's own fields, re-rendered
+    locally — filtering asks the daemon nothing."""
+    daemon = AdvDaemon()
+    window = win(daemon)
+    window._select("advanced")  # noqa: SLF001
+    section = _section(window)
+
+    field, button = _tail_filter_widgets(section)
+    assert field is not None, "no Filter field on the Advanced tab"
+    assert button is not None, "no Filter button on the Advanced tab"
+
+    before = {op for op, _ in daemon.calls}
+    field.set("workspace")
+    button.invoke()
+    _pump(button)
+
+    rendered = section.record.get("1.0", "end")
+    assert "workspace.add" in rendered, f"the match did not survive: {rendered!r}"
+    assert "voice_config.set" not in rendered, (
+        f"the filter kept a non-match: {rendered!r}"
+    )
+    assert {op for op, _ in daemon.calls} == before, (
+        "filtering asked the daemon; it is a local re-render"
+    )
+
+    field.set("")
+    button.invoke()
+    _pump(button)
+    rendered = section.record.get("1.0", "end")
+    assert "workspace.add" in rendered and "voice_config.set" in rendered, (
+        f"clearing the filter did not restore the tail: {rendered!r}"
     )

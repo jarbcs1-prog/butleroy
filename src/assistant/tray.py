@@ -337,6 +337,78 @@ class Presence:
             self._thread.join(timeout=2.0)
 
 
+def _pending_count(res) -> int:
+    """How many confirmations are waiting. Never raises, never lies up.
+
+    A malformed reply is 0 with no toast: a watcher that cries wolf about a
+    shape it did not understand trains the user to ignore the real one.
+    """
+    try:
+        result = (res or {}).get("result") or {}
+        pending = result.get("pending") or []
+        return len(pending) if isinstance(pending, list) else 0
+    except Exception:  # noqa: BLE001 - a watcher must not raise
+        return 0
+
+
+class WatchPending:
+    """Toast when confirmations start waiting on the user. Read-only polling.
+
+    The overlay interrupts with the dialog itself; this is for when it is
+    hidden. Only a rising edge toasts: a steady or falling count is not news,
+    and a dead daemon stays quiet rather than alarming about being unreached.
+    Approval stays in the overlay - this announces, it never approves.
+    """
+
+    def __init__(self, call, on_rise, *, poll_s: float = 15.0) -> None:
+        # `call` is the tray's pipe call, so every poll goes through
+        # `daemon.handle` with actor=tray and lands in the audit chain like
+        # any other client read. A watcher with a daemon reference instead
+        # would be the second front door the module docstring forbids.
+        self._call = call
+        self._on_rise = on_rise
+        # Human timescale: a confirmation waits minutes, not milliseconds.
+        # Fifteen seconds notices promptly without chattering the pipe, and
+        # `confirm_list` is a read, so no audit record is written per poll.
+        self.poll_s = poll_s
+        self._last: int | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _check(self) -> int:
+        try:
+            res = self._call("confirm_list")
+        except Exception:  # noqa: BLE001 - down daemon, stay quiet
+            return self._last if self._last is not None else 0
+        if not isinstance(res, dict) or not res.get("ok"):
+            return self._last if self._last is not None else 0
+        n = _pending_count(res)
+        if self._last is not None and n > self._last:
+            self._on_rise(
+                f"{n} confirmation{'s' if n != 1 else ''} waiting — "
+                f"answer in the prompt window."
+            )
+        self._last = n
+        return n
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.poll_s):
+            self._check()
+
+    def start(self) -> "WatchPending":
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="watch-pending", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+
 def _icon_image(size: int = 64):
     """The tray icon: the Butleroy bell, drawn rather than shipped as a binary.
 
@@ -389,6 +461,10 @@ class Tray:
         self._notice: str | None = None
         self._color: tuple | None = None
         self._lock = threading.Lock()
+        # The pending-confirmation watcher, started with the icon. None until
+        # `start()` so a tray that is only ever driven by tests never grows a
+        # thread, and headless runs (which return before `start()`) never poll.
+        self._watch: WatchPending | None = None
 
     # -- the only way out of the icon -----------------------------------------
     def call(self, op: str, /, **args) -> dict:
@@ -431,6 +507,31 @@ class Tray:
             if names
             else "No workspace approved. The assistant cannot read any project yet.",
         )
+
+    def _waiting(self, icon=None, item=None) -> None:
+        """How many confirmations are waiting on the user, on demand.
+
+        The watcher toasts on a rising edge; this answers when asked. Either
+        way the tray only announces: approval is the overlay's job (see the
+        D31 note on `_overlay` above), and a second window able to answer the
+        same dialog is the defect the settings window was kept away from.
+        """
+        try:
+            res = self.call("confirm_list")
+        except Exception as exc:  # noqa: BLE001 - down daemon, say so plainly
+            self.notify(f"Waiting list unavailable: {type(exc).__name__}: {exc}")
+            return
+        if not isinstance(res, dict) or not res.get("ok"):
+            self.notify("Waiting list unavailable.")
+            return
+        n = _pending_count(res)
+        if n == 0:
+            self.notify("Nothing waiting on you.")
+        else:
+            self.notify(
+                f"{n} confirmation{'s' if n != 1 else ''} waiting — "
+                f"answer in the prompt window."
+            )
 
     def _set_attended(self, icon=None, item=None) -> None:
         """Summon, from the menu.
@@ -535,6 +636,7 @@ class Tray:
             pystray.MenuItem("Settings…", self._open_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(f"Summon ({HOTKEY_LABEL})", self._set_attended),
+            pystray.MenuItem("Waiting on you", self._waiting),
             pystray.MenuItem("Workspaces", self._workspaces),
             pystray.MenuItem("VRAM leases", self._vram),
             pystray.MenuItem("Verify audit chain", self._snapshot),
@@ -574,10 +676,19 @@ class Tray:
         )
         t.start()
         self._thread = t
+        self._watch = WatchPending(self.call, self.notify).start()
         return self
 
     def stop(self) -> None:
-        # The prompt window goes first. `Overlay` owns a Tk thread and a Tcl
+        # The watcher goes first: it polls the daemon, and everything below
+        # is about releasing what the poller might still touch.
+        if self._watch is not None:
+            try:
+                self._watch.stop()
+            except Exception:  # noqa: BLE001 - stopping is best-effort
+                pass
+            self._watch = None
+        # The prompt window goes next. `Overlay` owns a Tk thread and a Tcl
         # interpreter, and nothing else in the process knows about either - so a
         # tray that stops its icon and leaves the window standing leaves a live
         # thread and a live interpreter behind, on every shutdown. With the daemon

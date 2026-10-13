@@ -202,6 +202,11 @@ def _redact(args: dict | None) -> dict:
     treated as sensitive. Anything whose *name* looks like a credential is
     replaced before it can become permanent, because "the audit log is
     append-only" and "the audit log contains my password" cannot both be true.
+
+    Names are not the only way a secret arrives: a token pasted into `body`,
+    `reason` or `text` has an innocent key, so secret *shapes* are a second
+    net. Whole value replaced, fail-closed — a body with one token in it is
+    less useful redacted entire than leaked entire.
     """
     if not args:
         return {}
@@ -210,11 +215,24 @@ def _redact(args: dict | None) -> dict:
     for k, v in args.items():
         if any(w in str(k).lower() for w in secret_words):
             out[k] = "<redacted>"
+        elif isinstance(v, str) and any(p.search(v) for p in _SECRET_SHAPES):
+            out[k] = "<redacted>"
         elif isinstance(v, str) and len(v) > 2000:
             out[k] = v[:2000] + f"...<truncated {len(v)-2000} chars>"
         else:
             out[k] = v
     return out
+
+
+#: Value shapes that are secrets whatever the key says. High-precision only:
+#: a JWT, a bearer token, a vendor-issued prefix. Deliberately not emails or
+#: paths — the audit record needs addresses to be useful, and a pattern that
+#: fires on ordinary arguments trains everyone to ignore the redactor.
+_SECRET_SHAPES = (
+    re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\b(ghp_|gho_|github_pat_|sk-(?:live|test)-|sk-ant-|xox[bap]-)[A-Za-z0-9._-]{8,}"),
+)
 
 
 #: Named in a refusal so the user knows where a credential may come from. Spelled

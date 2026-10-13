@@ -223,6 +223,22 @@ def test_the_password_never_reaches_an_audit_record():
     )
 
 
+def test_a_secret_pasted_into_an_ordinary_argument_is_still_caught():
+    """Key names are not the only way a secret arrives.
+
+    A token pasted into `body`, `reason` or `text` has a generically-named key,
+    so the name rule passes it into the append-only log. Secret *shapes*
+    (bearer tokens, JWTs, vendor prefixes) are the second net.
+    """
+    pasted = "please use bearer ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx thanks"
+    assert "ghp_" not in D._redact({"body": pasted})["body"]
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c"
+    assert D._redact({"reason": f"saw {jwt} in the output"})["reason"] == "<redacted>"
+    assert D._redact({"text": "nothing secret here at all"})["text"] == (
+        "nothing secret here at all"
+    )
+
+
 def test_the_config_never_prints_its_own_password():
     """`repr` reaches tracebacks and log lines, so it is part of the credential.
 

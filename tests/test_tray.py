@@ -29,6 +29,7 @@ from assistant.tray import (
     HotkeyUnavailable,
     Presence,
     Tray,
+    WatchPending,
     seconds_since_input,
 )
 
@@ -319,12 +320,14 @@ def test_every_tray_action_went_through_handle():
     t._workspaces()
     t._vram()
     t._snapshot()
+    t._waiting()
     ops = {r.op for r in d.requests}
     assert ops == {
         "session_set_attended",
         "workspace_list",
         "arbiter_summary",
         "audit_verify",
+        "confirm_list",
     }
 
 
@@ -466,3 +469,109 @@ def test_the_menu_actually_builds():
                 ), f"menu item {it.text!r} cannot accept (icon, item)"
 
     walk(icon.menu.items)
+
+
+# --- waiting on you -----------------------------------------------------------
+#
+# The tray never polled `confirm_list`: a confirmation that arrived while the
+# overlay was hidden sat unseen until the user happened to open Authority.
+# The menu item answers "is anything waiting" on click; the watcher toasts on
+# a rising edge. Approval itself stays in the overlay - the tray announces,
+# it never approves.
+
+
+class PendingDaemon(StubDaemon):
+    def __init__(self, pending):
+        super().__init__()
+        self._pending = pending
+
+    def handle(self, request):
+        if request.op == "confirm_list":
+            self.requests.append(request)
+            return {"ok": True,
+                    "result": {"pending": self._pending, "grants": []}}
+        return super().handle(request)
+
+
+def _two_pending():
+    return [{"id": "a", "tool": "file.remove", "reason": "r",
+             "preview": "p", "payload_hash": "h", "created": 1.0},
+            {"id": "b", "tool": "file.remove", "reason": "r",
+             "preview": "p", "payload_hash": "h", "created": 2.0}]
+
+
+def test_waiting_menu_item_reports_how_many_are_waiting():
+    d = PendingDaemon(_two_pending())
+    t = Tray(d)
+    t._waiting()
+    assert "2" in t._notice and "waiting" in t._notice
+    assert d.requests[-1].op == "confirm_list"
+    assert d.requests[-1].args["actor"] == "tray"
+
+
+def test_no_pending_says_so_instead_of_looking_broken():
+    t = Tray(PendingDaemon([]))
+    t._waiting()
+    assert "Nothing waiting" in t._notice
+
+
+def test_a_dead_daemon_does_not_alarm():
+    class Down(StubDaemon):
+        def handle(self, request):
+            if request.op == "confirm_list":
+                raise ConnectionError("daemon is down")
+            return super().handle(request)
+
+    t = Tray(Down())
+    t._waiting()
+    assert "unavailable" in t._notice
+
+
+def test_watcher_toasts_on_a_rising_edge_only():
+    """0, 0, 2, 2, 1 → exactly one toast, for the 2."""
+    counts = [0, 0, 2, 2, 1]
+    calls: list[str] = []
+
+    def call(op, **args):
+        calls.append(op)
+        n = counts[min(len(calls) - 1, len(counts) - 1)]
+        return {"ok": True,
+                "result": {"pending": [{"id": str(i)} for i in range(n)],
+                           "grants": []}}
+
+    notices: list[str] = []
+    w = WatchPending(call, notices.append, poll_s=0.01)
+    for _ in counts:
+        w._check()
+    assert calls == ["confirm_list"] * 5
+    assert len(notices) == 1, f"expected one toast, got {notices}"
+    assert "2" in notices[0] and "waiting" in notices[0]
+
+
+def test_watcher_stays_quiet_when_the_daemon_is_down():
+    def call(op, **args):
+        raise ConnectionError("daemon is down")
+
+    notices: list[str] = []
+    w = WatchPending(call, notices.append, poll_s=0.01)
+    assert w._check() == 0
+    assert notices == []
+
+
+def test_watcher_thread_polls_and_stops_cleanly():
+    seen: list[str] = []
+
+    def call(op, **args):
+        seen.append(op)
+        return {"ok": True, "result": {"pending": [], "grants": []}}
+
+    w = WatchPending(call, lambda m: None, poll_s=0.01)
+    w.start()
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline and not seen:
+            time.sleep(0.02)
+    finally:
+        w.stop()
+        w.stop()
+    assert seen and all(op == "confirm_list" for op in seen)

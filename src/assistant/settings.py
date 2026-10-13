@@ -1212,7 +1212,7 @@ class AdvancedSection(Section):
         # The widgets kept by name. `dispose()` nulls exactly these, and the
         # `holds_widgets()` test would catch another being added and forgotten.
         self.named = ("facts", "record", "status", "vram", "path_field",
-                      "path_verdict", "describe_out")
+                      "path_verdict", "describe_out", "tail_filter")
         self.facts: Any = None
         self.record: Any = None
         self.status: Any = None
@@ -1220,6 +1220,8 @@ class AdvancedSection(Section):
         self.path_field: Any = None
         self.path_verdict: Any = None
         self.describe_out: Any = None
+        self.tail_filter: Any = None
+        self._tail_records: list = []
         self._brain_running = False
 
     def build(self, parent: Any, call: Callable[..., dict]) -> None:
@@ -1329,6 +1331,19 @@ class AdvancedSection(Section):
                  font=("Segoe UI", 9, "bold"), anchor="w").pack(
             fill="x", padx=16, pady=(4, 2))
         self.widgets.append(inner.winfo_children()[-1])
+
+        tail_row = tk.Frame(inner, bg=c["slate"])
+        tail_row.pack(fill="x", padx=16, pady=(4, 0))
+        self.widgets.append(tail_row)
+        self.tail_filter = W.Field(tail_row, "Filter",
+                                   hint="tool, tier, decision, actor — Return filters",
+                                   on_submit=lambda _v: self._filter_tail())
+        self.tail_filter.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.tail_filter)
+        tail_button = W.Button(tail_row, "Filter", self._filter_tail,
+                               variant="ghost")
+        tail_button.pack(side="right", padx=(8, 0))
+        self.widgets.append(tail_button)
 
         self.record = tk.Text(
             inner, fg=c["sage"], bg=c["obsidian"], relief="flat", wrap="none",
@@ -1488,26 +1503,51 @@ class AdvancedSection(Section):
         self.facts.configure(text="\n".join(lines))
 
         tail = self._ask("audit_tail", limit=40)
-        self.record.configure(state="normal")
-        self.record.delete("1.0", "end")
         if tail.get("ok"):
-            records = tail.get("result") or []
-            for r in records:
-                if not isinstance(r, dict):
-                    continue
-                self.record.insert(
-                    "end",
-                    f"{str(r.get('timestamp', ''))[:19]:<20}"
-                    f"{r.get('decision', ''):<8}"
-                    f"{r.get('tier', ''):<4} {r.get('actor', ''):<12}"
-                    f"{r.get('tool', '')}\n",
-                )
+            records = [r for r in (tail.get("result") or [])
+                       if isinstance(r, dict)]
+            self._tail_records = records
+            self._render_tail(records)
             self._say(f"{len(records)} of {len(records)} record(s) shown. "
                       f"Read-only.", "sage")
         else:
+            self._tail_records = []
+            self.record.configure(state="normal")
+            self.record.delete("1.0", "end")
             self.record.insert("end", f"unavailable: {tail.get('error')}\n")
             self._say(f"the audit tail is unavailable: {tail.get('error')}", "rust")
         self.record.configure(state="disabled")
+
+    def _render_tail(self, records: list) -> None:
+        """The cached tail rows into the read-only box, nothing else."""
+        self.record.configure(state="normal")
+        self.record.delete("1.0", "end")
+        for r in records:
+            self.record.insert(
+                "end",
+                f"{str(r.get('timestamp', ''))[:19]:<20}"
+                f"{r.get('decision', ''):<8}"
+                f"{r.get('tier', ''):<4} {r.get('actor', ''):<12}"
+                f"{r.get('tool', '')}\n",
+            )
+        if not records:
+            self.record.insert("end", "(no records match)\n")
+        self.record.configure(state="disabled")
+
+    def _filter_tail(self) -> None:
+        """Show only the tail rows matching the filter. A local re-render:
+        filtering asks the daemon nothing, so this cannot change anything no
+        matter what is typed into it."""
+        needle = self.tail_filter.get().strip().lower()
+        records = self._tail_records
+        if needle:
+            shown = [r for r in records
+                     if needle in " ".join(str(v) for v in r.values()).lower()]
+        else:
+            shown = list(records)
+        self._render_tail(shown)
+        self._say(f"{len(shown)} of {len(records)} record(s) shown. Read-only.",
+                  "sage")
 
     def _reload(self) -> None:
         self._load(self._call)

@@ -726,6 +726,161 @@ class VoicesSection(Section):
             self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
 
 
+class SpeechSection(Section):
+    """Speech and listening — display + listen button (T3 full chain).
+
+    The user's selected next item: Speech + Listen button (full confirmation
+    chain through `_carry_through`). Not the mute-cinema (nothing auto-speaks
+    today, per D57/D50: audio touches CPU only, never GPU; wake-word `watch`
+    fails at 0.290 and is refused, not silently open-mic).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("speech", "Speech", "voices")
+        self.named = ("listbox", "detail", "status", "listen_button")
+        self.listbox: Any = None
+        self.detail: Any = None
+        self.status: Any = None
+        self.listen_button: Any = None
+        self._data: dict[str, Any] = {}
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        note = tk.Label(
+            body,
+            text="Voice speaks replies; transcription turns your speech to text. "
+                 "Listen opens the mic; the T3 confirmation asks before it starts.",
+            fg=c["sage"], bg=c["slate"], wraplength=640, justify="left",
+            font=("Segoe UI", 9),
+        )
+        note.pack(fill="x", padx=16, pady=(14, 10))
+        self.widgets.append(note)
+
+        self.listbox = tk.Listbox(
+            body, fg=c["bone"], bg=c["obsidian"], selectbackground=c["brass"],
+            selectforeground=c["obsidian"], relief="flat", highlightthickness=0,
+            font=("Cascadia Code", 9), activestyle="none", height=6,
+        )
+        self.listbox.pack(fill="both", expand=True, padx=16)
+        self.widgets.append(self.listbox)
+
+        self.detail = tk.Label(body, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", font=("Segoe UI", 9))
+        self.detail.pack(fill="x", padx=16, pady=(10, 0))
+        self.widgets.append(self.detail)
+
+        # Mute state shown, not editable (the mute toggle is a T0 op via
+        # `voice_config_set`; editing here would duplicate the Voices tab).
+        info = tk.Label(
+            body,
+            text="Mute: enforced by `voice.speak`; nothing auto-speaks today "
+                 "(D57 — piper ~2.6 w/s, whisper CPU/int8 RTF 1.30, 0.27 GiB).",
+            fg=c["amber"], bg=c["slate"], wraplength=640, justify="left",
+            font=("Segoe UI", 8),
+        )
+        info.pack(fill="x", padx=16, pady=(6, 4))
+        self.widgets.append(info)
+
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(12, 14))
+        self.widgets.append(row)
+
+        self.status = tk.Label(row, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=420,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        # Listen once — T3 full chain.
+        # Uses `voice.listen` through the daemon (not a direct mic call); the
+        # confirmation dialog (`_present` / `_Confirm`) handles the audible
+        # approval; `op_voice_listen` already has preview (`_preview_voice_listen`).
+        self.listen_button = tk.Button(
+            row, text="Listen once (T3 confirmation)", relief="flat",
+            fg=c["bone"], bg=c["obsidian"], activeforeground=c["bone"],
+            activebackground=c["slate-line"], font=("Segoe UI", 9),
+            cursor="hand2", command=self._listen,
+        )
+        self.listen_button.pack(side="right", padx=(8, 0))
+        self.widgets.append(self.listen_button)
+
+        # Reload / info buttons
+        for label, cmd in (("Reload", self._load),
+                           ("Status", self._say_state)):
+            btn = W.Button(row, label, cmd, variant="ghost")
+            btn.pack(side="right", padx=(6, 0))
+            self.widgets.append(btn)
+
+        self._call = call
+        self._load(call)
+
+    def _load(self, call: Callable[..., dict]) -> None:
+        try:
+            res = call("voice_config") or {}
+        except Exception as exc:
+            self._say(f"Could not reach daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        self._data = res.get("result") or {}
+        voices = self._data.get("voices") or {}
+        default = self._data.get("default")
+        self.listbox.delete(0, "end")
+        names = sorted(voices)
+        for name in names:
+            v = voices[name]
+            mark = "*" if name == default else " "
+            state = ("installed" if v.get("complete") else
+                     ("incomplete" if v.get("installed") else "not downloaded"))
+            self.listbox.insert("end", f"{mark} {name}\n      {state}")
+        self.detail.configure(
+            text=f"Default: {default or '?'}\n"
+                 f"Whisper: {self._data.get('whisper') or '?'}\n"
+                 f"{len(names)} voice(s); provenance: "
+                 f"{self._data.get('provenance', '?')}")
+        self._say("Voice config loaded.", "sage")
+
+    def _listen(self) -> None:
+        # T3 confirmation path: `voice.listen` calls through the daemon,
+        # the daemon issues `needs_confirmation` + id, `_poll` raises the
+        # confirmation dialog, user answers with audible flag, then executes.
+        # The button here is the entry point; the gate is upstream in daemon.
+        try:
+            res = self._call("voice.listen", seconds=10, device=None) or {}
+        except Exception as exc:
+            self._say(f"Listen failed: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(res.get("error", "refused"), "rust")
+            return
+        # If queued for confirmation, the dialog handles approval; the window
+        # just reports that it's waiting (same path as T3 tool calls via
+        # `_carry_through` in overlay.py).
+        result = res.get("result") or {}
+        if result.get("needs_confirmation"):
+            self._say("Waiting for your T3 approval (Listen once).", "amber")
+        elif result.get("started"):
+            self._say("Listening (10s). Mic open — interrupt with Stop.", "verdigris")
+        else:
+            self._say(f"Listen: {result.get('note', 'done')}", "sage")
+
+    def _say_state(self) -> None:
+        self._say("Mute: enforced by voice.speak (D57/D50); "
+                  "watch-word refused (0.290); "
+                  "push-to-talk adopted.", "sage")
+
+    def _say(self, text: str, tone: str = "sage") -> None:
+        if self.status is not None:
+            self.status.configure(text=text, fg=palette().get(tone, "#EDE8DC"))
+
+
 class WorkspacesSection(Section):
     """Which directories the assistant may touch at all.
 
@@ -2435,6 +2590,7 @@ class Settings:
             "authority": AuthoritySection(),
             "advanced": AdvancedSection(),
             "appearance": AppearanceSection(state_path=self._state_path),
+            "speech": SpeechSection(),
         }
 
         for key in self._order:

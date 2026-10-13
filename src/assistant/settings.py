@@ -1209,10 +1209,18 @@ class AdvancedSection(Section):
 
     def __init__(self) -> None:
         super().__init__("advanced", "Advanced", "settings")
-        self.named = ("facts", "record", "status")
+        # The widgets kept by name. `dispose()` nulls exactly these, and the
+        # `holds_widgets()` test would catch another being added and forgotten.
+        self.named = ("facts", "record", "status", "vram", "path_field",
+                      "path_verdict", "describe_out")
         self.facts: Any = None
         self.record: Any = None
         self.status: Any = None
+        self.vram: Any = None
+        self.path_field: Any = None
+        self.path_verdict: Any = None
+        self.describe_out: Any = None
+        self._brain_running = False
 
     def build(self, parent: Any, call: Callable[..., dict]) -> None:
         import tkinter as tk
@@ -1223,18 +1231,107 @@ class AdvancedSection(Section):
         body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
         self.widgets.append(body)
 
-        self.facts = tk.Label(body, text="", fg=c["bone"], bg=c["slate"],
+        # The tab is taller than the window: facts, three panels and the
+        # audit tail do not fit 600 px, and did not fit before the panels
+        # either. So the content scrolls. A plain viewport, not a drawn
+        # control: the kit's Canvas objection is about replacing controls
+        # with shapes, and a scrolling container keeps every control native.
+        scroll = tk.Scrollbar(body, orient="vertical", relief="flat", bd=0,
+                              width=12, bg=c["slate-line"],
+                              troughcolor=c["obsidian"],
+                              activebackground=c["brass"],
+                              highlightthickness=0)
+        scroll.pack(side="right", fill="y")
+        self.widgets.append(scroll)
+        view = tk.Canvas(body, bg=c["slate"], relief="flat", bd=0,
+                         highlightthickness=0, yscrollcommand=scroll.set)
+        view.pack(side="left", fill="both", expand=True)
+        self.widgets.append(view)
+        scroll.configure(command=view.yview)
+        inner = tk.Frame(view, bg=c["slate"])
+        self.widgets.append(inner)
+        window_id = view.create_window((0, 0), window=inner, anchor="nw",
+                                       tags=("advanced-inner",))
+        inner.bind("<Configure>",
+                   lambda _e: view.configure(scrollregion=view.bbox("all")))
+        view.bind("<Configure>",
+                  lambda e: view.itemconfigure(window_id, width=e.width))
+
+        def _wheel(event: Any) -> None:
+            view.yview_scroll(-1 * (event.delta // 120), "units")
+
+        view.bind("<Enter>", lambda _e: view.bind_all("<MouseWheel>", _wheel))
+        view.bind("<Leave>", lambda _e: view.unbind_all("<MouseWheel>"))
+
+        self.facts = tk.Label(inner, text="", fg=c["bone"], bg=c["slate"],
                               anchor="w", justify="left", font=("Cascadia Code", 9))
         self.facts.pack(fill="x", padx=16, pady=(14, 10))
         self.widgets.append(self.facts)
 
-        tk.Label(body, text="Audit tail", fg=c["brass"], bg=c["slate"],
+        # What holds VRAM, in the daemon's own words. `status` carries `vram`
+        # as a one-line string, which the facts block below cannot render (it
+        # only prints dicts), so the holders line was silently absent with a
+        # real daemon. Asked directly, read-only.
+        vram_panel = W.Panel(inner, title="Video memory")
+        vram_panel.pack(fill="x", padx=16, pady=(0, 8))
+        self.widgets.append(vram_panel)
+        self.vram = tk.Label(vram_panel.body, text="", fg=c["sage"],
+                             bg=c["slate"], anchor="w", justify="left",
+                             wraplength=520, font=("Segoe UI", 9))
+        self.vram.pack(fill="x")
+        self.widgets.append(self.vram)
+
+        # What the model was given. `brain_describe` asks the child rather
+        # than re-deriving locally, so on a cold daemon this starts the child
+        # to ask it — the status line says which happened. Read-only either way.
+        model_panel = W.Panel(inner, title="The model")
+        model_panel.pack(fill="x", padx=16, pady=(0, 8))
+        self.widgets.append(model_panel)
+        model_row = tk.Frame(model_panel.body, bg=c["slate"])
+        model_row.pack(fill="x")
+        self.widgets.append(model_row)
+        self.describe_out = tk.Label(model_row, text="not asked yet.",
+                                     fg=c["sage"], bg=c["slate"], anchor="w",
+                                     justify="left", wraplength=400,
+                                     font=("Segoe UI", 9))
+        self.describe_out.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.describe_out)
+        describe_button = W.Button(model_row, "What the model was given",
+                                   self._describe, variant="ghost")
+        describe_button.pack(side="right")
+        self.widgets.append(describe_button)
+
+        # Is this path approved, and what may happen in it. `workspace_covers`
+        # only reads the manifests. An empty field asks nothing.
+        path_panel = W.Panel(inner, title="Is this path approved")
+        path_panel.pack(fill="x", padx=16, pady=(0, 8))
+        self.widgets.append(path_panel)
+        self.path_field = W.Field(path_panel.body, "Path",
+                                  hint="a folder or file, then Check path",
+                                  on_submit=lambda _v: self._check_path())
+        self.path_field.pack(fill="x")
+        self.widgets.append(self.path_field)
+        path_row = tk.Frame(path_panel.body, bg=c["slate"])
+        path_row.pack(fill="x", pady=(4, 0))
+        self.widgets.append(path_row)
+        self.path_verdict = tk.Label(path_row, text="no path checked yet.",
+                                     fg=c["sage"], bg=c["slate"], anchor="w",
+                                     justify="left", wraplength=400,
+                                     font=("Segoe UI", 9))
+        self.path_verdict.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.path_verdict)
+        check_button = W.Button(path_row, "Check path", self._check_path,
+                                variant="ghost")
+        check_button.pack(side="right")
+        self.widgets.append(check_button)
+
+        tk.Label(inner, text="Audit tail", fg=c["brass"], bg=c["slate"],
                  font=("Segoe UI", 9, "bold"), anchor="w").pack(
             fill="x", padx=16, pady=(4, 2))
-        self.widgets.append(body.winfo_children()[-1])
+        self.widgets.append(inner.winfo_children()[-1])
 
         self.record = tk.Text(
-            body, fg=c["sage"], bg=c["obsidian"], relief="flat", wrap="none",
+            inner, fg=c["sage"], bg=c["obsidian"], relief="flat", wrap="none",
             height=12, font=("Cascadia Code", 8), padx=10, pady=8,
             insertbackground=c["bone"],
         )
@@ -1242,7 +1339,7 @@ class AdvancedSection(Section):
         self.record.configure(state="disabled")
         self.widgets.append(self.record)
 
-        row = tk.Frame(body, bg=c["slate"])
+        row = tk.Frame(inner, bg=c["slate"])
         row.pack(fill="x", padx=16, pady=(10, 14))
         self.widgets.append(row)
 
@@ -1257,6 +1354,18 @@ class AdvancedSection(Section):
         self.widgets.append(button)
 
         self._load(call)
+
+    def dispose(self) -> None:
+        # The viewport binds MouseWheel at `all` level while hovered. That
+        # binding outlives the widgets, so it is removed here, on the Tk
+        # thread like the rest of teardown — otherwise a wheel event after
+        # disposal fires into a destroyed canvas.
+        for top in self.widgets:
+            try:
+                top.unbind_all("<MouseWheel>")
+            except Exception:  # noqa: BLE001 - teardown must not mask
+                pass
+        super().dispose()
 
     # -- data ---------------------------------------------------------------
 
@@ -1290,6 +1399,7 @@ class AdvancedSection(Section):
 
     def _load(self, call: Callable[..., dict]) -> None:
         lines: list[str] = []
+        self._brain_running = False
 
         status = self._ask("status")
         if status.get("ok"):
@@ -1313,6 +1423,7 @@ class AdvancedSection(Section):
         brain = self._ask("brain_status")
         if brain.get("ok"):
             b = brain["result"]
+            self._brain_running = bool(b.get("running"))
             lines.append("")
             lines.append(f"brain running    {self._fmt(b.get('running'))}")
             lines.append(f"brain tier       {self._fmt(b.get('tier'))}")
@@ -1372,6 +1483,8 @@ class AdvancedSection(Section):
         lines.append(f"models config    {modelconfig.DEFAULT_CONFIG_PATH}")
         lines.append(f"voices config    {voiceconfig.DEFAULT_CONFIG_PATH}")
 
+        self.vram.configure(text=self._vram_line(self._ask("arbiter_summary")))
+
         self.facts.configure(text="\n".join(lines))
 
         tail = self._ask("audit_tail", limit=40)
@@ -1398,6 +1511,78 @@ class AdvancedSection(Section):
 
     def _reload(self) -> None:
         self._load(self._call)
+
+    @staticmethod
+    def _vram_line(res: dict) -> str:
+        """The holders line, or a sentence rather than a repr.
+
+        Older fakes (and any daemon that answers otherwise) return a dict or
+        nothing here; the real daemon returns the one-line string. None of
+        those may reach the screen as `None` or `{}`.
+        """
+        if not res.get("ok"):
+            return "unavailable."
+        summary = res.get("result")
+        if isinstance(summary, str) and summary:
+            return summary
+        return "no summary reported."
+
+    def _describe(self) -> None:
+        """Ask the child what the model was actually given, and show it."""
+        res = self._ask("brain_describe")
+        if not res.get("ok"):
+            self.describe_out.configure(
+                text=f"unavailable: {self._fmt(res.get('error'))}")
+            self._say(
+                f"the description is unavailable: "
+                f"{self._fmt(res.get('error'))}", "rust")
+            return
+        result = res.get("result") or {}
+        if isinstance(result, dict):
+            shown = [f"{k:<16} {self._fmt(v)}" for k, v in result.items()][:12]
+            if len(result) > 12:
+                shown.append(f"... ({len(result) - 12} more)")
+            self.describe_out.configure(text="\n".join(shown) or "empty")
+            count = len(result)
+        else:
+            self.describe_out.configure(text=self._fmt(result))
+            count = 1
+        started = "" if self._brain_running else "the brain child was started to ask. "
+        self._say(f"{started}{count} field(s) shown. Read-only.", "sage")
+
+    def _check_path(self) -> None:
+        """Is this path approved, and what may happen in it. Read-only."""
+        path = self.path_field.get().strip()
+        if not path:
+            self.path_verdict.configure(text="type a path first.")
+            return
+        res = self._ask("workspace_covers", path=path)
+        if not res.get("ok"):
+            self.path_verdict.configure(
+                text=f"unavailable: {self._fmt(res.get('error'))}")
+            self._say(
+                f"the path check is unavailable: "
+                f"{self._fmt(res.get('error'))}", "rust")
+            return
+        hit = res.get("result")
+        if hit is None:
+            self.path_verdict.configure(
+                text="outside every approved workspace.")
+            self._say("that path is outside every approved workspace.", "amber")
+            return
+        if not isinstance(hit, dict):
+            self.path_verdict.configure(text=self._fmt(hit))
+            return
+        tiers = hit.get("allow_tiers")
+        if isinstance(tiers, list):
+            tiers_s = ", ".join(str(t) for t in tiers) or "none"
+        else:
+            tiers_s = self._fmt(tiers)
+        self.path_verdict.configure(
+            text=f"approved in {hit.get('name', 'unknown')} "
+                 f"[{hit.get('danger_level', 'unknown')}] "
+                 f"{hit.get('root', 'unknown')}\nallowed here: {tiers_s}")
+        self._say(f"{path} is approved in {hit.get('name', 'unknown')}.", "sage")
 
     def _say(self, message: str, tone: str) -> None:
         if self.status is not None:

@@ -5112,3 +5112,57 @@ next session will have the same access to grep and the same temptation to read a
 null result as a missing feature. **A grep that returns nothing is more often a
 wrong pattern than an absent thing**, and the cost of being wrong is a confident
 incorrect report to a user who cannot check it as cheaply as you can.
+---
+
+## D95 - Advanced rebuilt: three read-only affordances, and what was refused
+
+D93's table said Advanced calls no daemon op. That was the fourth
+wrong-inventory in the same family: it calls six read ops on every load
+(`status`, `brain_status`, `mail_status`, `vault_status`, `reflect_overlay`,
+`audit_tail`) plus local paths. "No *action* op" is true; "no op" is not,
+and the distinction matters because the redesign hangs on it: a tab that
+already asks six questions can be given three more without changing what
+the tab is.
+
+Added, all read-only (`tests/test_settings_advanced.py`, failing first):
+
+* Video memory — `arbiter_summary`, in the daemon's own words. This also
+  fixes a real display gap: `status` carries `vram` as a one-line string,
+  but the facts block only printed dicts, so the holders line was silently
+  absent with a real daemon and present only with fakes.
+* The model — `brain_describe`, what the child handed the model. Caveat,
+  stated on the status line rather than hidden: on a cold daemon the op
+  starts the child to ask it (`_brain_ensure`), so asking warms.
+* Is this path approved — `workspace_covers` behind a `Field` and a
+  `Check path` button. An empty field asks nothing; `None` renders as
+  "outside every approved workspace", never as `None`.
+
+Refused, each for a stated reason:
+
+* `brain_load` / `brain_unload` — process state, not diagnostics. The
+  read-only test (`test_advanced_calls_nothing_that_could_change_anything`)
+  already forbids them here; the tab stays inside that pin.
+* `arbiter_sweep` — it kills expired-lease holders, and the daemon already
+  sweeps on a timer. A button for it would be a destructive primitive on a
+  diagnostics tab (reflection 1.2), moved earlier only in time.
+* `arbiter_acquire` / `release` / `renew` — leases are the daemon's to
+  manage; a window handing them out competes with the arbiter.
+* `audit_note`, the vault writes — writes need their own decisions, not a
+  diagnostics tab.
+* `ping` — `status` answering already proves liveness.
+* `voice_watch` — belongs to Voices, not here. `brain_turn` /
+  `brain_stream` answer questions; that is not settings either.
+
+The tab is taller than the window — facts, three panels and the tail never
+fit 600 px, and the tail was already below the fold before the panels. So
+the content scrolls in a Canvas viewport with a styled Scrollbar. The kit's
+Canvas objection is about replacing *controls* with drawn shapes; a scrolling
+container keeps every control native. Wheel scroll binds at `all` level on
+hover and is removed in a `dispose` override, on the Tk thread like the rest
+of teardown, so no wheel event fires into a destroyed canvas.
+
+Screenshot correction: the handoff's recipe (scale the bbox by
+`winfo_fpixels("1i")/96`) fails on this machine. Tk reports 1.0 while the OS
+scales at 200%, so every computed crop landed on the wrong window.
+Full-screen grab then crop is what worked; the factor to distrust is the one
+Tk reports, not the arithmetic.

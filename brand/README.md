@@ -214,15 +214,16 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **26 of the daemon's 44 ops have a way in; 18 do not.**
+Measured, not remembered: **28 of the daemon's 44 ops have a way in; 16 do not.**
 Reached by `overlay.py` (6), `tray.py` (5, four of which were broken until D77) and
-`settings.py` (20), counting the op names that actually appear as string literals in
+`settings.py` (23), counting the op names that actually appear as string literals in
 those files - and, since D77, asserting that every one of them exists.
 
-The figure in this paragraph has been 21, then 20, then 21, and is 26 now that
-Advanced exists. Each earlier time it was written from the change just made rather
-than from the measurement - the same mistake in miniature that the whole section is
-about, so it is left visible rather than tidied.
+The figure in this paragraph has been 21, then 20, then 21, then 26, and is 28
+now that Advanced asks three more (D95). Each earlier time it was written from
+the change just made rather than from the measurement - the same mistake in
+miniature that the whole section is about, so it is left visible rather than
+tidied.
 
 | Section | State |
 |---|---|
@@ -231,7 +232,7 @@ about, so it is left visible rather than tidied.
 | Speech | **not built** - push-to-talk, mute, wake word |
 | Workspaces | **partly built** (D77) - a list and `Approve folder.`, `Reload`. **Revoke, danger level and allowed tiers do not exist.** |
 | Authority | **built but not operable** (D78) - the tier ladder (four `Badge.for_tier` rows), attended state, `Step back (unattended)`, the "Waiting on you" pending list, and the "What would happen if…" `tool_check` predictor. **The session ceiling is displayed but cannot be changed from the window — the daemon has no op for it.** |
-| Advanced | **built** (D79) - read-only diagnostics: brain, mail, vault, reflection, paths, and the audit tail. Being redesigned; see below. |
+| Advanced | **rebuilt** (D95) - grouped diagnostics with three read-only affordances: VRAM holders (`arbiter_summary`), what-the-model-was-given (`brain_describe`), is-this-path-approved (`workspace_covers`). Scrolls; the audit tail was already below the fold before the panels. |
 
 #### The control inventory, measured 2026-10-13
 
@@ -244,13 +245,14 @@ window's interactivity:
 | Voices | `Use voice`, `Save` | **none** |
 | Workspaces | `Approve folder.`, `Reload` | **none** |
 | Authority | `Step back (unattended)`, `Reload` | **none** |
-| Advanced | `Reload` | **none** |
+| Advanced | `Reload`, `What the model was given`, `Check path` | `Field` ×1, `Panel` ×3 |
 
-So the window uses **seven of the nine widgets in `widgets.py`, and all seven are
-`Button`.** `Field`, `Select`, `Toggle`, `Badge`, `Meter`, `Panel`, `ListRow` and
-`Dialog` are built, tested, and **never instantiated by the settings window** —
-which is why this file describes the kit as load-bearing for a surface that does
-not yet use it. `Badge.for_tier()` is called from nowhere in `settings.py`.
+So the window instantiates **five of the nine widgets in `widgets.py`**: `Button`
+everywhere (9 call sites, including the five section tabs), `Select` in Models,
+`Badge` in Authority, `Panel` ×3 and `Field` ×1 in Advanced. `Toggle`, `Meter`,
+`ListRow` and `Dialog` are built, tested, and still **never instantiated by the
+settings window** — which is why this file describes the kit as load-bearing for
+a surface that only partly uses it.
 
 **Why this table was wrong.** The version above this one marked four sections
 **built** and listed affordances — download, import, remove; revoke, danger level,
@@ -271,25 +273,30 @@ while the thing a user actually needed went unasserted.
 
 #### The redesign of Advanced
 
-Advanced is being rebuilt rather than extended: 487 lines producing one `Reload`
-button and no input widgets is the wrong shape for a settings tab, read-only or
-not. Its diagnostics are worth keeping — they are the only place a user can see
-what the daemon believes — but they belong grouped by subject with real
-affordances for the ops that currently have no way in (see the 27 below).
+Advanced was rebuilt rather than extended (D95): 487 lines producing one `Reload`
+button and no input widgets was the wrong shape for a settings tab, read-only or
+not. Its diagnostics are kept — they are the only place a user can see what the
+daemon believes — grouped by subject with read-only affordances for three of the
+ops that had no way in (see the 16 below). The tab scrolls: facts, three panels
+and the tail never fit 600 px, and the tail was already below the fold before
+the panels.
 
-#### The 27 ops with no way in, grouped
+#### The 16 ops with no way in, grouped
+
+Counted 2026-10-14 against `Daemon._OPS`: 28 of 44 reached, 16 not.
+`workspace_covers`, `arbiter_summary` and `brain_describe` gained a way in via
+Advanced (D95); `mail_status`, `reflect_overlay` and `tool_check` were already
+reached, from Advanced and Authority respectively.
 
 | Group | Ops | What a window would do |
 |---|---|---|
-| `workspace_covers`, `workspace_resolve` (2) | | "is this path approved, and what may happen in it" - useful for a path checker in Advanced |
-| `vault_*` (6) | `append`, `index`, `read_journal`, `role_templates`, `status`, `write_note` | the Obsidian bridge |
-| `brain_*` (4) | `describe`, `load`, `stream`, `unload` | force a load or unload, free VRAM now, see what the model was given. `status` is reached from Advanced |
-| `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | what holds VRAM and for how long. `summary` is reached from the tray |
-| `mail_status` | reached, in Advanced |
-| `voice_watch` (1) | | start/stop wake-word listening |
-| `reflect_overlay` | reached, in Advanced |
-| `tool_check` | reached, in Authority | "what would happen if I ran this" - a prediction, not an action |
-| `ping` (1) | | liveness |
+| `workspace_resolve` (1) | | name → workspace; the path checker answers the user-facing question. `covers` is reached from Advanced |
+| `vault_*` (5) | `append`, `index`, `read_journal`, `role_templates`, `write_note` | the Obsidian bridge; reads and writes for a surface of their own. `status` is reached from Advanced |
+| `brain_*` (3) | `load`, `stream`, `unload` | process state (`load`/`unload`) and answering (`stream`); not settings. `status` and `describe` are reached from Advanced |
+| `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | leases are the daemon's to manage; the sweep kills expired holders and already runs on a timer — refused for Advanced in D95. `summary` is reached from the tray and from Advanced |
+| `audit_note` (1) | | a write, needing its own decision |
+| `voice_watch` (1) | | start/stop wake-word listening; belongs to Voices |
+| `ping` (1) | | liveness; `status` answering already proves it |
 
 #### Asked for, and does not exist in the code at all
 

@@ -51,6 +51,7 @@ than one that is absent (D36).
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import font as tkfont
@@ -354,6 +355,7 @@ class Overlay:
         self.transcript.tag_configure("good", foreground=OK)
         self.transcript.tag_configure("bad", foreground=DANGER)
         self.transcript.tag_configure("accent", foreground=ACCENT)
+        _attach_edit_menu(self.transcript, editable=False)
 
         entry_row = tk.Frame(root, bg=BG)
         entry_row.pack(fill="x", padx=18, pady=(0, 12))
@@ -364,6 +366,18 @@ class Overlay:
         self.entry.pack(side="left", fill="x", expand=True, ipady=6, ipadx=8)
         self.entry.bind("<Return>", lambda _e: self._submit())
         self.entry.bind("<Escape>", lambda _e: self.hide())
+        _attach_edit_menu(self.entry, editable=True)
+        # Raw tk.Button, in this file's own style: the dialog buttons below
+        # are raw too, and the colours are this file's validated constants
+        # (D69 — Tk rejects anything else at construction).
+        attach = tk.Button(
+            entry_row, text="Attach…", relief="flat",
+            fg=FG, bg=PANEL, activeforeground=FG, activebackground="#2b313c",
+            highlightthickness=1, highlightbackground=MUTED,
+            font=("Segoe UI", 9), cursor="hand2",
+            command=self._attach_files,
+        )
+        attach.pack(side="right", padx=(8, 0))
 
         self.status = tk.Label(root, text="", fg=MUTED, bg=BG, anchor="w")
         self.status.pack(fill="x", padx=18, pady=(0, 10))
@@ -494,11 +508,55 @@ class Overlay:
             # on another thread can wait for the result.
             rest[0]()
 
+    def _attach_files(self) -> None:
+        """Offer files and a folder, inserting `@path` tokens at the cursor.
+
+        The dialog is Tk's own; the tokens it inserts are expanded by
+        `_expand_attachments` on submit, through the daemon's reads. Nothing
+        here touches the filesystem (D31): the window names paths, the daemon
+        reads them, and an unapproved one refuses at submit time.
+        """
+        from tkinter import filedialog
+
+        try:
+            paths = filedialog.askopenfilenames(parent=self._root,
+                                                title="Attach files")
+        except Exception:  # noqa: BLE001 - no display, no dialog, no tokens
+            return
+        for path in paths or ():
+            self._insert_token(_attach_token(str(path)))
+        try:
+            folder = filedialog.askdirectory(parent=self._root,
+                                             title="Attach a folder")
+        except Exception:  # noqa: BLE001 - same as above
+            return
+        if folder:
+            self._insert_token(_attach_token(str(folder)))
+
+    def _insert_token(self, token: str) -> None:
+        """Insert one `@path` token at the entry cursor, spaced."""
+        try:
+            pos = self.entry.index("insert")
+            needs_space = pos > 0 and not self.entry.get()[:pos].endswith(
+                (" ", "\t"))
+            self.entry.insert("insert", (" " if needs_space else "") + token
+                              + " ")
+        except Exception:  # noqa: BLE001 - entry gone: tokens need nowhere
+            pass
+
     def _submit(self) -> None:
         prompt = self.entry.get().strip()
         if not prompt or self._busy:
             return
         self.entry.delete(0, "end")
+        expanded, refusal = _expand_attachments(prompt, self._call)
+        if refusal is not None:
+            # Said on the Tk thread, where _submit runs: no turn was spent,
+            # no VRAM was touched, and the reason names the fix (approve the
+            # path, or drop the token).
+            self._append(f"cannot stage that: {refusal}", "bad")
+            return
+        prompt = expanded or prompt
         self._busy = True
         routed = _route(prompt)
         if routed[0] == "command":
@@ -743,6 +801,23 @@ def _render_result(tool: str, result: Any) -> str:
     if isinstance(result, str):
         return result[:_RESULT_CHARS]
     if isinstance(result, dict):
+        # A directory listing is summarised, never dumped: the user called a
+        # 98-entry transcript a mess (D106), and truncation mid-list is not a
+        # summary. Count plus the first names; the tail line says the rest
+        # exists. Copy (right-click) still reaches everything on screen.
+        if isinstance(result.get("entries"), list) and "count" in result:
+            entries = result["entries"]
+            total = result["count"]
+            lines = [f"{result.get('path', '')} — {total} entries:"]
+            for entry in entries[:_ENTRIES_SHOWN]:
+                if isinstance(entry, dict):
+                    name = str(entry.get("name", "?"))
+                    lines.append(name + ("/" if entry.get("dir") else ""))
+                else:
+                    lines.append(str(entry))
+            if total > len(lines) - 1:
+                lines.append(f"... and {total - (len(lines) - 1)} more")
+            return "\n".join(lines)
         # A human-facing summary still wins when the tool offers one, so a tool
         # that bothers to be readable stays readable.
         for key in ("summary", "message", "answer", "transcript"):
@@ -830,6 +905,233 @@ _COMMANDS = {
 }
 
 _MAX_COMMAND_LINES = 20
+
+
+#: Entries shown for one attached or listed directory. A 98-entry listing
+#: dumped raw is the transcript the user called a mess (D106); the count plus
+#: the first names answer "what is in here" and the tail line says the rest
+#: exists rather than pretending it does not.
+_ENTRIES_SHOWN = 25
+
+#: One attached file staged into the prompt at most. An attachment is context,
+#: not a dump; 20 KB is several screens and anything larger should be narrowed
+#: with a path first.
+_ATTACH_MAX_BYTES = 20_000
+
+#: Attachments per prompt. Each costs a metadata call plus a read or a list,
+#: all T0, but five separate files in one question is a prompt nobody wrote.
+_ATTACH_MAX_FILES = 5
+
+#: `@path` tokens: `@"C:/my docs/x"` or `@F:/theseas/x`. The token must
+#: contain a slash, so `bob@example.com` is never an attachment.
+_ATTACH_RE = re.compile(r'@"([^"]+)"|@(\S+)')
+
+
+def _attach_token(path: str) -> str:
+    """The `@` spelling of a path, quoted when it must be."""
+    if any(c in path for c in (" ", "\t")):
+        return '@"%s"' % path
+    return "@" + path
+
+
+def _attach_paths(prompt: str) -> list[str]:
+    """The attachment paths named in a prompt, in order, deduplicated."""
+    found: list[str] = []
+    for match in _ATTACH_RE.finditer(prompt or ""):
+        raw = match.group(1) if match.group(1) is not None else match.group(2)
+        path = raw.rstrip(",.;:!?")
+        if "/" not in path and "\\" not in path:
+            continue
+        if path not in found:
+            found.append(path)
+    return found
+
+
+def _read_for_attach(call: Callable[..., dict], tool: str,
+                     args: dict) -> tuple[Any, str | None]:
+    """One T0 read through `tool_call`, returning payload or refusal reason."""
+    try:
+        res = call("tool_call", tool=tool, args=args,
+                   channel="pc", actor="overlay") or {}
+    except Exception as exc:  # noqa: BLE001 - a dead pipe reads as a refusal
+        return None, f"the daemon did not answer: {exc}"
+    if not res.get("ok"):
+        return None, str(res.get("error", "no reason given"))
+    return res.get("result"), None
+
+
+def _expand_attachments(prompt: str, call: Callable[..., dict]
+                        ) -> tuple[str | None, str | None]:
+    """Stage `@path` tokens through the daemon's own T0 reads.
+
+    Returns `(expanded, None)` — the original text untouched, with one context
+    block per attachment prepended — or `(None, reason)` when anything refused.
+    A refusal aborts the turn before any VRAM is spent: sending the question
+    anyway would buy a model guessing about a file it cannot see.
+    """
+    paths = _attach_paths(prompt)
+    if not paths:
+        return prompt, None
+    blocks: list[str] = []
+    for path in paths[:_ATTACH_MAX_FILES]:
+        meta, reason = _read_for_attach(call, "file.metadata", {"path": path})
+        if reason is not None:
+            return None, f"@{path}: {reason}"
+        if not isinstance(meta, dict):
+            return None, f"@{path}: the daemon returned nothing usable"
+        if meta.get("kind") == "dir":
+            listing, reason = _read_for_attach(call, "file.list",
+                                               {"path": path})
+            if reason is not None:
+                return None, f"@{path}: {reason}"
+            entries = (listing or {}).get("entries", []) if isinstance(
+                listing, dict) else []
+            names = [e.get("name", "?") + ("/" if e.get("dir") else "")
+                     for e in entries[:_ENTRIES_SHOWN]
+                     if isinstance(e, dict)]
+            total = (listing or {}).get("count", len(names))
+            block = f"@{path} (directory, {total} entries):\n" + "\n".join(
+                names)
+            if total > len(names):
+                block += f"\n... and {total - len(names)} more"
+            blocks.append(block)
+        else:
+            content, reason = _read_for_attach(
+                call, "file.read",
+                {"path": path, "max_bytes": _ATTACH_MAX_BYTES})
+            if reason is not None:
+                return None, f"@{path}: {reason}"
+            if not isinstance(content, dict):
+                return None, f"@{path}: the daemon returned nothing usable"
+            text = str(content.get("text", ""))
+            block = f"@{path} ({content.get('bytes', '?')} bytes"
+            if content.get("truncated"):
+                block += f", first {_ATTACH_MAX_BYTES} shown"
+            blocks.append(block + "):\n" + text)
+    return "\n\n".join(blocks) + "\n\n" + prompt, None
+
+
+def _copy_selection(widget: Any) -> None:
+    """Copy the selection to the clipboard, silently when there is none."""
+    try:
+        selected = widget.selection_get()
+    except Exception:  # noqa: BLE001 - no selection: a menu item, not an error
+        return
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(selected)
+    except Exception:  # noqa: BLE001 - headless clipboard: same, not an error
+        pass
+
+
+def _cut_selection(widget: Any) -> None:
+    _copy_selection(widget)
+    try:
+        widget.delete("sel.first", "sel.last")
+    except Exception:  # noqa: BLE001 - nothing selected, nothing to cut
+        pass
+
+
+def _paste_clipboard(widget: Any, get: Callable[[], str] | None = None) -> None:
+    """Paste at the cursor, replacing the selection. `get` is injectable so
+    tests never touch the real clipboard."""
+    text: str | None = None
+    if get is not None:
+        try:
+            text = get()
+        except Exception:  # noqa: BLE001 - injected source failed: try clipboard
+            text = None
+    if text is None:
+        try:
+            text = widget.clipboard_get()
+        except Exception:  # noqa: BLE001 - empty clipboard pastes nothing
+            return
+    try:
+        if hasattr(widget, "selection_present") and widget.selection_present():
+            widget.delete("sel.first", "sel.last")
+        widget.insert("insert", text)
+    except Exception:  # noqa: BLE001 - read-only widget: paste is a no-op
+        pass
+
+
+def _build_edit_menu(widget: Any, *, editable: bool) -> Any:
+    """Build the right-click menu. Separate from binding it, so tests can
+    assert on the labels without posting anything."""
+    import tkinter as tk
+
+    menu = tk.Menu(widget, tearoff=0)
+    if editable:
+        menu.add_command(label="Cut",
+                         command=lambda: _cut_selection(widget))
+    menu.add_command(label="Copy",
+                     command=lambda: _copy_selection(widget))
+    if editable:
+        menu.add_command(label="Paste",
+                         command=lambda: _paste_clipboard(widget))
+    menu.add_command(label="Select all",
+                     command=lambda: _select_all(widget))
+    return menu
+
+
+def _attach_edit_menu(widget: Any, *, editable: bool) -> None:
+    """Right-click menu for a transcript, entry or dialog body.
+
+    Tk ships no Button-3 menu, which is why the transcript was write-only and
+    the entry could not paste. Read-only widgets get Copy and Select All; the
+    entry adds Cut and Paste.
+
+    The menu is built on the FIRST right-click, not at window construction.
+    Building it eagerly in `_build` aborts the process deterministically
+    (three consecutive 0x80000003 in the real-dialog suite, pristine tree
+    green): `_build` runs on the Tk worker thread while the caller allocates
+    Tk on another, and a `tk.Menu` in that window is the object the GC race
+    fires on. A right-click is serviced on the Tk thread itself, where
+    construction is race-free — which the real-Tk menu test proves by building
+    there repeatedly without a single abort.
+
+    Bind failure leaves the widget menu-less rather than breaking its owner.
+    The menu is convenience; the T3 dialog it may sit on is authority, and a
+    convenience must never be load-bearing for an authority (D69's fakes stand
+    in for these widgets and carry no `.tk` — the dialog rules they test must
+    hold with or without a menu). The real-Tk test asserts the built menu's
+    labels, so a typo here still fails loudly there.
+    """
+    held: dict[str, Any] = {}
+
+    def _show(event: Any) -> str:
+        menu = held.get("menu")
+        if menu is None:
+            try:
+                menu = _build_edit_menu(widget, editable=editable)
+            except Exception:  # noqa: BLE001 - imaginary widget: no menu
+                return "break"
+            held["menu"] = menu
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:  # noqa: BLE001 - popup never grabbed
+                pass
+        return "break"
+
+    try:
+        widget.bind("<Button-3>", _show)
+    except Exception:  # noqa: BLE001 - imaginary widget (D69 fakes): no menu
+        return
+    # The holder, not the menu: asserting `_edit_menu` exists proves the bind,
+    # and the labels are asserted on `_build_edit_menu` where widgets are real.
+    widget._edit_menu = held  # noqa: SLF001 - owned reference, not a poke
+
+
+def _select_all(widget: Any) -> None:
+    try:
+        widget.tag_add("sel", "1.0", "end-1c")
+    except Exception:  # noqa: BLE001 - Entry uses indices, not text ranges
+        try:
+            widget.selection_range(0, "end")
+        except Exception:  # noqa: BLE001 - nothing selectable
+            pass
 
 
 def _route(prompt: str):
@@ -932,6 +1234,7 @@ class _Confirm:
         body.tag_configure("muted", foreground=MUTED)
         body.tag_configure("good", foreground=OK)
         body.tag_configure("bad", foreground=DANGER)
+        _attach_edit_menu(body, editable=False)
         self.body = body
 
         self._describe(preview)

@@ -5423,6 +5423,57 @@ shortcuts now run `pythonw.exe`; a separate "(console)" entry keeps
 actually about.
 ---
 
+## D106 - The chat window becomes usable: menus, summaries, attachments
+
+Dogfood report, same session as D105: the assistant "refused more than it
+helped", the chat transcript was a 98-entry raw dump with no way to copy
+it, and no file or folder could be put into the conversation. Three
+affordances, each failing-first in `tests/test_overlay_ux.py` (18 tests),
+each mutation-gated:
+
+* **Right-click menus.** Tk ships no Button-3 menu: Copy + Select All on the
+  transcript, entry and T3 dialog body; Cut + Paste added on the entry.
+  Callbacks are plain functions on a minimal widget protocol (stub-tested,
+  never touching the real clipboard); labels asserted on real Tk.
+* **Entries summaries.** `_render_result` renders `{path, count, entries}`
+  as count plus the first 25 names with an "... and N more" tail — a
+  mid-list truncation is not a summary. Small lists render whole.
+* **`@path` attachments** plus an `Attach…` button. `@F:/theseas/foo.py`
+  stages the file through the daemon's own T0 reads (metadata, then read
+  capped at 20 KB or list capped at 50 names); quoted `@"C:/my docs/x"`
+  covers spaces, and tokens without a slash (e.g. `bob@example.com`) are
+  never attachments. A refusal aborts the turn before any VRAM is spent —
+  sending the question anyway would buy a model guessing about a file it
+  cannot see. The window names paths; only the daemon reads them (D31).
+
+Two defects found by building it, both in the new code:
+
+* The first `_paste_clipboard` carried a garbled conditional
+  (`selection_get_selection() if False`) — caught on read-through before
+  any test ran, which is the cheapest possible finding and still worth
+  recording: untested helpers drift.
+* `_attach_edit_menu` eagerly built a `tk.Menu` in `_build`, which aborts
+  the process deterministically (three consecutive `0x80000003` in the
+  real-dialog suite; pristine tree green 16/16). `_build` runs on the Tk
+  worker thread while the caller allocates Tk on another, and an eager
+  Menu in that window is what the GC race fires on. Menus are now built on
+  the first right-click — serviced on the Tk thread itself, where
+  construction is race-free — and the dialog-body menu rides the same path.
+  Bisected in order: dialog menu alone still aborted, all `_build`
+  additions off green, transcript menu alone aborted. The raw `tk.Button`
+  detour (kit's Button reads tokens.json per construction) was a wrong turn:
+  the abort persisted without it. Three clean reruns after the lazy form,
+  16/16 each. Phase A stays closed — this one reproduced at 100% and was
+  fixed, not flaked around.
+
+Deliberately not done: the Speech tab (item 2 of the ranked list). The
+user's dogfood redirected the session to usability — refusals (all 22
+workspace manifests raised to full tiers at the owner's explicit direction,
+T3 still confirms at the PC per D13/D32), the installer (D105), and this —
+and audio stays acknowledged-WIP. A mute toggle was refused as theatre:
+nothing auto-speaks today, so there is nothing for it to gate.
+---
+
 ## D104 - Load/infer split per tier, and the spare 0.8B measured
 
 D99 reported wall totals only, n=1, through the daemon path. Measured here

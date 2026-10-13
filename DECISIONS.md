@@ -5052,3 +5052,43 @@ a property of the model, and dropping it would silently change what the arbiter
 permits on the next turn. A test asserts that.
 
 Suite: **1423 passed, 3 skipped, exit 0.**
+---
+
+## D93 - Second correction: Voices and Workspaces were already wired, and Advanced calls no ops at all
+
+D89 and D90 reported that Voices lacked download/import/remove and Workspaces
+lacked revoke. **Both are false**, and the cause this time was stale line numbers:
+I had hard-coded section boundaries, then added ~60 lines to ModelsSection, and
+kept measuring against the old offsets.
+
+`settings.py` now has a boundary-deriving inventory
+(`re.search(r'super\(\).__init__\("(\w+)"')` for the start, next start minus one for
+the end) rather than numbers anyone has to remember to update. Measured:
+
+| Section | lines | `W.*` | raw `tk.*` | ops reached |
+|---|---|---|---|---|
+| models | L140-447 | Button, **Select** | Listbox | `model_config`, `model_config_set` |
+| voices | L448-745 | Button | Listbox, **OptionMenu** | `voice_config`, **`voice_import`**, **`voice_install`**, **`voice_remove`** |
+| workspaces | L746-997 | Button | Listbox, **OptionMenu** | `workspace_add`, `workspace_list`, **`workspace_remove`**, `workspace_roots` |
+| authority | L998-1210 | Badge, Button | Entry | `confirm_list`, `session_set_attended`, `status`, `tool_check` |
+| advanced | L1211-1775 | Button | *none* | **none** |
+
+So Voices reaches all three of download, import and remove, and Workspaces reaches
+revoke. The brand README's claims were right and my D89 correction was wrong.
+
+**And Advanced is the real outlier:** 565 lines, one button, and it calls **no
+daemon op at all**. Every figure it shows is read locally. That is the section
+that genuinely needs designing rather than wiring.
+
+### Three wrong inventories, one lesson
+
+1. D89 - regex `W\.Badge\(` missed `W.Badge.for_tier(`.
+2. D89/D90 - regex `W\.(Entry|...)` missed `W.Field`, `W.Select`, `W.Toggle`.
+3. D93 - hard-coded line ranges went stale after an edit above them.
+
+Every one was a measurement shortcut that I reported as a product defect. The
+general form: **an inventory derived by hand from a moving file is not an
+inventory.** Derive it from structure, or re-derive it every time.
+
+Consequence for the rebuild: Workspaces and Voices are much further along than D92
+implied, and **Advanced should have been first**, not last.

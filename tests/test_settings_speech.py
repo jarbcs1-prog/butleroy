@@ -122,7 +122,7 @@ def test_attach_button_is_registered_on_entry_row():
         # Minimal: the button itself, and the edit menu (lazy on first click).
         # This is a white-box check: without the feature, `_attach_files`
         # does not exist either.
-        assert hasattr(O, "_attach_files")
+        assert hasattr(O.Overlay, "_attach_files")
         assert hasattr(O, "_attach_edit_menu")
     finally:
         root.destroy()

@@ -5204,3 +5204,45 @@ gate individually; a loader bypasses that review); standing energy telemetry
 (joules drive no decision this system makes — the 9B tier wants one measured
 run, not a subsystem); a command palette (viable, but it needs its own
 read-op allowlist decision first, and the D95 refused list stays refused).
+---
+
+## D97 - The ceiling can only widen while a human watches
+
+The Authority tab displayed the session ceiling and offered no way to change
+it, and the daemon had no op for it. This is the constraint the op was
+written against, recorded before the op so the op can be judged against it:
+
+* **Lower any time, from anywhere** — narrowing is the safe direction, the
+  mirror of `attended=False`. The assistant itself may narrow (the tab's own
+  note forbids it only from *raising* either one).
+* **Raise only when attended *and* from a present channel.** Either missing
+  is a `Refused`, not a silent ignore — mirroring `op_session_set_attended`,
+  where a caller asking to widen without presence is itself the suspicious
+  fact. A widening nobody watched is indistinguishable from one nobody
+  wanted.
+* **Equal is a no-op that writes nothing**, not even an audit record.
+* **Narrowing kills live class grants** (same premise-gone rule as stepping
+  back: a grant established for T3 work must not outlive T3 eligibility).
+  Widening creates none.
+* Unknown names are refused loudly with the four valid ones, the way unknown
+  button variants are — a typo near authority must not land somewhere near.
+* Audited at T1 like `model_config_set`: "the human changed the
+  configuration" is what the chain is for.
+
+And what the op does *not* do, stated so nobody assumes it: the gate never
+sees the session ceiling — its teeth are the workspace-resolve intersection
+(`allow_tiers` ∩ ceiling ∩ danger ceiling), by the existing design
+("authority ceiling, not grant"). The op moves the same lever CLI `--ceiling`
+moves, effective on the next resolve. A gate-level clamp would touch every
+verdict and is a different change, not this one.
+
+The window stages the choice and applies it with a button, like Models: a
+Select that wrote on every change would let a stray click widen authority,
+and authority deserves the more deliberate gesture.
+
+Addendum, same session: `test_ui_op_names` only scanned `.call("...")` and
+`op="..."`, so the eight ops Advanced asks through `self._ask` passed no
+name check at all — D77's exact hole, one level down. The extractor now
+covers `_ask(` too, with the guard-the-guard sample extended to prove it.
+The 29/16 figures above were re-derived against `Daemon._OPS` after the new
+op landed (45 ops), not carried forward by arithmetic.

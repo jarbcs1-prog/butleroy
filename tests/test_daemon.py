@@ -332,6 +332,69 @@ def test_a_channel_cannot_be_invented(dg: D.Daemon):
 
 
 # --------------------------------------------------------------------------- #
+# the session ceiling narrows freely and widens only while watched (D97)
+
+
+def test_lowering_the_ceiling_is_allowed_from_anywhere(dg: D.Daemon):
+    out = req(dg, "session_set_ceiling", ceiling="T1", channel=CHANNEL_TELEGRAM)
+    assert out["ok"] is True, out
+    assert dg.session_ceiling == Tier.REVERSIBLE_WRITE
+    assert out["result"]["changed"] is True
+
+
+def test_raising_the_ceiling_needs_a_watched_human(dg: D.Daemon):
+    req(dg, "session_set_ceiling", ceiling="T1", channel=CHANNEL_PC)
+    out = req(dg, "session_set_ceiling", ceiling="T3", channel=CHANNEL_PC)
+    assert out["ok"] is True, out
+    assert dg.session_ceiling == Tier.IRREVERSIBLE
+
+    req(dg, "session_set_attended", attended=False, channel=CHANNEL_PC)
+    narrowed = req(dg, "session_set_ceiling", ceiling="T1", channel=CHANNEL_PC)
+    assert narrowed["ok"] is True, narrowed
+    refused = req(dg, "session_set_ceiling", ceiling="T3", channel=CHANNEL_PC)
+    assert refused["ok"] is False
+    assert dg.session_ceiling == Tier.REVERSIBLE_WRITE
+
+    remote = req(dg, "session_set_ceiling", ceiling="T3", channel=CHANNEL_TELEGRAM)
+    assert remote["ok"] is False
+    assert dg.session_ceiling == Tier.REVERSIBLE_WRITE
+
+
+def test_an_unknown_ceiling_is_refused_loudly(dg: D.Daemon):
+    out = req(dg, "session_set_ceiling", ceiling="T9", channel=CHANNEL_PC)
+    assert out["ok"] is False
+    assert "T0" in out["error"] and "T3" in out["error"], (
+        f"the refusal does not name the valid ceilings: {out}"
+    )
+    assert dg.session_ceiling == Tier.IRREVERSIBLE
+
+
+def test_setting_the_same_ceiling_writes_nothing(dg: D.Daemon):
+    before = len(records(dg))
+    out = req(dg, "session_set_ceiling", ceiling="T3", channel=CHANNEL_PC)
+    assert out["ok"] is True
+    assert out["result"]["changed"] is False
+    assert len(records(dg)) == before, "a no-op wrote to the audit chain"
+
+
+def test_a_ceiling_change_is_audited(dg: D.Daemon):
+    req(dg, "session_set_ceiling", ceiling="T2", channel=CHANNEL_PC)
+    mine = [r for r in records(dg) if r.get("tool") == "session.set_ceiling"]
+    assert mine, "the ceiling moved with no audit record"
+    assert mine[-1]["tier"] == "T1"
+    assert "T3" in mine[-1]["reason"] and "T2" in mine[-1]["reason"]
+
+
+def test_narrowing_the_ceiling_kills_live_grants(dg: D.Daemon):
+    import time as _time
+
+    dg._grants["file.delete|test"] = _time.monotonic() + 500.0
+    req(dg, "session_set_ceiling", ceiling="T1", channel=CHANNEL_PC)
+    assert dg._grants == {}, "a T3 grant outlived T3 eligibility"
+    assert any(r.get("tool") == "confirm.grant_clear" for r in records(dg))
+
+
+# --------------------------------------------------------------------------- #
 # manifests are the only source of authority (D10)
 # --------------------------------------------------------------------------- #
 

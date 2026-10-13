@@ -790,6 +790,54 @@ class Daemon:
         )
         return {"attended": self.attended}
 
+    def op_session_set_ceiling(self, args: dict) -> Any:
+        """Lower any time; raise only while a human watches. D97.
+
+        The mirror of `op_session_set_attended`: narrowing is the safe
+        direction and is allowed from any channel (the assistant itself may
+        narrow — the tab forbids it only from raising). Widening requires a
+        present channel *and* a present human; either missing is a refusal,
+        not a silent ignore, because a caller asking to widen without
+        presence is itself the suspicious fact.
+        """
+        raw = str(args.get("ceiling", "")).strip()
+        if raw not in TIER_BY_NAME:
+            raise ValueError(
+                f"unknown ceiling {raw!r}; expected one of T0, T1, T2, T3"
+            )
+        tier = TIER_BY_NAME[raw]
+        channel = self._channel(args)
+        before = self.session_ceiling
+        if tier == before:
+            return {"before": str(before), "ceiling": str(tier),
+                    "changed": False}
+        if tier > before:
+            if channel not in PRESENT_CHANNEL:
+                raise Refused(
+                    f"channel {channel!r} may not raise the session ceiling; "
+                    f"only {PRESENT_CHANNEL} may"
+                )
+            if not self.attended:
+                raise Refused(
+                    "the session ceiling may only be raised while attended; "
+                    "a widening nobody watches is indistinguishable from one "
+                    "nobody wanted"
+                )
+        self.session_ceiling = tier
+        if tier < before:
+            # Live T3 grants must not outlive T3 eligibility. Same
+            # premise-gone rule as stepping back, and audited the same way.
+            self._invalidate_grants()
+        self._audit(
+            actor=str(args.get("actor", "user")),
+            channel=channel,
+            tool="session.set_ceiling",
+            tier=str(Tier.REVERSIBLE_WRITE),
+            decision="allow",
+            reason=f"ceiling {before} -> {tier}",
+        )
+        return {"before": str(before), "ceiling": str(tier), "changed": True}
+
     # --------------------------------------------------------------------- gate
 
     def _channel(self, args: dict) -> str:

@@ -997,7 +997,7 @@ class AuthoritySection(Section):
     def __init__(self) -> None:
         super().__init__("authority", "Authority", "shield")
         self.named = ("listbox", "detail", "status", "pending", "check",
-                      "headline", "attended_button")
+                      "headline", "attended_button", "ceiling_select")
         self.listbox: Any = None
         self.detail: Any = None
         self.status: Any = None
@@ -1005,6 +1005,14 @@ class AuthoritySection(Section):
         self.check: Any = None
         self.headline: Any = None
         self.attended_button: Any = None
+        self.ceiling_select: Any = None
+        # Staged, not sent: choosing stages, Apply writes, Reload reverts.
+        # A Select that wrote on every change would let a stray click widen
+        # authority (D97). Populating the dropdown during a load must not
+        # register as a user edit either (D92) — hence `_loading`.
+        self._staged_ceiling: Any = None
+        self._current_ceiling: Any = None
+        self._loading = False
 
     def build(self, parent: Any, call: Callable[..., dict]) -> None:
         import tkinter as tk
@@ -1030,6 +1038,26 @@ class AuthoritySection(Section):
         )
         note.pack(fill="x", padx=16, pady=(0, 10))
         self.widgets.append(note)
+
+        # The ceiling control. Staged choice plus Apply, like Models: the
+        # alternative — writing on every dropdown change — is a stray click
+        # widening authority, and authority deserves the deliberate gesture.
+        ceiling_row = tk.Frame(body, bg=c["slate"])
+        ceiling_row.pack(fill="x", padx=16, pady=(0, 10))
+        self.widgets.append(ceiling_row)
+        tk.Label(ceiling_row, text="Session ceiling", fg=c["sage"],
+                 bg=c["slate"], font=("Segoe UI", 9)).pack(side="left")
+        self.widgets.append(ceiling_row.winfo_children()[-1])
+        self.ceiling_select = W.Select(
+            ceiling_row, "", options=("T0", "T1", "T2", "T3"), width=6,
+            on_change=self._stage_ceiling,
+        )
+        self.ceiling_select.pack(side="left", padx=(10, 0))
+        self.widgets.append(self.ceiling_select)
+        apply_button = W.Button(ceiling_row, "Apply ceiling",
+                                self._apply_ceiling, variant="ghost")
+        apply_button.pack(side="left", padx=(10, 0))
+        self.widgets.append(apply_button)
 
         ladder = tk.Frame(body, bg=c["slate"])
         ladder.pack(fill="x", padx=16)
@@ -1123,6 +1151,19 @@ class AuthoritySection(Section):
         self.attended_button.configure(
             state="normal" if attended else "disabled")
 
+        # Show the ceiling the daemon reported. An unknown value leaves the
+        # choice alone: falling back to T0 would stage a narrowing nobody
+        # chose, and falling back to T3 could stage a widening.
+        self._current_ceiling = (ceiling if ceiling in ("T0", "T1", "T2", "T3")
+                                 else None)
+        if self._current_ceiling is not None:
+            self._loading = True
+            try:
+                self.ceiling_select.set(self._current_ceiling)
+            finally:
+                self._loading = False
+        self._staged_ceiling = None
+
         pending = call("confirm_list") or {}
         items = (pending.get("result") or {}).get("pending") or []
         if items:
@@ -1161,6 +1202,60 @@ class AuthoritySection(Section):
         self._load(self._call)
         self._say("Unattended. T2 and T3 now queue until you are back at the "
                   "keyboard.", "amber")
+
+    def _stage_ceiling(self, name: str) -> None:
+        """A ceiling was chosen in the window. Stage it; Apply sends it.
+
+        Choosing back to the current ceiling clears the staging, so Apply
+        after Reload (which reverts the choice) is a no-op with a message
+        rather than a write of what was already there.
+        """
+        if getattr(self, "_loading", False):
+            return
+        self._staged_ceiling = name if name != self._current_ceiling else None
+
+    @staticmethod
+    def _ceiling_consequence(ceiling: str) -> str:
+        """What the new ceiling costs, in one sentence. The consequence, not
+        the state change — same rule as the step-back message."""
+        return {
+            "T0": "reads only — every write is refused at the workspace door.",
+            "T1": "reversible writes only — T2 and above are refused at the "
+                  "workspace door.",
+            "T2": "up to consequential — T3 is refused at the workspace door.",
+            "T3": "the full ladder — T3 still asks at the PC.",
+        }.get(ceiling, "")
+
+    def _apply_ceiling(self) -> None:
+        """Send the staged ceiling, if any. Refusals surface the daemon's
+        reason: an unattended widening is refused by the daemon, and the
+        window must show why rather than going quiet."""
+        want = self._staged_ceiling
+        if not want:
+            self._say("The choice already matches the ceiling — nothing staged.",
+                      "sage")
+            return
+        try:
+            res = self._call("session_set_ceiling", ceiling=want) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(f"The daemon refused: {res.get('error', 'unknown error')}",
+                      "rust")
+            return
+        result = res.get("result") or {}
+        previous = self._current_ceiling
+        self._staged_ceiling = None
+        self._load(self._call)
+        if result.get("changed"):
+            new = result.get("ceiling", "")
+            narrowed = previous is not None and new < previous
+            self._say(f"Ceiling {new} — "
+                      f"{self._ceiling_consequence(new)}",
+                      "amber" if narrowed else "sage")
+        else:
+            self._say(f"Ceiling unchanged ({result.get('ceiling')}).", "sage")
 
     def _explain(self) -> None:
         """Ask what a tool call would do. Never executes it.

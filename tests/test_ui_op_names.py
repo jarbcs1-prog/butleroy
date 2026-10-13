@@ -40,13 +40,15 @@ UI_FILES = ("tray.py", "overlay.py", "settings.py", "launcher.py", "voice_loop.p
 
 #: Every way a UI module can name an op.
 #:
-#: Two patterns, not one, and the second was added after the first missed a real
-#: defect: `tray.py`'s `Presence` builds `ipc.Request(op="session.set_attended", ...)`
-#: directly rather than going through `Tray.call`, so a scan for `.call("...")` alone
-#: reported the file clean while a fifth broken name sat in it. The suite caught it -
-#: `test_presence_marks_attended_when_someone_is_typing` asserted the op it had
-#: recorded - but this file is supposed to catch that class, and it did not.
-_CALL = re.compile(r'\.?call\(\s*"([a-z][a-z0-9_.]*)"')
+#: Three patterns, not one. The second was added after the first missed a real
+#: defect (`tray.py`'s `Presence` builds `ipc.Request(op=...)` directly), and
+#: the third after the Advanced rebuild: `settings.py`'s diagnostics section
+#: asks through `self._ask`, so eight ops (`brain_status`, `audit_tail`,
+#: `arbiter_summary`, `brain_describe`, `workspace_covers` among them) passed
+#: no check at all, and a typo in any of them would have failed silently into
+#: an "unavailable" line. A fake cannot catch a wrong name (D77's lesson), so
+#: the table is the only check these strings get.
+_CALL = re.compile(r'(?:\.?call|_ask)\(\s*"([a-z][a-z0-9_.]*)"')
 _REQUEST = re.compile(r'op\s*=\s*"([a-z][a-z0-9_.]*)"')
 
 REAL_OPS = frozenset(Daemon._OPS)
@@ -98,10 +100,12 @@ def test_the_check_would_notice_a_wrong_name() -> None:
     """
     sample = ('res = self.call("workspace.list")\n'
               'res = self._call("audit.verify")\n'
+              'res = self._ask("brain.stats")\n'
               'req = ipc.Request(op="session.set_attended", args={}, id=1)\n')
     found = set(_CALL.findall(sample)) | set(_REQUEST.findall(sample))
 
-    assert found == {"workspace.list", "audit.verify", "session.set_attended"}, (
+    assert found == {"workspace.list", "audit.verify", "brain.stats",
+                     "session.set_attended"}, (
         f"the extractor found {found}; it no longer sees the calls it is for"
     )
     assert not (found & REAL_OPS), (

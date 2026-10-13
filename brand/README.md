@@ -214,16 +214,16 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **28 of the daemon's 44 ops have a way in; 16 do not.**
-Reached by `overlay.py` (6), `tray.py` (5, four of which were broken until D77) and
-`settings.py` (23), counting the op names that actually appear as string literals in
+Measured, not remembered: **29 of the daemon's 45 ops have a way in; 16 do not.**
+Reached by `overlay.py` (6), `tray.py` (6, four of which were broken until D77) and
+`settings.py` (24), counting the op names that actually appear as string literals in
 those files - and, since D77, asserting that every one of them exists.
 
-The figure in this paragraph has been 21, then 20, then 21, then 26, and is 28
-now that Advanced asks three more (D95). Each earlier time it was written from
-the change just made rather than from the measurement - the same mistake in
-miniature that the whole section is about, so it is left visible rather than
-tidied.
+The figure in this paragraph has been 21, then 20, then 21, then 26, then 28,
+and is 29 now that Authority moves the ceiling (D97). Each earlier time it was
+written from the change just made rather than from the measurement - the same
+mistake in miniature that the whole section is about, so it is left visible
+rather than tidied.
 
 | Section | State |
 |---|---|
@@ -231,7 +231,7 @@ tidied.
 | Voices | **partly built** (D76) - installed/known voices and the default are shown; `Use voice`, `Save`. **Download, import and remove are specified below and do not exist.** |
 | Speech | **not built** - push-to-talk, mute, wake word |
 | Workspaces | **partly built** (D77) - a list and `Approve folder.`, `Reload`. **Revoke, danger level and allowed tiers do not exist.** |
-| Authority | **built but not operable** (D78) - the tier ladder (four `Badge.for_tier` rows), attended state, `Step back (unattended)`, the "Waiting on you" pending list, and the "What would happen if…" `tool_check` predictor. **The session ceiling is displayed but cannot be changed from the window — the daemon has no op for it.** |
+| Authority | **operable** (D78/D97) - the tier ladder (four `Badge.for_tier` rows), attended state, `Step back (unattended)`, the "Waiting on you" pending list, and the "What would happen if…" `tool_check` predictor. **The session ceiling is staged in a dropdown and applied with a button** — the daemon's `session_set_ceiling` narrows any time and widens only while attended from a present channel. |
 | Advanced | **rebuilt** (D95) - grouped diagnostics with three read-only affordances: VRAM holders (`arbiter_summary`), what-the-model-was-given (`brain_describe`), is-this-path-approved (`workspace_covers`). Scrolls; the audit tail was already below the fold before the panels. |
 
 #### The control inventory, measured 2026-10-13
@@ -244,12 +244,12 @@ window's interactivity:
 | Models | `Reload`, `Save` | **none** |
 | Voices | `Use voice`, `Save` | **none** |
 | Workspaces | `Approve folder.`, `Reload` | **none** |
-| Authority | `Step back (unattended)`, `Reload` | **none** |
+| Authority | `Step back (unattended)`, `Apply ceiling`, `Reload` | `Select` ×1 |
 | Advanced | `Reload`, `What the model was given`, `Check path` | `Field` ×1, `Panel` ×3 |
 
 So the window instantiates **five of the nine widgets in `widgets.py`**: `Button`
-everywhere (9 call sites, including the five section tabs), `Select` in Models,
-`Badge` in Authority, `Panel` ×3 and `Field` ×1 in Advanced. `Toggle`, `Meter`,
+everywhere (10 call sites, including the five section tabs), `Select` in Models
+and Authority, `Badge` in Authority, `Panel` ×3 and `Field` ×2 in Advanced. `Toggle`, `Meter`,
 `ListRow` and `Dialog` are built, tested, and still **never instantiated by the
 settings window** — which is why this file describes the kit as load-bearing for
 a surface that only partly uses it.
@@ -283,7 +283,7 @@ the panels.
 
 #### The 16 ops with no way in, grouped
 
-Counted 2026-10-14 against `Daemon._OPS`: 28 of 44 reached, 16 not.
+Counted 2026-10-14 against `Daemon._OPS`: 29 of 45 reached, 16 not.
 `workspace_covers`, `arbiter_summary` and `brain_describe` gained a way in via
 Advanced (D95); `mail_status`, `reflect_overlay` and `tool_check` were already
 reached, from Advanced and Authority respectively.

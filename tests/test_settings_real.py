@@ -672,6 +672,17 @@ class FakeAuthorityDaemon(FakeDaemon):
         if op == "session_set_attended":
             self.attended = bool(args.get("attended"))
             return {"ok": True, "result": {"attended": self.attended}}
+        if op == "session_set_ceiling":
+            want = str(args.get("ceiling", ""))
+            order = ["T0", "T1", "T2", "T3"]
+            if want not in order:
+                return {"ok": False, "error": f"unknown ceiling {want!r}"}
+            if order.index(want) > order.index(self.ceiling) and not self.attended:
+                return {"ok": False, "refused": True,
+                        "error": "raise the ceiling while attended"}
+            changed = want != self.ceiling
+            self.ceiling = want
+            return {"ok": True, "result": {"ceiling": want, "changed": changed}}
         return super().__call__(op, **args)
 
 
@@ -858,6 +869,96 @@ def test_the_authority_widgets_are_released(win) -> None:
 
     assert section.holds_widgets() == [], (
         f"the section still holds {section.holds_widgets()} after disposal"
+    )
+
+
+def _ceiling_controls(section):
+    """The ceiling Select and its Apply button, found structurally."""
+    select = button = None
+
+    def walk(widget):
+        nonlocal select, button
+        if type(widget).__name__ == "Select":
+            select = widget
+        if type(widget).__name__ == "Button" and widget.cget("text") == "Apply ceiling":
+            button = widget
+        for child in widget.winfo_children():
+            walk(child)
+
+    for top in section.widgets:
+        walk(top)
+    return select, button
+
+
+@requires_display
+def test_authority_stages_the_ceiling_and_applies_it(win) -> None:
+    """Two gestures, like Models: choosing stages, Apply writes.
+
+    A Select that wrote on every change would let a stray click widen
+    authority, and authority deserves the more deliberate gesture (D97).
+    """
+    daemon = FakeAuthorityDaemon()
+    w = win(daemon)
+    w._select("authority")
+    section = w._sections["authority"]
+
+    select, apply = _ceiling_controls(section)
+    assert select is not None, "no ceiling choice on the Authority tab"
+    assert apply is not None, "no Apply ceiling button on the Authority tab"
+
+    select.set("T1")
+    assert daemon.ceiling == "T3", "choosing wrote before Apply was pressed"
+    apply.invoke()
+    select.widget.winfo_toplevel().update_idletasks()
+
+    assert daemon.ceiling == "T1", "Apply did not tell the daemon"
+    assert "T1" in section.headline.cget("text")
+    assert "T2" in section.status.cget("text") or "refuse" in section.status.cget("text"), (
+        f"the consequence is not stated: {section.status.cget('text')!r}"
+    )
+
+
+@requires_display
+def test_authority_surfaces_a_refused_widening(win) -> None:
+    """Unattended plus raise is a refusal, and the window must show the
+    daemon's reason rather than going quiet or pretending it worked."""
+    daemon = FakeAuthorityDaemon()
+    daemon.attended = False
+    daemon.ceiling = "T1"
+    w = win(daemon)
+    w._select("authority")
+    section = w._sections["authority"]
+
+    select, apply = _ceiling_controls(section)
+    select.set("T3")
+    apply.invoke()
+    select.widget.winfo_toplevel().update_idletasks()
+
+    assert daemon.ceiling == "T1", "a refused widening moved the ceiling"
+    assert "T1" in section.headline.cget("text")
+    assert "attended" in section.status.cget("text").lower(), (
+        f"the refusal reason is not shown: {section.status.cget('text')!r}"
+    )
+
+
+@requires_display
+def test_loading_the_tab_does_not_move_the_ceiling(win) -> None:
+    """Populating the dropdown during load must not register as a user edit.
+
+    The D92 shape: `Select.set_options` fires `on_change` through the
+    StringVar trace, so a load without a guard would stage (and on Apply,
+    write) a ceiling nobody chose.
+    """
+    daemon = FakeAuthorityDaemon()
+    w = win(daemon)
+    w._select("authority")
+
+    assert ("session_set_ceiling",) not in [
+        (op,) for op, _ in daemon.calls
+    ], "opening the tab moved the ceiling"
+    select, _apply = _ceiling_controls(w._sections["authority"])
+    assert select.get() == "T3", (
+        f"the choice does not show the current ceiling: {select.get()!r}"
     )
 
 # --------------------------------------------------------------------------- #

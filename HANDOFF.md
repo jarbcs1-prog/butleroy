@@ -1,5 +1,12 @@
 # HANDOFF
 
+> **START HERE FIRST → [`HANDOFF-UI-REBUILD.md`](HANDOFF-UI-REBUILD.md)** (written
+> 2026-10-13, tree clean at `767b404`). It carries the current work: the settings
+> and tray UI rebuild, where it stopped, and the exact steps to continue. This
+> file remains the project-wide record. Sections below that contradict it —
+> particularly §5 claim 7 and anything about the settings window's
+> capabilities — were written before D83–D93 and are superseded by it.
+
 **Purpose:** resume this project without re-deriving anything. Last rewritten at the
 end of the session that built the brand kit (D72).
 

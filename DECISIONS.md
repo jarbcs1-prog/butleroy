@@ -5092,3 +5092,23 @@ inventory.** Derive it from structure, or re-derive it every time.
 
 Consequence for the rebuild: Workspaces and Voices are much further along than D92
 implied, and **Advanced should have been first**, not last.
+---
+
+## D94 - A resume document, and why §6 of it is the important part
+
+`HANDOFF-UI-REBUILD.md` written at the end of this session's work, with a pointer
+from the top of `HANDOFF.md` so there is one entry point rather than two. It
+carries the verified state, the UI inventory, the constraints a new session would
+otherwise rediscover the hard way, and the exact next step.
+
+The part worth reading twice is its §6: this session reported **three** wrong
+inventories as product defects. A regex that could not match `W.Badge.for_tier(`,
+a regex that could not match `W.Field`/`W.Select`/`W.Toggle`, and hard-coded line
+ranges that went stale after an edit above them. In all three the code was right
+and the measurement was wrong.
+
+That is recorded not as an apology but as an operating instruction, because the
+next session will have the same access to grep and the same temptation to read a
+null result as a missing feature. **A grep that returns nothing is more often a
+wrong pattern than an absent thing**, and the cost of being wrong is a confident
+incorrect report to a user who cannot check it as cheaply as you can.

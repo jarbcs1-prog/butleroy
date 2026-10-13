@@ -214,16 +214,16 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **29 of the daemon's 45 ops have a way in; 16 do not.**
-Reached by `overlay.py` (6), `tray.py` (6, four of which were broken until D77) and
+Measured, not remembered: **30 of the daemon's 45 ops have a way in; 15 do not.**
+Reached by `overlay.py` (7), `tray.py` (6, four of which were broken until D77) and
 `settings.py` (24), counting the op names that actually appear as string literals in
 those files - and, since D77, asserting that every one of them exists.
 
 The figure in this paragraph has been 21, then 20, then 21, then 26, then 28,
-and is 29 now that Authority moves the ceiling (D97). Each earlier time it was
-written from the change just made rather than from the measurement - the same
-mistake in miniature that the whole section is about, so it is left visible
-rather than tidied.
+then 29, and is 30 now that the overlay palette asks `ping` (D98). Each earlier
+time it was written from the change just made rather than from the measurement -
+the same mistake in miniature that the whole section is about, so it is left
+visible rather than tidied.
 
 | Section | State |
 |---|---|
@@ -281,9 +281,9 @@ ops that had no way in (see the 16 below). The tab scrolls: facts, three panels
 and the tail never fit 600 px, and the tail was already below the fold before
 the panels.
 
-#### The 16 ops with no way in, grouped
+#### The 15 ops with no way in, grouped
 
-Counted 2026-10-14 against `Daemon._OPS`: 29 of 45 reached, 16 not.
+Counted 2026-10-14 against `Daemon._OPS`: 30 of 45 reached, 15 not.
 `workspace_covers`, `arbiter_summary` and `brain_describe` gained a way in via
 Advanced (D95); `mail_status`, `reflect_overlay` and `tool_check` were already
 reached, from Advanced and Authority respectively.
@@ -296,7 +296,6 @@ reached, from Advanced and Authority respectively.
 | `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | leases are the daemon's to manage; the sweep kills expired holders and already runs on a timer — refused for Advanced in D95. `summary` is reached from the tray and from Advanced |
 | `audit_note` (1) | | a write, needing its own decision |
 | `voice_watch` (1) | | start/stop wake-word listening; belongs to Voices |
-| `ping` (1) | | liveness; `status` answering already proves it |
 
 #### Asked for, and does not exist in the code at all
 

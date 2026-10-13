@@ -5239,6 +5239,31 @@ verdict and is a different change, not this one.
 The window stages the choice and applies it with a button, like Models: a
 Select that wrote on every change would let a stray click widen authority,
 and authority deserves the more deliberate gesture.
+---
+
+## D98 - Slash commands: a read-only palette in the prompt box
+
+The remaining way-in for ops without one is the overlay's own input: text
+starting with `/` routes to a local command table instead of `brain_turn`.
+Decided before built:
+
+* **Allowlist, closed.** `help status ping vram brain describe models voices
+  workspaces pending covers check tail mail vault reflect verify` — reads and
+  one prediction (`check`), nothing else. In particular no `brain_turn` (a
+  slash that thinks is a second, weirder prompt box), no `tool_call`, no
+  confirms, no sets, no `voice_watch` (starts listening — a state change),
+  no vault writes. Anything not listed is "unknown command" plus `/help`,
+  the same refuse-loudly rule as unknown tiers and button variants.
+* **Output capped at 20 lines** per command, then `... (truncated)`. A
+  diagnostics shortcut must not be able to flood the transcript by asking
+  for something big.
+* **Same thread discipline as turns.** Commands run on a worker thread with
+  the `_busy` gate held, because `describe` can start the brain child and
+  take seconds — running it on the Tk thread would freeze the window the
+  user is looking at, which for a confirmation dialog would be its own kind
+  of unsafe.
+* **Routing is a pure function** (`_route`), tested without Tk: which ops a
+  string can reach must be assertable without constructing a window.
 
 Addendum, same session: `test_ui_op_names` only scanned `.call("...")` and
 `op="..."`, so the eight ops Advanced asks through `self._ask` passed no

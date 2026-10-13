@@ -457,6 +457,13 @@ class Overlay:
             return
         self.entry.delete(0, "end")
         self._busy = True
+        routed = _route(prompt)
+        if routed[0] == "command":
+            _, name, argv = routed
+            self.set_status("…")
+            threading.Thread(target=self._run_command, args=(name, argv),
+                             daemon=True).start()
+            return
         self.set_status("thinking...")
         threading.Thread(target=self._run_turn, args=(prompt,), daemon=True).start()
 
@@ -571,6 +578,66 @@ class Overlay:
                               f"{done.get('reason', '')}", "muted")
             return
         self._post("say", _render_result(tool, done), "")
+
+    def _run_command(self, name: str, argv: list) -> None:
+        """Run one slash command off the Tk thread, like a turn.
+
+        Same discipline: the worker holds `_busy`, posts lines, and always
+        releases in `finally` — `describe` can start the brain child and take
+        seconds, and a frozen window during a confirmation countdown would be
+        its own kind of unsafe.
+        """
+        try:
+            for line in self._execute_command(name, list(argv or [])):
+                self._post("say", line, "")
+        except _CommandError as exc:
+            self._post("say", str(exc), "bad")
+        except Exception as exc:  # noqa: BLE001 - a diagnostics typo must not kill the window
+            self._post("say", f"/{name} failed: {type(exc).__name__}: {exc}",
+                       "bad")
+        finally:
+            self._busy = False
+            self._post("status", "")
+
+    def _execute_command(self, name: str, argv: list) -> list[str]:
+        """One slash command to transcript lines.
+
+        User errors (bad arity) return guidance; daemon failures raise
+        `_CommandError`. Nothing here may call anything but the allowlisted
+        read op — that is asserted on the ops, not on good intentions.
+        """
+        if name not in _COMMANDS:
+            return ([f"unknown command: /{name}", "commands:"]
+                    + [usage for _, usage in _COMMANDS.values()])
+        op, _usage = _COMMANDS[name]
+        if op is None:
+            return ["commands:"] + [usage for _, usage in _COMMANDS.values()]
+        args: dict = {"channel": "pc", "actor": "overlay"}
+        if name == "covers":
+            if not argv:
+                return ["usage: /covers <path> — is this path approved"]
+            args["path"] = " ".join(argv)
+        elif name == "check":
+            if not argv:
+                return ["usage: /check <tool> — e.g. /check file.delete"]
+            args["tool"] = argv[0]
+            args["args"] = {}
+        elif name == "tail":
+            n = 40
+            if argv:
+                try:
+                    n = int(argv[0])
+                except ValueError:
+                    return [f"/tail takes a number of records, "
+                            f"not {argv[0]!r}"]
+            args["limit"] = max(1, min(n, 40))
+        try:
+            res = self._call(op, **args) or {}
+        except Exception as exc:
+            raise _CommandError(f"{op} failed: {exc}")
+        if not res.get("ok"):
+            raise _CommandError(f"{op} failed: {res.get('error', 'unknown error')}")
+        return _render_command(name, res.get("result"))
 
     def _ask(self, prompt: str) -> None:
         if self._root is not None and not self.is_visible():
@@ -691,6 +758,91 @@ def _scalar(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:,.2f}".rstrip("0").rstrip(".")
     return str(value)
+
+
+class _CommandError(Exception):
+    """A slash command failed at the daemon. Posted with the bad tag."""
+
+
+#: Slash commands: name -> (op, usage). Closed table (D98): reads and one
+#: prediction. Anything else is "unknown command" plus /help.
+_COMMANDS = {
+    "help": (None, "/help — list commands"),
+    "status": ("status", "/status — version, uptime, attended, ceiling"),
+    "ping": ("ping", "/ping — liveness"),
+    "vram": ("arbiter_summary", "/vram — what holds VRAM"),
+    "brain": ("brain_status", "/brain — is a child running"),
+    "describe": ("brain_describe", "/describe — what the model was given"),
+    "models": ("model_config", "/models — tiers and models on disk"),
+    "voices": ("voice_config", "/voices — installed voices"),
+    "workspaces": ("workspace_list", "/workspaces — approved roots"),
+    "pending": ("confirm_list", "/pending — what waits on you"),
+    "covers": ("workspace_covers", "/covers <path> — is this path approved"),
+    "check": ("tool_check", "/check <tool> — what would happen"),
+    "tail": ("audit_tail", "/tail [n] — last n audit records (max 40)"),
+    "mail": ("mail_status", "/mail — is mail configured"),
+    "vault": ("vault_status", "/vault — is the vault bridge up"),
+    "reflect": ("reflect_overlay", "/reflect — what was promoted"),
+    "verify": ("audit_verify", "/verify — does the audit chain verify"),
+}
+
+_MAX_COMMAND_LINES = 20
+
+
+def _route(prompt: str):
+    """Split the entry into a turn or a command. Pure: no Tk, no daemon."""
+    text = (prompt or "").strip()
+    if not text.startswith("/"):
+        return ("turn", text)
+    parts = text[1:].split()
+    if not parts:
+        return ("command", "help", [])
+    return ("command", parts[0].lower(), parts[1:])
+
+
+def _render_command(name: str, result: Any) -> list[str]:
+    """One op result as transcript lines. Sentences where the shape needs one;
+    `_render_result` everywhere else. Always capped: a diagnostics shortcut
+    must not flood the transcript by asking for something big."""
+    if name == "pending":
+        items = (result or {}).get("pending") or []
+        if not items:
+            lines = ["nothing is waiting on you."]
+        else:
+            lines = [f"{len(items)} waiting:"]
+            lines += [f"  {i.get('tool', '?')} — {i.get('reason', '')}"
+                      for i in items]
+    elif name == "covers":
+        if result is None:
+            lines = ["outside every approved workspace."]
+        else:
+            hit = result or {}
+            tiers = hit.get("allow_tiers")
+            tiers_s = (", ".join(str(t) for t in tiers)
+                       if isinstance(tiers, list) else str(tiers))
+            lines = [f"approved in {hit.get('name', '?')} "
+                     f"[{hit.get('danger_level', '?')}] {hit.get('root', '?')}",
+                     f"allowed here: {tiers_s}"]
+    elif name == "check":
+        r = result or {}
+        lines = [f"{r.get('tool', '?')}: {r.get('would', '?')} at "
+                 f"{r.get('tier', '?')} — {r.get('reason', '')}"]
+    elif name == "tail":
+        rows = result if isinstance(result, list) else []
+        lines = [f"{str(r.get('timestamp', ''))[:19]:<20}"
+                 f"{r.get('decision', ''):<8}{r.get('tier', ''):<4} "
+                 f"{r.get('actor', ''):<12}{r.get('tool', '')}"
+                 for r in rows if isinstance(r, dict)]
+        lines = lines or ["no records."]
+    elif name == "verify":
+        r = result or {}
+        lines = ([f"audit chain verifies — {r.get('checked', '?')} records."]
+                 if r.get("ok") else ["audit chain BROKEN."])
+    else:
+        lines = _render_result(name, result).split("\n")
+    if len(lines) > _MAX_COMMAND_LINES:
+        lines = lines[:_MAX_COMMAND_LINES] + ["... (truncated)"]
+    return lines
 
 
 class _Confirm:

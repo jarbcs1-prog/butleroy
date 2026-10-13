@@ -5264,6 +5264,37 @@ Decided before built:
   of unsafe.
 * **Routing is a pure function** (`_route`), tested without Tk: which ops a
   string can reach must be assertable without constructing a window.
+---
+
+## D99 - First real answers on the rebuilt tree, and the 9B tier measured
+
+Two queue items closed by one probe run (isolated state dir, isolated test
+pipe — production names and the real audit chain untouched):
+
+* `fast` (Qwen3.5-4B Q8_0, 4.5 GB): 17.9 s wall, `kind=tool` — the model
+  proposed `voice.speak` with the exact text rather than answering in prose.
+  Legitimate: a proposal, unexecuted, through the normal path.
+* `deep` (Qwen3.5-9B IQ4_XS, 6.4 GB): 21.7 s wall, `kind=answer`, direct
+  prose. First measurement of the downloaded tier: it fits (12 GB card,
+  7.4 used / 4.4 free after), the single-child swap works (deep evicted
+  fast, each turn reported its own tier, `model_loaded` true both times).
+
+Caveats, so this is not over-read: wall totals only, no load/infer split;
+one prompt, n=1 — a datapoint, not a benchmark.
+
+Two observations from the run, both recorded, neither acted on:
+
+* The first attempt failed instantly and correctly: a fresh state dir has no
+  authkey on disk, and the brain child refused to authenticate. The security
+  mechanism working as designed, against its own operator's probe. The proper
+  path is `start_serving` on an isolated pipe, which is what the rerun did.
+* The deep turn holds its lease at `FAST_TIER` priority: `brain_server.py`
+  constructs `LeaseClient` with the default and nothing ever requests
+  `DEEP_TIER`, whose documented meaning is "one-shot planning turn; cheap
+  to lose". With a single holder class this changes nothing observable
+  (priority only orders preemption among leases), so it is recorded here and
+  left alone — a priority change with no observable effect today is exactly
+  the kind of edit the minimal-change rule forbids.
 
 Addendum, same session: `test_ui_op_names` only scanned `.call("...")` and
 `op="..."`, so the eight ops Advanced asks through `self._ask` passed no

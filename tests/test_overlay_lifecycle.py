@@ -11,7 +11,7 @@ What was broken, all three found by running it rather than by reading it:
    pump. A `tk.Tk()` that is never pumped still maps a window - `winfo_viewable`
    is 1, the title is set, `geometry` is honoured - and it paints nothing,
    because painting *is* event processing. That is the whole of "an empty white
-   window titled Butleroy 0.3.0": mapped, correct title, no content.
+   window titled ButlerOY 0.3.0": mapped, correct title, no content.
 
 2. **`_build()` called `_poll()` while `self._root` was still `None`.** `_poll`
    opens with `if self._closing or self._root is None: return`, so it returned
@@ -252,7 +252,7 @@ def tkdesk(monkeypatch):
         type("f", (), {"nametofont": staticmethod(lambda _n: "font")})(),
     )
     ov = O.Overlay(lambda op, **kw: {"ok": True, "result": {"pending": []}},
-                   title="Butleroy 0.3.0")
+                   title="ButlerOY 0.3.0")
     ov._dlg = None
     ov._answered = set()
     yield ov, roots, log

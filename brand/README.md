@@ -1,6 +1,6 @@
-# Butleroy — brand kit
+# ButlerOY — brand kit
 
-**Butleroy — LocalAIzed Concierge for Windows.**
+**ButlerOY — LocalAIzed Concierge for Windows.**
 
 A 24/7 local assistant for one Windows machine. This file is the whole brand, so
 that nothing about how it looks has to be re-decided by whoever wires it next.
@@ -29,7 +29,7 @@ decision below follows from that:
 
 | | |
 |---|---|
-| Product | **Butleroy** |
+| Product | **ButlerOY** |
 | Descriptor | LocalAIzed Concierge for Windows |
 | Wordmark face | `"Hoefler Text", "Playfair Display", Georgia, "Times New Roman", serif` |
 | UI face | `"Inter", "Segoe UI", system-ui, -apple-system, sans-serif` |
@@ -214,25 +214,28 @@ once. What they must obey:
 
 ### What the interface is, and is not
 
-Measured, not remembered: **30 of the daemon's 45 ops have a way in; 15 do not.**
+Measured, not remembered: **32 of the daemon's 46 ops have a way in; 14 do not.**
 Reached by `overlay.py` (7), `tray.py` (6, four of which were broken until D77) and
-`settings.py` (24), counting the op names that actually appear as string literals in
+`settings.py` (26), counting the op names that actually appear as string literals in
 those files - and, since D77, asserting that every one of them exists.
 
 The figure in this paragraph has been 21, then 20, then 21, then 26, then 28,
-then 29, and is 30 now that the overlay palette asks `ping` (D98). Each earlier
-time it was written from the change just made rather than from the measurement -
-the same mistake in miniature that the whole section is about, so it is left
-visible rather than tidied.
+then 29, then 30, and is 32 now that `workspace_resolve` and
+`confirm_grant_revoke` have windows and the palette asks `ping`
+(D98/D100/D101). Each earlier time it was written from the change just made
+rather than from the measurement - the same mistake in miniature that the
+whole section is about, so it is left visible rather than tidied.
 
 | Section | State |
 |---|---|
-| Models | **partly built** (D74/D75) - tiers, models on disk and lease ceilings are *displayed*; `Save` re-persists the table it read. **No way to add, remove, or point at a path.** |
-| Voices | **partly built** (D76) - installed/known voices and the default are shown; `Use voice`, `Save`. **Download, import and remove are specified below and do not exist.** |
+| Models | **operable** (D92) - one `Select` per tier offering the models in `models/`, staged on change, written via `Save` (`need_bytes` preserved). No add, remove, or path box — the daemon has no op for them. |
+| Voices | **operable** (D93) - installed/known voices and the default shown; `Use voice`, `Save`; download, import and remove wired (`voice_install`, `voice_import`, `voice_remove`). |
 | Speech | **not built** - push-to-talk, mute, wake word |
-| Workspaces | **partly built** (D77) - a list and `Approve folder.`, `Reload`. **Revoke, danger level and allowed tiers do not exist.** |
-| Authority | **operable** (D78/D97) - the tier ladder (four `Badge.for_tier` rows), attended state, `Step back (unattended)`, the "Waiting on you" pending list, and the "What would happen if…" `tool_check` predictor. **The session ceiling is staged in a dropdown and applied with a button** — the daemon's `session_set_ceiling` narrows any time and widens only while attended from a present channel. |
-| Advanced | **rebuilt** (D95) - grouped diagnostics with three read-only affordances: VRAM holders (`arbiter_summary`), what-the-model-was-given (`brain_describe`), is-this-path-approved (`workspace_covers`). Scrolls; the audit tail was already below the fold before the panels. |
+| Workspaces | **operable** - a list with `Approve folder…`, `Remove`, `Reload`, danger and allowed-tier pickers, edit-in-place (a remove+add cycle preserving the fields the pickers do not show), and open-in-Explorer. |
+| Vault | **built** (D100) - the vault path displayed, `Change…` staging `state/vault.json`; the bridge is built at daemon init so a restart applies it. |
+| Authority | **operable** (D78/D97/D101) - the tier ladder (four `Badge.for_tier` rows), attended state, `Step back (unattended)`, the "Waiting on you" pending list, live class grants with `Revoke grant`, and the "What would happen if…" `tool_check` predictor. **The session ceiling is staged in a dropdown and applied with a button** — the daemon's `session_set_ceiling` narrows any time and widens only while attended from a present channel. |
+| Advanced | **rebuilt** (D95/D96) - grouped diagnostics with three read-only affordances: VRAM holders (`arbiter_summary`), what-the-model-was-given (`brain_describe`), is-this-path-approved (`workspace_covers`), plus a substring filter over the audit tail. Scrolls; the audit tail was already below the fold before the panels. |
+| Appearance | **built** (D100) - family/size/alignment `Select`s writing `state/fonts.json`; the overlay applies it on every show. Transcript and entry only — the recorded brand exception. |
 
 #### The control inventory, measured 2026-10-13
 
@@ -241,15 +244,17 @@ window's interactivity:
 
 | Section | Buttons | `Field` / `Select` / `Toggle` / `Badge` / `Meter` / `ListRow` / `Panel` / `Dialog` |
 |---|---|---|
-| Models | `Reload`, `Save` | **none** |
+| Models | `Reload`, `Save` | `Select` ×1 |
 | Voices | `Use voice`, `Save` | **none** |
-| Workspaces | `Approve folder.`, `Reload` | **none** |
-| Authority | `Step back (unattended)`, `Apply ceiling`, `Reload` | `Select` ×1 |
-| Advanced | `Reload`, `What the model was given`, `Check path` | `Field` ×1, `Panel` ×3 |
+| Workspaces | `Approve a folder…`, `Edit`, `Open folder`, `Remove`, `Reload` | **none** |
+| Vault | `Change…`, `Reload` | **none** |
+| Authority | `Step back (unattended)`, `Apply ceiling`, `Revoke grant`, `Reload` | `Select` ×1, `Badge` ×1 site |
+| Advanced | `Reload`, `What the model was given`, `Check path`, `Filter` | `Field` ×2, `Panel` ×3 |
+| Appearance | `Apply`, `Reload` | `Select` ×3 |
 
 So the window instantiates **five of the nine widgets in `widgets.py`**: `Button`
-everywhere (10 call sites, including the five section tabs), `Select` in Models
-and Authority, `Badge` in Authority, `Panel` ×3 and `Field` ×2 in Advanced. `Toggle`, `Meter`,
+everywhere (16 call sites, including the seven section tabs), `Select` in Models,
+Authority and Appearance, `Badge` in Authority, `Panel` ×3 and `Field` ×2 in Advanced. `Toggle`, `Meter`,
 `ListRow` and `Dialog` are built, tested, and still **never instantiated by the
 settings window** — which is why this file describes the kit as load-bearing for
 a surface that only partly uses it.
@@ -281,16 +286,17 @@ ops that had no way in (see the 16 below). The tab scrolls: facts, three panels
 and the tail never fit 600 px, and the tail was already below the fold before
 the panels.
 
-#### The 15 ops with no way in, grouped
+#### The 14 ops with no way in, grouped
 
-Counted 2026-10-14 against `Daemon._OPS`: 30 of 45 reached, 15 not.
+Counted 2026-10-14 against `Daemon._OPS`: 32 of 46 reached, 14 not.
 `workspace_covers`, `arbiter_summary` and `brain_describe` gained a way in via
-Advanced (D95); `mail_status`, `reflect_overlay` and `tool_check` were already
-reached, from Advanced and Authority respectively.
+Advanced (D95); `session_set_ceiling` via Authority (D97); `ping` via the
+overlay palette (D98); `workspace_resolve` via Workspaces and Advanced, and
+`confirm_grant_revoke` via Authority (D100/D101); `mail_status`,
+`reflect_overlay` and `tool_check` were already reached.
 
 | Group | Ops | What a window would do |
 |---|---|---|
-| `workspace_resolve` (1) | | name → workspace; the path checker answers the user-facing question. `covers` is reached from Advanced |
 | `vault_*` (5) | `append`, `index`, `read_journal`, `role_templates`, `write_note` | the Obsidian bridge; reads and writes for a surface of their own. `status` is reached from Advanced |
 | `brain_*` (3) | `load`, `stream`, `unload` | process state (`load`/`unload`) and answering (`stream`); not settings. `status` and `describe` are reached from Advanced |
 | `arbiter_*` (4) | `acquire`, `release`, `renew`, `sweep` | leases are the daemon's to manage; the sweep kills expired holders and already runs on a timer — refused for Advanced in D95. `summary` is reached from the tray and from Advanced |
@@ -315,8 +321,9 @@ reached, from Advanced and Authority respectively.
   retraining - `train_wakeword.py` exists, but there is no path from the window to it.
 - **Transcript history.** The overlay's transcript is in-memory and dies with the
   window. Nothing writes a transcript anywhere, so there is nothing to search.
-- **Per-tool grants, viewed.** D32's 600-second class grants can be given from the
-  confirmation dialog but there is no way to *see* or revoke them except by waiting.
+- **Per-tool grants, viewed and revoked.** D32's 600-second class grants are
+  listed with remaining time in Authority and revoked there (D101); they are
+  still *given* only from the confirmation dialog.
 - **Import/export of settings.** `models.json` and `voices.json` are hand-editable and
   nothing more. No backup, no restore, no "export my configuration".
 
@@ -364,7 +371,7 @@ any DPI scaling above 100%.
 
 ## 6. Voice
 
-Butleroy speaks when spoken to, and it does not perform.
+ButlerOY speaks when spoken to, and it does not perform.
 
 - **Confirm before acting, once.** "I'll remove `notes.txt`." not "Certainly! I'll
   go ahead and remove that file for you right now."
@@ -382,7 +389,7 @@ Butleroy speaks when spoken to, and it does not perform.
 - **Not a theme for the existing UI.** Mapping is given; adoption is a separate
   decision with its own tests.
 - **Not the settings surface.** It is what that surface is drawn with.
-- **Not a claim of trademark.** `Butleroy` and `LocalAIzed` are used here as
+- **Not a claim of trademark.** `ButlerOY` and `LocalAIzed` are used here as
   working names for this project. If either is intended for public distribution,
   clear both before shipping — the earlier `Zed` idea was dropped for exactly this
   reason (a well-known open-source editor), and the same check applies to any name.

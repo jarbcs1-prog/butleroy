@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Butleroy installer engine - the part that does the work.
+    ButlerOY installer engine - the part that does the work.
 
 .DESCRIPTION
     A GUI installer that shells out to PowerShell for the actual work is the norm,
@@ -493,7 +493,7 @@ function Show-Summary {
 }
 
 Write-Host ''
-Write-Host '  Butleroy installer' -ForegroundColor White
+Write-Host '  ButlerOY installer' -ForegroundColor White
 Write-Host '  LocalAIzed Concierge for Windows' -ForegroundColor DarkGray
 Write-Host '  ================================' -ForegroundColor DarkGray
 Write-Host ''

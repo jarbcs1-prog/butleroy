@@ -11,8 +11,8 @@
   proportion and matches what the OS does to a .ico at medium sizes.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
-     role="img" aria-label="Butleroy">
-  <title>Butleroy</title>
+     role="img" aria-label="ButlerOY">
+  <title>ButlerOY</title>
   <defs>
     <linearGradient id="plate" x1="0" y1="0" x2="0.35" y2="1">
       <stop offset="0"   stop-color="#1B2019"/>

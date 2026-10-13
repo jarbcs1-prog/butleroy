@@ -563,6 +563,19 @@ def test_vault_status_reports_the_exclusion_boundary(dg: D.Daemon):
     assert "datasets" in res["describe"]
 
 
+def test_vault_status_reports_the_path(dg: D.Daemon, vault: Path):
+    res = req(dg, "vault_status")["result"]
+    assert "path" in res, "the settings Vault tab has nothing to display"
+    assert Path(str(res["path"])) == vault, (
+        f"the reported path is not the vault: {res['path']!r}"
+    )
+
+
+def test_a_missing_vault_reports_no_path(tmp_path: Path):
+    d = D.Daemon(state=tmp_path / "state", vault="Z:\\no-such-drive\\vault")
+    assert req(d, "vault_status")["result"]["path"] is None
+
+
 def test_vault_index_never_returns_an_excluded_note(dg: D.Daemon):
     index = req(dg, "vault_index")["result"]
     rels = [n["rel"] for n in index["notes"]]

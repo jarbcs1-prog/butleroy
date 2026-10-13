@@ -583,7 +583,7 @@ def test_the_lockup_carries_the_name_and_not_the_platform():
     logo = (BRAND / "logo.svg").read_text(encoding="utf-8")
     text = re.sub(r"<!--.*?-->", "", logo, flags=re.S)   # comments are not artwork
 
-    assert "Butleroy" in text
+    assert "ButlerOY" in text
     assert "LOCALAIZED CONCIERGE" in text
     assert "Windows" not in text, (
         "the lockup names the platform; it is a fact, not a tagline"

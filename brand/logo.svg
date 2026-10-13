@@ -16,8 +16,8 @@
   against a licensed cut before anything ships - see brand/README.md §2.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 168" width="560" height="168"
-     role="img" aria-label="Butleroy, LocalAIzed Concierge">
-  <title>Butleroy — LocalAIzed Concierge</title>
+     role="img" aria-label="ButlerOY, LocalAIzed Concierge">
+  <title>ButlerOY — LocalAIzed Concierge</title>
   <defs>
     <linearGradient id="b" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0"    stop-color="#E8CE86"/>
@@ -46,7 +46,7 @@
   <!-- wordmark -->
   <text x="112" y="92"
         font-family="'Hoefler Text','Playfair Display',Georgia,'Times New Roman',serif"
-        font-size="62" letter-spacing="0.5" fill="#EDE8DC">Butleroy</text>
+        font-size="62" letter-spacing="0.5" fill="#EDE8DC">ButlerOY</text>
 
   <!-- the shared edge -->
   <rect x="114" y="112" width="404" height="1" fill="#C8A951" opacity="0.55"/>

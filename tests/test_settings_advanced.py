@@ -89,7 +89,7 @@ def win():
     made: list[S.Settings] = []
 
     def build(daemon):
-        w = S.Settings(daemon, title="Butleroy Settings")
+        w = S.Settings(daemon, title="ButlerOY Settings")
         made.append(w)
         w.show()
         return w

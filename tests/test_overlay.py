@@ -617,3 +617,62 @@ def test_the_pending_list_does_not_leak_the_arguments(desk):
     d.pending = [item()]
     listing = d("confirm_list")
     assert "args" not in repr(listing), repr(listing)
+
+
+# --- overlay typography -------------------------------------------------------
+# `state/fonts.json` applied at build and at every show. Headless throughout:
+# what is asserted is which reconfigures happen, not that Tk obeys them.
+
+
+class FakeWidget:
+    def __init__(self) -> None:
+        self.configured: dict = {}
+        self.tags: dict = {}
+
+    def configure(self, **kw) -> None:
+        self.configured.update(kw)
+
+    def tag_configure(self, tag, **kw) -> None:
+        self.tags[tag] = dict(kw)
+
+
+def test_apply_fonts_is_a_noop_before_widgets_exist(monkeypatch) -> None:
+    import assistant.fontconfig as fontconfig
+
+    monkeypatch.setattr(fontconfig, "load",
+                        lambda *a: (_ for _ in ()).throw(
+                            AssertionError("must not be asked")))
+    ov = O.Overlay(FakeDaemon())
+    ov._apply_fonts()  # transcript/entry are None: must not raise
+
+
+def test_apply_fonts_reconfigures_everything_from_file(monkeypatch) -> None:
+    import assistant.fontconfig as fontconfig
+
+    monkeypatch.setattr(
+        fontconfig, "load",
+        lambda *a: {"family": "Consolas", "size": 14, "align": "center"})
+    ov = O.Overlay(FakeDaemon())
+    ov.transcript = FakeWidget()
+    ov.entry = FakeWidget()
+    ov._apply_fonts()
+
+    assert ov.transcript.configured.get("font") == ("Consolas", 14)
+    for tag in ("body", "muted", "good", "bad", "accent"):
+        assert ov.transcript.tags[tag]["justify"] == "center", (
+            f"tag {tag!r} keeps the old alignment")
+        assert ov.transcript.tags[tag]["font"] == ("Consolas", 14)
+    assert ov.entry.configured.get("font") == ("Consolas", 14)
+    assert ov.entry.configured.get("justify") == "center"
+
+
+def test_no_file_means_the_hardcoded_faces_stay(monkeypatch) -> None:
+    import assistant.fontconfig as fontconfig
+
+    monkeypatch.setattr(fontconfig, "load", lambda *a: None)
+    ov = O.Overlay(FakeDaemon())
+    ov.transcript = FakeWidget()
+    ov.entry = FakeWidget()
+    ov._apply_fonts()
+    assert ov.transcript.configured == {}
+    assert ov.entry.configured == {}

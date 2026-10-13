@@ -5302,3 +5302,60 @@ name check at all — D77's exact hole, one level down. The extractor now
 covers `_ask(` too, with the guard-the-guard sample extended to prove it.
 The 29/16 figures above were re-derived against `Daemon._OPS` after the new
 op landed (45 ops), not carried forward by arithmetic.
+---
+
+## D100 - Settings batch: vault, fonts, grants, workspaces, rename
+
+Five user-asked surfaces, scoped by interview before any code. Cross-cutting
+rules for all five:
+
+* **No new daemon write ops except one.** Vault switching is a file write
+  plus a restart (the bridge is built at daemon init — no live re-pointing).
+  Fonts are client-side (overlay renders; the daemon has no business with
+  them). Workspace edit is a remove+add cycle through existing ops. Only
+  grant revocation needs a new op, and revocation narrows, so it gets its
+  own constraint entry (D101) rather than riding along here.
+* **The read-only pins stay pinned.** Advanced keeps its no-mutating-ops
+  test; the vault control goes on a new Vault tab, not into Advanced.
+  Fonts get an Appearance tab; overlay chrome stays Segoe UI (brand rule
+  stands everywhere except the transcript+entry the user explicitly asked
+  about — exception recorded, not silently taken).
+* **Rename is display-only** (D102): window titles, tray, installer
+  metadata, docs. Pipes, the pystray identity, `BUTLEROY_*` vars,
+  directories, the package, and every test guarding D73 stay byte-identical.
+  D73's three lessons (path ≠ name, credentials keep working, console
+  script keeps pointing) apply unchanged to a casing change.
+* Vault default becomes `E:\ButlerOY` (exists, is a vault) via the fallback
+  chain CLI > `state/vault.json` > default > none. CLI still wins, so
+  nothing that works today changes behavior.
+---
+
+## D101 - Revocation narrows, so it needs no channel check
+
+`confirm_grant_revoke` removes one live class grant by scope. There is no
+direction in which removing a permission widens anything, so unlike the
+ceiling op it needs no presence rule: any channel may narrow, including
+the assistant itself giving one up. Unknown scopes are refused loudly (a
+typo near authority must not read as success), and the revocation is
+audited at READ like `grant_clear`. The window lists live grants with
+remaining time and revokes the highlighted one; creation stays in the
+confirm dialog, where the ten-minute premise ("I'll be here") is
+established by a human looking at the specific action.
+
+## D102 - Butleroy becomes ButlerOY, display only
+
+The official capitalisation changes; nothing else does. Changed: window
+titles and head label, tray title default, installer `AppName` and output
+name, SVG lockup text/labels, `tokens.json` name, JSON file comments,
+installer banner, user docs. Deliberately byte-identical: pipes, the
+pystray identity, `BUTLEROY_*` (and `LOCALAIZED_*` fallbacks), the
+`butleroy` package/distribution/console-script names, every directory, the
+scheduled-task name (renaming it would orphan the installed task), and the
+dev-log history (DECISIONS/HANDOFF/PLAN/ARCHITECTURE describe what was).
+
+D73's three lessons applied unchanged: paths, credentials and the console
+script are not display strings. `test_rename.py` gains a §4 asserting the
+new display defaults and the untouched identities side by side; the
+trademark-clearance note in the brand kit stands as written.
+---
+

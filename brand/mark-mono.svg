@@ -10,8 +10,8 @@
   on a light surface, obsidian.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
-     role="img" aria-label="Butleroy">
-  <title>Butleroy</title>
+     role="img" aria-label="ButlerOY">
+  <title>ButlerOY</title>
   <g fill="currentColor">
     <circle cx="32" cy="12.4" r="4.3"/>
     <path d="M 17 40 C 17 25.6, 23.6 17.6, 32 17.6 C 40.4 17.6, 47 25.6, 47 40 Z"/>

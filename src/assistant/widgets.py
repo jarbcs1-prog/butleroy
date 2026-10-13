@@ -1,4 +1,4 @@
-"""The Butleroy widget set. D80.
+"""The ButlerOY widget set. D80.
 
 `brand/README.md` §5 specifies nine widgets with corner radii, border rules and
 heights. Until now that was documentation with no code behind it: the settings

@@ -1,4 +1,4 @@
-; Butleroy installer - Inno Setup script.
+; ButlerOY installer - Inno Setup script.
 ;
 ; WHY THE GUI IS A THIN WRAPPER (stated here, in the file a maintainer opens
 ; first, because the temptation to move logic into this file is the whole risk):
@@ -17,7 +17,7 @@
 ; progress and every error message, which is the worst failure mode a GUI
 ; installer has.
 
-#define AppName "Butleroy"
+#define AppName "ButlerOY"
 #define AppVersion "0.3.0"
 #define AppPublisher "LocalAIzed"
 #define InstallRoot "G:\localaized"
@@ -38,7 +38,7 @@ DefaultDirName={#InstallRoot}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 OutputDir=dist
-OutputBaseFilename=Butleroy-Setup-{#AppVersion}
+OutputBaseFilename=ButlerOY-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

@@ -304,7 +304,7 @@ def save(config: ModelsConfig, path: Path | str | None = None,
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "_comment": (
-            "Butleroy model configuration. Tier -> model filename (relative to "
+            "ButlerOY model configuration. Tier -> model filename (relative to "
             "models/) and the VRAM lease ceiling in bytes. Written by the settings "
             "window; safe to hand-edit, and a file that cannot be read falls back "
             "to the built-in defaults rather than stopping the daemon."

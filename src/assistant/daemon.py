@@ -1301,6 +1301,28 @@ class Daemon:
         }
 
     # --- class grants ---------------------------------------------------------
+    def op_confirm_grant_revoke(self, args: dict) -> Any:
+        """Revoke one live class grant. Narrowing-only by construction: there
+        is no direction in which removing a permission widens anything, so no
+        channel check is needed — the mirror of why narrowing the ceiling and
+        stepping back need none. An unknown scope is refused loudly rather
+        than answered "done": a typo near authority must not read as success.
+        """
+        scope = str(args.get("scope", ""))
+        with self._lock:
+            if scope not in self._grants:
+                raise Refused(f"unknown grant scope {scope!r}")
+            del self._grants[scope]
+        self._audit(
+            actor=str(args.get("actor", "user")),
+            channel=self._channel(args),
+            tool="confirm.grant_revoke",
+            tier=str(Tier.READ),
+            decision="allow",
+            reason=f"revoked grant {scope}",
+        )
+        return {"revoked": scope}
+
     def _grant_key(self, tool: str, args: dict) -> str:
         """The class a grant covers: this tool, on this approved root.
 
@@ -3297,9 +3319,11 @@ class Daemon:
 
     def op_vault_status(self, args: dict) -> Any:
         if self.vault is None:
-            return {"available": False, "error": self.vault_error}
+            return {"available": False, "error": self.vault_error,
+                    "path": None}
         return {
             "available": self.vault.available,
+            "path": str(self.vault.vault),
             "describe": self.vault.describe(),
             "stats": _jsonable(self.vault.index_stats()),
         }
@@ -5940,7 +5964,7 @@ def main(argv: list[str] | None = None) -> int:
     opts = _parse_argv(list(sys.argv[1:] if argv is None else argv))
     d = Daemon(
         state=STATE,
-        vault=opts["vault"],
+        vault=obsidian.resolve_vault_root(STATE, opts["vault"]),
         attended=not opts["unattended"],
         session_ceiling=opts["ceiling"],
     )

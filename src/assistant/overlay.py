@@ -90,7 +90,7 @@ class Overlay:
         self,
         call: Callable[..., dict],
         *,
-        title: str = "Butleroy",
+        title: str = "ButlerOY",
         ttl_s: float = OVERLAY_IDLE_TTL_S,
     ) -> None:
         self._call = call
@@ -228,6 +228,10 @@ class Overlay:
             self._root.focus_force()
         except tk.TclError:
             pass
+        # Re-read the typography every time the window opens: a choice made
+        # in settings applies here without rebuilding the window, and without
+        # the settings window needing a handle to this one.
+        self._apply_fonts()
 
     def hide(self) -> None:
         if self._root is None:
@@ -371,6 +375,7 @@ class Overlay:
         # returned at once and the one-second confirmation poll was never armed:
         # a destructive action queued from Telegram would silently never raise a
         # dialog. `_tk_main` starts them, on this thread, after the root is set.
+        self._apply_fonts()
         return root
 
     def _poll(self) -> None:
@@ -410,10 +415,48 @@ class Overlay:
     def _append(self, text: str, tag: str = "") -> None:
         if self._root is None:
             return
+        # Every line carries the body tag: it owns the alignment, so one
+        # `tag_configure` moves the whole transcript and no line is left on
+        # a default the typography cannot reach.
+        tags = ("body", tag) if tag else ("body",)
         self.transcript.configure(state="normal")
-        self.transcript.insert("end", text + "\n", tag)
+        self.transcript.insert("end", text + "\n", tags)
         self.transcript.see("end")
         self.transcript.configure(state="disabled")
+
+    def _apply_fonts(self) -> None:
+        """Read `state/fonts.json` and apply it, or change nothing.
+
+        Absent or broken file keeps today's hardcoded faces: the default is
+        absence, not a constant. Safe headless (no widgets yet) and safe
+        against an unknown family (Tk keeps the current face).
+        """
+        import tkinter as tk
+
+        # `getattr`: the widgets only exist after `_build`, and show paths
+        # reach here before then. (The module's own lesson about lazy
+        # attributes applies; restructuring `__init__` does not belong in
+        # a typography change.)
+        if (getattr(self, "transcript", None) is None
+                or getattr(self, "entry", None) is None):
+            return
+        try:
+            from . import fontconfig
+
+            cfg = fontconfig.load()
+        except Exception:  # noqa: BLE001 - typography must never break chat
+            return
+        if cfg is None:
+            return
+        try:
+            face = (cfg["family"], cfg["size"])
+            self.transcript.configure(font=face)
+            for tag in ("body", "muted", "good", "bad", "accent"):
+                self.transcript.tag_configure(tag, font=face,
+                                              justify=cfg["align"])
+            self.entry.configure(font=face, justify=cfg["align"])
+        except tk.TclError:  # noqa: BLE001 - unknown family: keep current
+            pass
 
     def say(self, text: str, tag: str = "") -> None:
         self._post("say", text, tag)

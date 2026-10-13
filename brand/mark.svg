@@ -16,8 +16,8 @@
   makes a noise.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
-     role="img" aria-label="Butleroy">
-  <title>Butleroy</title>
+     role="img" aria-label="ButlerOY">
+  <title>ButlerOY</title>
   <defs>
     <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
       <!-- Lit from above, as a polished bell would be. -->

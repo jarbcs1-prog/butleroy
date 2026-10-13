@@ -410,7 +410,7 @@ class WatchPending:
 
 
 def _icon_image(size: int = 64):
-    """The tray icon: the Butleroy bell, drawn rather than shipped as a binary.
+    """The tray icon: the ButlerOY bell, drawn rather than shipped as a binary.
 
     Drawn rather than loaded from `brand/icons/tray.png`, and that is not a
     preference for reviewability over convenience - it is that `src/` is the only
@@ -438,7 +438,7 @@ class Tray:
     audits.
     """
 
-    def __init__(self, daemon, *, title=f"Butleroy {__version__}",
+    def __init__(self, daemon, *, title=f"ButlerOY {__version__}",
                  hotkey=None):
         self.daemon = daemon
         self.title = title

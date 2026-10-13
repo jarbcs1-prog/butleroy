@@ -51,7 +51,45 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
-DEFAULT_VAULT = Path(r"E:\Obsidian_Vault")
+DEFAULT_VAULT = Path(r"E:\ButlerOY")
+
+
+def _repo_state_dir() -> Path:
+    """The state directory beside this checkout. Computed, not imported:
+    `daemon` already imports this module, so importing `daemon.STATE` here
+    would be circular."""
+    return Path(__file__).resolve().parent.parent.parent / "state"
+
+
+def user_vault_config(state_dir: Path | str | None = None) -> Path:
+    """Where the settings Vault tab stages the choice."""
+    return Path(state_dir) / "vault.json" if state_dir else _repo_state_dir() / "vault.json"
+
+
+def resolve_vault_root(
+    state_dir: Path | str | None = None,
+    cli_vault: Path | str | None = None,
+    default: Path | str | None = DEFAULT_VAULT,
+) -> Path | None:
+    """Where the vault lives: CLI wins, then `state/vault.json`, then default.
+
+    Anything that is not an existing directory is skipped, and a broken
+    vault.json is ignored rather than fatal: the bridge degrades to
+    unavailable either way, and a diagnostics screen that dies because a
+    JSON file has a typo is useless exactly when it is most wanted.
+    """
+    if cli_vault:
+        return Path(cli_vault)
+    try:
+        raw = json.loads(user_vault_config(state_dir).read_text(encoding="utf-8"))
+        root = Path(raw.get("root", ""))
+        if root.is_dir():
+            return root
+    except Exception:  # noqa: BLE001 - broken config degrades, never stops
+        pass
+    if default is not None and Path(default).is_dir():
+        return Path(default)
+    return None
 
 #: The one directory we are permitted to write to.
 ASSISTANT_DIR = "Assistant"

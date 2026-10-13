@@ -18,6 +18,7 @@ import pytest
 
 from assistant.obsidian import (
     ASSISTANT_DIR,
+    DEFAULT_VAULT,
     HARD_EXCLUDED,
     READABLE_DIRS,
     ObsidianBridge,
@@ -25,6 +26,7 @@ from assistant.obsidian import (
     VaultError,
     WriteRefused,
     _is_under,
+    resolve_vault_root,
     slugify,
 )
 
@@ -440,3 +442,57 @@ def test_slugs_are_unique_under_a_collision(bridge):
     a = bridge.write_note("plans", "Plan (draft)", "one")
     b = bridge.write_note("plans", "Plan draft", "two")
     assert a != b
+
+
+# --------------------------------------------------------------------------- #
+# where the vault lives (D100)
+
+
+def test_the_cli_choice_wins_over_everything(tmp_path: Path):
+    chosen = tmp_path / "cli"
+    chosen.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "vault.json").write_text(
+        '{"root": "%s"}' % str(other).replace("\\", "\\\\"),
+        encoding="utf-8",
+    )
+    assert resolve_vault_root(tmp_path / "state", chosen, default=other) == chosen
+
+
+def test_a_valid_vault_json_wins_over_the_default(tmp_path: Path):
+    picked = tmp_path / "picked"
+    picked.mkdir()
+    default = tmp_path / "default"
+    default.mkdir()
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "vault.json").write_text(
+        '{"root": "%s"}' % str(picked).replace("\\", "\\\\"),
+        encoding="utf-8",
+    )
+    assert resolve_vault_root(tmp_path / "state", None, default=default) == picked
+
+
+def test_a_broken_vault_json_is_ignored_not_fatal(tmp_path: Path):
+    default = tmp_path / "default"
+    default.mkdir()
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "vault.json").write_text("not json{", encoding="utf-8")
+    assert resolve_vault_root(tmp_path / "state", None, default=default) == default
+
+
+def test_a_vault_json_pointing_nowhere_falls_through(tmp_path: Path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "vault.json").write_text(
+        '{"root": "Z:/no-such-drive/vault"}', encoding="utf-8"
+    )
+    assert resolve_vault_root(tmp_path / "state", None, default=None) is None
+
+
+def test_no_choice_anywhere_means_no_bridge(tmp_path: Path):
+    assert resolve_vault_root(tmp_path / "state", None, default=None) is None
+
+
+def test_the_builtin_default_is_butleroy_on_e():
+    assert str(DEFAULT_VAULT) == r"E:\ButlerOY"

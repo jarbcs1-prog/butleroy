@@ -159,7 +159,7 @@ def test_the_pipes_are_renamed_and_named_pipes_still_validate() -> None:
 def test_the_pipes_are_unique_to_this_product_so_two_instances_cannot_collide() -> None:
     """D64's second-instance rule depends on the pipe names being stable.
 
-    Two Butleroys on one machine is the case the pipe namespace exists to catch.
+    Two ButlerOYs on one machine is the case the pipe namespace exists to catch.
     If a rename had accidentally produced a name another product also uses, the
     second instance would attach to the first one's daemon instead of refusing.
     """
@@ -429,3 +429,56 @@ def test_windows_environment_variables_are_untouched() -> None:
             f"{module.__name__} no longer reads LOCALAPPDATA; check that the "
             "rename did not touch a Windows environment variable"
         )
+
+# --------------------------------------------------------------------------- #
+# 4. the display rename: Butleroy -> ButlerOY (D102). Display strings only.
+
+
+def test_the_display_name_is_butleroy_wherever_shown() -> None:
+    """Window titles and the tray carry the official capitalisation.
+
+    Asserted on the constructor defaults, because those are what a fresh
+    window actually shows - a test asserting a string appears *somewhere*
+    would pass while the default title still said the old thing.
+    """
+    import inspect
+
+    from assistant import overlay, settings, tray
+
+    overlay_title = inspect.signature(
+        overlay.Overlay.__init__).parameters["title"].default
+    assert overlay_title == "ButlerOY", (
+        f"the prompt window still opens as {overlay_title!r}")
+    settings_title = inspect.signature(
+        settings.Settings.__init__).parameters["title"].default
+    assert settings_title == "ButlerOY Settings", (
+        f"the settings window still opens as {settings_title!r}")
+    tray_title = inspect.signature(
+        tray.Tray.__init__).parameters["title"].default
+    assert tray_title.startswith("ButlerOY "), (
+        f"the tray still identifies as {tray_title!r}")
+
+
+def test_the_lockup_carries_the_new_capitalisation() -> None:
+    logo = (ROOT / "brand" / "logo.svg").read_text(encoding="utf-8")
+    text = re.sub(r"<!--.*?-->", "", logo, flags=re.S)
+    assert "ButlerOY" in text
+    assert "Butleroy" not in text.replace("ButlerOY", ""), (
+        "the old capitalisation survives in the lockup artwork")
+
+
+def test_the_display_rename_stopped_at_display() -> None:
+    """Pipes, the pystray identity, env vars and the desk they sit on: all
+    byte-identical. D73's three lessons apply unchanged to a casing change:
+    a path, a credential and a console script are not display strings."""
+    from assistant import ipc
+
+    for pipe in ipc.ALL_PIPES:
+        assert "ButlerOY" not in pipe, (
+            f"{pipe} followed the display rename; pipe names are identity")
+    source = (SRC / "tray.py").read_text(encoding="utf-8")
+    assert '"butleroy"' in source, "the pystray identity moved"
+    assert "BUTLEROY_TELEGRAM_TOKEN" in (SRC / "telegram.py").read_text(
+        encoding="utf-8")
+    assert "BUTLEROY_EMAIL_PASSWORD" in (SRC / "email.py").read_text(
+        encoding="utf-8")

@@ -379,3 +379,37 @@ def test_the_daemon_serves_its_pipe_while_the_ui_runs(
         assert client.call("ping").get("result") == "pong"
     finally:
         app.stop()
+
+
+# --------------------------------------------------------------------------- #
+# where the vault comes from at startup (D100)
+
+
+def test_check_honours_an_explicit_vault(tmp_path: Path, capsys) -> None:
+    from assistant.launcher import main
+
+    v = tmp_path / "vault"
+    v.mkdir()
+    rc = main(["--state", str(tmp_path / "state"), "--vault", str(v),
+               "--check"])
+    assert rc == 0
+    # The preflight is JSON, so the path arrives backslash-escaped.
+    assert str(v).replace("\\", "\\\\") in capsys.readouterr().out, (
+        "the preflight does not show the vault the CLI named"
+    )
+
+
+def test_check_falls_back_to_vault_json(tmp_path: Path, capsys) -> None:
+    from assistant.launcher import main
+
+    v = tmp_path / "picked"
+    v.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "vault.json").write_text(
+        '{"root": "%s"}' % str(v).replace("\\", "\\\\"), encoding="utf-8")
+    rc = main(["--state", str(state), "--check"])
+    assert rc == 0
+    assert str(v).replace("\\", "\\\\") in capsys.readouterr().out, (
+        "vault.json was not honoured when --vault was absent"
+    )

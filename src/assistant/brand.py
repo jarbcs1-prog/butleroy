@@ -1,4 +1,4 @@
-"""The Butleroy mark, as code.
+"""The ButlerOY mark, as code.
 
 Why this is in the package and not in `brand/tools/`: the tray icon is drawn from
 this geometry at runtime, and `pyproject.toml` packages `src/` only. A tray that

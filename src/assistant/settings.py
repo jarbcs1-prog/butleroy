@@ -831,6 +831,8 @@ class WorkspacesSection(Section):
         self.widgets.append(self.status)
 
         for label, command in (
+            ("Edit", self._edit),
+            ("Open folder", self._open),
             ("Remove", self._remove),
             ("Approve a folder…", self._add),
             ("Reload", self._reload),
@@ -938,6 +940,89 @@ class WorkspacesSection(Section):
         self._say(f"Approved {root} as {name!r}, {self.danger.get()} danger, "
                   f"allowing {' '.join(tiers)}.", "verdigris")
 
+    def _edit(self) -> None:
+        """Change the selected workspace's danger and tiers in place.
+
+        A remove+add cycle through the existing ops, with every field the
+        pickers do not show carried across from `workspace_resolve` - an
+        edit that reset language, stack or commands would be a lossy save
+        wearing an edit's name. The pickers can only narrow in effect:
+        anything above the session ceiling is intersected away at resolve
+        time, and a danger level above its tier ceiling is refused by the
+        daemon, not clipped.
+        """
+        name = self._selected()
+        if name is None:
+            self._say("Select a workspace first.", "amber")
+            return
+        try:
+            res = self._call("workspace_resolve", name=name) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(f"The daemon refused: {res.get('error', 'unknown error')}",
+                      "rust")
+            return
+        current = res.get("result") or {}
+        if not isinstance(current, dict):
+            self._say("The daemon answered in a shape this tab does not render.",
+                      "rust")
+            return
+        tiers = [t for t in self.tiers.get().split() if t]
+        updated = dict(current)
+        updated["danger_level"] = self.danger.get()
+        updated["allow_tiers"] = tiers
+        updated["overwrite"] = True
+        kept = {k: updated.get(k) for k in (
+            "name", "root", "danger_level", "allow_tiers", "language",
+            "stack", "test_command", "build_command", "notes", "added",
+            "agent_definitions", "overwrite")}
+        try:
+            wres = self._call("workspace_add", **kept) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not wres.get("ok"):
+            self._say(f"The daemon refused: {wres.get('error', 'unknown error')}",
+                      "rust")
+            return
+        self._load(self._call)
+        self._say(f"Updated {name!r}: {self.danger.get()} danger, "
+                  f"allowing {' '.join(tiers) or 'nothing'}.", "verdigris")
+
+    def _open(self) -> None:
+        """Open the selected workspace's root in Explorer.
+
+        Client-side: the user's own click opening their own folder is not a
+        daemon action, so there is no op and no audit record. The opened path
+        is the resolved root, never a string parsed out of the human-readable
+        row - a caller that parses prose is one wording change away from
+        opening the wrong folder.
+        """
+        import os
+
+        name = self._selected()
+        if name is None:
+            self._say("Select a workspace first.", "amber")
+            return
+        try:
+            res = self._call("workspace_resolve", name=name) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        result = res.get("result") or {}
+        root = result.get("root", "") if isinstance(result, dict) else ""
+        if not root:
+            self._say("The daemon named no root for that workspace.", "rust")
+            return
+        try:
+            os.startfile(root)
+        except OSError as exc:
+            self._say(f"Could not open {root}: {exc}", "rust")
+            return
+        self._say(f"Opened {root}.", "sage")
+
     def _remove(self) -> None:
         name = self._selected()
         if name is None:
@@ -955,6 +1040,134 @@ class WorkspacesSection(Section):
         self._load(self._call)
         self._say(f"Revoked access to {name!r}. Nothing under it is reachable "
                   f"any more.", "verdigris")
+
+    def _reload(self) -> None:
+        self._load(self._call)
+
+    def _say(self, message: str, tone: str) -> None:
+        if self.status is not None:
+            self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
+
+
+class VaultSection(Section):
+    """Where the notes live, and how to move them.
+
+    The vault path is startup-only: the bridge is built at daemon init, so
+    this tab displays and stages but never re-points anything live. Change
+    writes `state/vault.json`, the launcher honours it on the next start,
+    and the status line says exactly that. A tab that silently moved durable
+    memory would be a tab that loses it.
+    """
+
+    def __init__(self, state_path: Any = None) -> None:
+        super().__init__("vault", "Vault", "vault")
+        self.named = ("path", "status")
+        self.path: Any = None
+        self.status: Any = None
+        self._state_path = state_path
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        note = tk.Label(
+            body,
+            text="The vault is the assistant's durable memory. The bridge is "
+                 "built when the daemon starts, so changing the folder takes "
+                 "effect on restart — nothing here moves live notes.",
+            fg=c["sage"], bg=c["slate"], wraplength=660, justify="left",
+            font=("Segoe UI", 9),
+        )
+        note.pack(fill="x", padx=16, pady=(14, 10))
+        self.widgets.append(note)
+
+        self.path = tk.Label(body, text="", fg=c["bone"], bg=c["slate"],
+                             anchor="w", justify="left",
+                             font=("Cascadia Code", 10))
+        self.path.pack(fill="x", padx=16)
+        self.widgets.append(self.path)
+
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(12, 14))
+        self.widgets.append(row)
+
+        self.status = tk.Label(row, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=420,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        for label, command in (("Change…", self._change),
+                               ("Reload", self._reload)):
+            button = W.Button(row, label, command, variant="ghost")
+            button.pack(side="right", padx=(6, 0))
+            self.widgets.append(button)
+
+        self._load(call)
+
+    def _config_path(self) -> Any:
+        from pathlib import Path
+
+        from . import obsidian
+
+        if self._state_path:
+            return Path(self._state_path) / "vault.json"
+        return obsidian.user_vault_config(None)
+
+    def _load(self, call: Callable[..., dict]) -> None:
+        try:
+            res = call("vault_status") or {}
+        except Exception as exc:  # noqa: BLE001
+            self.path.configure(text="unknown")
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self.path.configure(text="unknown")
+            self._say(res.get("error", "unknown error"), "rust")
+            return
+        v = res.get("result") or {}
+        self.path.configure(text=str(v.get("path") or "not configured"))
+        if v.get("available"):
+            self._say("Vault bridge is up.", "sage")
+        else:
+            self._say(f"Vault bridge is down: {v.get('error') or 'no vault configured'}.",
+                      "amber")
+
+    def _change(self) -> None:
+        """Pick the vault folder, then stage it. Restart applies it."""
+        from pathlib import Path
+        from tkinter import filedialog
+
+        parent = (self.path.winfo_toplevel()
+                  if self.path is not None else None)
+        current = self.path.cget("text") if self.path is not None else ""
+        root = filedialog.askdirectory(
+            parent=parent, title="Choose the vault folder",
+            initialdir=current if current else None, mustexist=True)
+        if not root:
+            self._say("Cancelled.", "sage")
+            return
+        if not Path(root).is_dir():
+            self._say(f"{root} is not a directory — nothing written.", "rust")
+            return
+        try:
+            import json
+
+            target = self._config_path()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"root": str(root)}, indent=2),
+                              encoding="utf-8")
+        except OSError as exc:
+            self._say(f"Could not write the choice: {exc}", "rust")
+            return
+        self._load(self._call)
+        self._say(f"Vault will move to {root} on restart. "
+                  f"Nothing changes until then.", "amber")
 
     def _reload(self) -> None:
         self._load(self._call)
@@ -997,7 +1210,8 @@ class AuthoritySection(Section):
     def __init__(self) -> None:
         super().__init__("authority", "Authority", "shield")
         self.named = ("listbox", "detail", "status", "pending", "check",
-                      "headline", "attended_button", "ceiling_select")
+                      "headline", "attended_button", "ceiling_select",
+                      "grants")
         self.listbox: Any = None
         self.detail: Any = None
         self.status: Any = None
@@ -1006,6 +1220,8 @@ class AuthoritySection(Section):
         self.headline: Any = None
         self.attended_button: Any = None
         self.ceiling_select: Any = None
+        self.grants: Any = None
+        self._grant_scopes: list = []
         # Staged, not sent: choosing stages, Apply writes, Reload reverts.
         # A Select that wrote on every change would let a stray click widen
         # authority (D97). Populating the dropdown during a load must not
@@ -1092,6 +1308,22 @@ class AuthoritySection(Section):
         self.pending.pack(fill="x", padx=16)
         self.widgets.append(self.pending)
 
+        # Live class grants: standing permissions with a clock on them. Shown
+        # here because expiry alone is not visibility, and revoked here
+        # because revocation narrows. Granting stays in the confirm dialog.
+        tk.Label(body, text="Live grants", fg=c["brass"], bg=c["slate"],
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(
+            fill="x", padx=16, pady=(14, 2))
+        self.widgets.append(body.winfo_children()[-1])
+
+        self.grants = tk.Listbox(
+            body, fg=c["bone"], bg=c["obsidian"], selectbackground=c["brass"],
+            selectforeground=c["obsidian"], relief="flat", highlightthickness=0,
+            font=("Cascadia Code", 9), activestyle="none", height=3,
+        )
+        self.grants.pack(fill="x", padx=16)
+        self.widgets.append(self.grants)
+
         # The checker. A prediction, not an action - `tool_check`'s own docstring is
         # emphatic about that, and so is the label.
         row = tk.Frame(body, bg=c["slate"])
@@ -1121,6 +1353,11 @@ class AuthoritySection(Section):
             actions, "Step back (unattended)", self._step_back, variant="ghost")
         self.attended_button.pack(side="right", padx=(6, 0))
         self.widgets.append(self.attended_button)
+
+        revoke_button = W.Button(actions, "Revoke grant", self._revoke,
+                                 variant="ghost")
+        revoke_button.pack(side="right", padx=(6, 0))
+        self.widgets.append(revoke_button)
 
         reload_button = W.Button(actions, "Reload", self._reload, variant="ghost")
         reload_button.pack(side="right", padx=(6, 0))
@@ -1179,6 +1416,21 @@ class AuthoritySection(Section):
             self.pending.configure(text="Nothing is waiting on you.",
                                    fg=palette()["sage"])
 
+        grants = (pending.get("result") or {}).get("grants") or []
+        self._grant_scopes = [str(g.get("scope", "")) for g in grants
+                              if isinstance(g, dict)]
+        self.grants.delete(0, "end")
+        if self._grant_scopes:
+            for g in grants:
+                try:
+                    left = max(0.0, float(g.get("expires_in_s", 0)))
+                except (TypeError, ValueError):
+                    left = 0.0
+                self.grants.insert("end",
+                                   f"{g.get('scope', '?')} — {left:.0f}s left")
+        else:
+            self.grants.insert("end", "No live grants.")
+
         self._say(f"{s.get('tools_registered', '?')} tools registered, "
                   f"{s.get('audit_records', '?')} audit records.", "sage")
 
@@ -1202,6 +1454,36 @@ class AuthoritySection(Section):
         self._load(self._call)
         self._say("Unattended. T2 and T3 now queue until you are back at the "
                   "keyboard.", "amber")
+
+    def _selected_grant(self) -> Any:
+        """The highlighted grant scope, or None. A placeholder row ("No live
+        grants.") is never a scope, even if highlighted."""
+        if self.grants is None:
+            return None
+        selection = self.grants.curselection()
+        if not selection or selection[0] >= len(self._grant_scopes):
+            return None
+        return self._grant_scopes[selection[0]]
+
+    def _revoke(self) -> None:
+        """End the highlighted grant. Revocation narrows, so unlike Apply it
+        needs no staging gesture: the selection itself is the deliberation,
+        and the daemon refuses unknown scopes loudly."""
+        scope = self._selected_grant()
+        if scope is None:
+            self._say("Select a grant first.", "amber")
+            return
+        try:
+            res = self._call("confirm_grant_revoke", scope=scope) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._say(f"Could not reach the daemon: {exc}", "rust")
+            return
+        if not res.get("ok"):
+            self._say(f"The daemon refused: {res.get('error', 'unknown error')}",
+                      "rust")
+            return
+        self._load(self._call)
+        self._say(f"Revoked {scope}. The next call asks again.", "verdigris")
 
     def _stage_ceiling(self, name: str) -> None:
         """A ceiling was chosen in the window. Stage it; Apply sends it.
@@ -1724,6 +2006,134 @@ class AdvancedSection(Section):
             self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
 
 
+class AppearanceSection(Section):
+    """Overlay typography, chosen not coded.
+
+    Transcript and entry only. The chrome stays Segoe UI by brand rule;
+    this tab is the recorded exception, not a precedent. A choice is
+    written to `state/fonts.json` and applies the next time the prompt
+    window opens (the overlay re-reads it on every show).
+    """
+
+    SIZES = ("8", "10", "12", "14", "16", "18", "20", "24")
+    ALIGNS = ("left", "center", "right")
+    FAMILY_CANDIDATES = ("Consolas", "Cascadia Code", "Cascadia Mono",
+                         "JetBrains Mono", "Courier New", "Lucida Console",
+                         "Segoe UI")
+
+    def __init__(self, state_path: Any = None) -> None:
+        super().__init__("appearance", "Appearance", "settings")
+        self.named = ("family", "size", "align", "status")
+        self.family: Any = None
+        self.size: Any = None
+        self.align: Any = None
+        self.status: Any = None
+        self._state_path = state_path
+
+    def build(self, parent: Any, call: Callable[..., dict]) -> None:
+        import tkinter as tk
+        import tkinter.font as tkfont
+
+        c = palette()
+        self._call = call
+        body = tk.Frame(parent, bg=c["slate"], bd=0)
+        body.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.widgets.append(body)
+
+        note = tk.Label(
+            body,
+            text="The prompt window's transcript and entry. Everything else "
+                 "stays Segoe UI — that is the brand rule, and this tab is "
+                 "the deliberate exception. A choice applies the next time "
+                 "the prompt window opens.",
+            fg=c["sage"], bg=c["slate"], wraplength=660, justify="left",
+            font=("Segoe UI", 9),
+        )
+        note.pack(fill="x", padx=16, pady=(14, 10))
+        self.widgets.append(note)
+
+        live = tkfont.nametofont("TkFixedFont")
+        live_family = str(live.actual("family"))
+        try:
+            live_size = str(abs(int(live.actual("size"))))
+        except (TypeError, ValueError):
+            live_size = "10"
+        installed = set(tkfont.families())
+        families = ([live_family]
+                    + [f for f in self.FAMILY_CANDIDATES
+                       if f in installed and f != live_family])
+        sizes = sorted(set(self.SIZES + (live_size,)), key=int)
+
+        for label, attr, options, width, value in (
+                ("Family", "family", families, 24, live_family),
+                ("Size", "size", sizes, 6, live_size),
+                ("Alignment", "align", list(self.ALIGNS), 10, "left")):
+            line = tk.Frame(body, bg=c["slate"])
+            line.pack(fill="x", padx=16, pady=(4, 0))
+            self.widgets.append(line)
+            sel = W.Select(line, label, options=options, value=value,
+                           width=width)
+            sel.pack(side="left")
+            self.widgets.append(sel)
+            setattr(self, attr, sel)
+
+        row = tk.Frame(body, bg=c["slate"])
+        row.pack(fill="x", padx=16, pady=(12, 14))
+        self.widgets.append(row)
+
+        self.status = tk.Label(row, text="", fg=c["sage"], bg=c["slate"],
+                               anchor="w", justify="left", wraplength=420,
+                               font=("Segoe UI", 9))
+        self.status.pack(side="left", fill="x", expand=True)
+        self.widgets.append(self.status)
+
+        for label, command in (("Apply", self._apply),
+                               ("Reload", self._load)):
+            button = W.Button(row, label, command, variant="ghost")
+            button.pack(side="right", padx=(6, 0))
+            self.widgets.append(button)
+
+    def _load(self, *_args: Any) -> None:
+        """Re-read the live faces. Reload reverts unapplied choices, like
+        everywhere else: the source of truth is what is on screen now."""
+        import tkinter.font as tkfont
+
+        live = tkfont.nametofont("TkFixedFont")
+        try:
+            size = str(abs(int(live.actual("size"))))
+        except (TypeError, ValueError):
+            size = "10"
+        self.family.set(str(live.actual("family")))
+        if size in self._size_options():
+            self.size.set(size)
+        self.align.set("left")
+        self._say("Showing the live faces.", "sage")
+
+    def _size_options(self) -> list:
+        menu = self.size.widget["menu"]
+        return [menu.entrycget(i, "label")
+                for i in range(menu.index("end") + 1)]
+
+    def _apply(self) -> None:
+        from . import fontconfig
+
+        try:
+            size = int(self.size.get())
+        except (TypeError, ValueError):
+            size = -1
+        try:
+            fontconfig.save(self._state_path, self.family.get(), size,
+                            self.align.get())
+        except (ValueError, OSError) as exc:
+            self._say(f"Not saved: {exc}", "rust")
+            return
+        self._say("Saved — applies when the prompt window opens.", "sage")
+
+    def _say(self, message: str, tone: str) -> None:
+        if self.status is not None:
+            self.status.configure(text=message, fg=palette().get(tone, "#EDE8DC"))
+
+
 class Settings:
     """The window. One Tk thread, one queue, built like `overlay.Overlay`.
 
@@ -1763,7 +2173,7 @@ class Settings:
         self,
         call: Callable[..., dict],
         *,
-        title: str = "Butleroy Settings",
+        title: str = "ButlerOY Settings",
         state_path: Any = None,
         models_dir: Any = None,
     ) -> None:
@@ -1853,7 +2263,7 @@ class Settings:
             # report anything useful, and the whole reason this attribute exists is
             # that the first version of `_tk_main` discarded exactly this.
             detail = self._tk_error or "the Tk thread did not become ready"
-            raise RuntimeError(f"Butleroy settings window: {detail}")
+            raise RuntimeError(f"ButlerOY settings window: {detail}")
         return True
 
     def _tk_main(self) -> None:
@@ -2004,7 +2414,7 @@ class Settings:
         head.pack_propagate(False)
         self._head = head
 
-        title = tk.Label(head, text="Butleroy", fg=c["brass"], bg=c["slate"],
+        title = tk.Label(head, text="ButlerOY", fg=c["brass"], bg=c["slate"],
                          font=("Segoe UI", 13, "bold"), anchor="w")
         title.pack(side="left", padx=18)
         self._title_label = title
@@ -2015,13 +2425,16 @@ class Settings:
         # Sections are listed in this order rather than discovered, because a
         # settings window whose navigation depends on a registry lookup is a window
         # that can come up empty with nothing wrong anywhere.
-        self._order = ["models", "voices", "workspaces", "authority", "advanced"]
+        self._order = ["models", "voices", "workspaces", "vault", "authority",
+                       "advanced", "appearance"]
         self._sections = {
             "models": ModelsSection(),
             "voices": VoicesSection(),
             "workspaces": WorkspacesSection(),
+            "vault": VaultSection(state_path=self._state_path),
             "authority": AuthoritySection(),
             "advanced": AdvancedSection(),
+            "appearance": AppearanceSection(state_path=self._state_path),
         }
 
         for key in self._order:

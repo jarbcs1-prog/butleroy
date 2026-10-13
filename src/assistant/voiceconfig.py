@@ -251,7 +251,7 @@ def save(config: VoiceConfig, path: Path | str | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "_comment": (
-            "Butleroy voice configuration. 'default' is the voice that speaks; "
+            "ButlerOY voice configuration. 'default' is the voice that speaks; "
             "'whisper' is the transcription model. Voices live in models/voices/ as "
             "a .onnx and a .onnx.json pair, and are discovered from disk rather than "
             "listed here. Safe to hand-edit; an unreadable file falls back to the "

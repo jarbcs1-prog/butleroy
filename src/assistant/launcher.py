@@ -50,6 +50,7 @@ from typing import Any, Callable
 from . import ipc
 from .daemon import STATE, Daemon
 from .manifest import TIER_BY_NAME
+from .obsidian import resolve_vault_root
 from .tray import Hotkey, HotkeyUnavailable, Presence, Tray
 
 __all__ = ["App", "main", "build_parser"]
@@ -235,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
     d = Daemon(
         state=opts.state,
-        vault=opts.vault,
+        vault=resolve_vault_root(opts.state, opts.vault),
         attended=not opts.unattended,
         session_ceiling=_ceiling(opts.ceiling),
     )

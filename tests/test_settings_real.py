@@ -119,7 +119,7 @@ def win():
     made: list[S.Settings] = []
 
     def build(daemon: FakeDaemon | None = None) -> S.Settings:
-        w = S.Settings(daemon or FakeDaemon(), title="Butleroy Settings")
+        w = S.Settings(daemon or FakeDaemon(), title="ButlerOY Settings")
         made.append(w)
         w.show()
         return w
@@ -151,7 +151,7 @@ def test_the_window_opens_and_is_pumped(win) -> None:
     assert w.is_open
     assert w._root is not None
     assert w._root.winfo_viewable() == 1, "the window is not mapped"
-    assert w._root.title() == "Butleroy Settings"
+    assert w._root.title() == "ButlerOY Settings"
     assert w._invoke(lambda: "pumped") == "pumped"
 
 
@@ -170,7 +170,7 @@ def test_the_window_is_sized_for_the_content(win) -> None:
     width = w._root.winfo_reqwidth()
     height = w._root.winfo_reqheight()
 
-    assert "Butleroy" in w._root.title()
+    assert "ButlerOY" in w._root.title()
     assert width > 400, (
         f"the window requested only {width}px wide; a mis-specified geometry "
         "string is silent"
@@ -522,6 +522,8 @@ class FakeWorkspaceDaemon(FakeDaemon):
         super().__init__()
         self.workspaces: list[str] = []
         self.roots: list[str] = []
+        self.details: dict[str, dict] = {}
+        self.added: list[dict] = []
 
     def __call__(self, op: str, /, **args) -> dict:
         self.calls.append((op, dict(args)))
@@ -532,12 +534,18 @@ class FakeWorkspaceDaemon(FakeDaemon):
         if op == "workspace_add":
             name = args.get("name", "?")
             root = args.get("root", "?")
+            self.added.append(dict(args))
             self.workspaces.append(
                 f"{name} [{args.get('danger_level')}] {root}\n"
                 f"  allowed here: {', '.join(args.get('allow_tiers') or [])}"
             )
             self.roots.append(root)
             return {"ok": True, "result": {"name": name}}
+        if op == "workspace_resolve":
+            hit = self.details.get(args.get("name", ""))
+            if hit is None:
+                return {"ok": False, "error": "unknown workspace"}
+            return {"ok": True, "result": dict(hit)}
         if op == "workspace_remove":
             name = args.get("name")
             self.workspaces = [w for w in self.workspaces
@@ -640,6 +648,99 @@ def test_the_workspace_pickers_are_released(win) -> None:
         f"the section still holds {section.holds_widgets()} after disposal"
     )
 
+
+
+@requires_display
+def test_editing_a_workspace_keeps_its_identity_and_changes_its_limits(win) -> None:
+    """Danger and tiers are editable in place; name, root and everything the
+    pickers do not show survive. An edit that reset the fields it cannot see
+    would be a lossy save wearing an edit's name."""
+    daemon = FakeWorkspaceDaemon()
+    daemon.workspaces = ["proj [low] G:/work/proj\n  allowed here: T0"]
+    daemon.roots = ["G:/work/proj"]
+    daemon.details = {"proj": {"name": "proj", "root": "G:/work/proj",
+                               "danger_level": "low",
+                               "allow_tiers": ["T0"],
+                               "language": "python",
+                               "test_command": "pytest -q"}}
+
+    w = win(daemon)
+    w._select("workspaces")
+    section = w._sections["workspaces"]
+    section.listbox.selection_set(0)
+    section.danger.set("medium")
+    section.tiers.set("T0 T1")
+    section._edit()
+
+    assert daemon.added, "editing sent the daemon nothing"
+    sent = daemon.added[-1]
+    assert sent["name"] == "proj" and sent["root"] == "G:/work/proj"
+    assert sent["danger_level"] == "medium"
+    assert sent["allow_tiers"] == ["T0", "T1"]
+    assert sent.get("overwrite") is True
+    assert sent.get("language") == "python", (
+        "the edit dropped fields the pickers do not show")
+    assert sent.get("test_command") == "pytest -q"
+    assert "pdated" in section.status.cget("text"), (
+        f"the edit is not confirmed: {section.status.cget('text')!r}")
+
+
+@requires_display
+def test_edit_with_nothing_selected_asks_for_a_selection(win) -> None:
+    daemon = FakeWorkspaceDaemon()
+    w = win(daemon)
+    w._select("workspaces")
+    section = w._sections["workspaces"]
+
+    section._edit()
+
+    assert "Select a workspace" in section.status.cget("text")
+    assert daemon.added == []
+
+
+@requires_display
+def test_open_folder_opens_the_selected_root(win, monkeypatch) -> None:
+    """The user's own click opens their own folder: client-side, no daemon
+    op, no audit record. What is asserted is that the opened path is the
+    resolved root, not a string parsed out of the human-readable row."""
+    import os
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(p),
+                        raising=False)
+
+    daemon = FakeWorkspaceDaemon()
+    daemon.workspaces = ["proj [low] G:/work/proj\n  allowed here: T0"]
+    daemon.roots = ["G:/work/proj"]
+    daemon.details = {"proj": {"name": "proj", "root": "G:/work/proj",
+                               "danger_level": "low",
+                               "allow_tiers": ["T0"]}}
+    w = win(daemon)
+    w._select("workspaces")
+    section = w._sections["workspaces"]
+    section.listbox.selection_set(0)
+    section._open()
+
+    assert opened == ["G:/work/proj"], (
+        f"opened {opened} instead of the resolved root")
+
+
+@requires_display
+def test_open_with_nothing_selected_asks_for_a_selection(win, monkeypatch) -> None:
+    import os
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(p),
+                        raising=False)
+    daemon = FakeWorkspaceDaemon()
+    w = win(daemon)
+    w._select("workspaces")
+    section = w._sections["workspaces"]
+
+    section._open()
+
+    assert "Select a workspace" in section.status.cget("text")
+    assert opened == []
 # --------------------------------------------------------------------------- #
 # the authority section
 # --------------------------------------------------------------------------- #
@@ -653,6 +754,7 @@ class FakeAuthorityDaemon(FakeDaemon):
         self.attended = True
         self.ceiling = "T3"
         self.waiting: list[dict] = []
+        self.grants: list[dict] = []
         self.checked: list[str] = []
 
     def __call__(self, op: str, /, **args) -> dict:
@@ -662,7 +764,17 @@ class FakeAuthorityDaemon(FakeDaemon):
                 "attended": self.attended, "session_ceiling": self.ceiling,
                 "tools_registered": 61, "audit_records": 7}}
         if op == "confirm_list":
-            return {"ok": True, "result": {"pending": list(self.waiting)}}
+            return {"ok": True, "result": {"pending": list(self.waiting),
+                                           "grants": list(self.grants)}}
+        if op == "confirm_grant_revoke":
+            before = list(self.grants)
+            self.grants = [g for g in self.grants
+                           if g.get("scope") != args.get("scope")]
+            if len(self.grants) == len(before):
+                return {"ok": False, "refused": True,
+                        "error": "unknown grant scope"}
+            return {"ok": True,
+                    "result": {"revoked": args.get("scope")}}
         if op == "tool_check":
             self.checked.append(args.get("tool", ""))
             return {"ok": True, "result": {
@@ -960,6 +1072,59 @@ def test_loading_the_tab_does_not_move_the_ceiling(win) -> None:
     assert select.get() == "T3", (
         f"the choice does not show the current ceiling: {select.get()!r}"
     )
+
+
+@requires_display
+def test_authority_lists_live_grants(win) -> None:
+    """Grants are standing permissions with a clock on them. A permission the
+    user cannot see is a permission the user cannot end — expiry alone is not
+    visibility."""
+    daemon = FakeAuthorityDaemon()
+    daemon.grants = [{"scope": "file.delete|G:/ws", "expires_in_s": 512.0}]
+    w = win(daemon)
+    w._select("authority")
+
+    rows = w._sections["authority"].grants.get(0, "end")
+    assert any("file.delete|G:/ws" in r for r in rows), (
+        f"the live grant is not shown: {rows}")
+    assert any("512" in r or "8m" in r or "min" in r for r in rows), (
+        f"the grant's remaining time is not shown: {rows}")
+
+
+@requires_display
+def test_revoking_a_grant_from_the_window_ends_it(win) -> None:
+    daemon = FakeAuthorityDaemon()
+    daemon.grants = [{"scope": "file.delete|G:/ws", "expires_in_s": 512.0}]
+    w = win(daemon)
+    w._select("authority")
+    section = w._sections["authority"]
+
+    section.grants.selection_set(0)
+    section._revoke()
+
+    assert ("confirm_grant_revoke", {"scope": "file.delete|G:/ws"}) in [
+        (op, args) for op, args in daemon.calls
+    ], "revoking never reached the daemon"
+    rows = section.grants.get(0, "end")
+    assert not any("file.delete" in r for r in rows), (
+        f"the revoked grant is still shown: {rows}")
+    assert "evok" in section.status.cget("text"), (
+        f"the revocation is not confirmed: {section.status.cget('text')!r}")
+
+
+@requires_display
+def test_revoke_with_nothing_selected_asks_for_a_selection(win) -> None:
+    daemon = FakeAuthorityDaemon()
+    w = win(daemon)
+    w._select("authority")
+    section = w._sections["authority"]
+
+    section._revoke()
+
+    assert "Select a grant" in section.status.cget("text")
+    assert not any(op == "confirm_grant_revoke"
+                   for op, _ in daemon.calls), (
+        "revoking with no selection called the daemon")
 
 # --------------------------------------------------------------------------- #
 # the advanced section

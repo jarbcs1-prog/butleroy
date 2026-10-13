@@ -772,3 +772,38 @@ def test_the_class_grant_window_is_the_number_the_user_chose(dg):
 def test_the_confirm_ops_exist_under_the_underscored_names(dg):
     for op in ("confirm_approve", "confirm_deny", "confirm_list", "tool_call"):
         assert op in D.Daemon._OPS
+
+
+# ------------------------------------------------- 5. revoking a class grant
+
+
+def test_revoking_a_grant_makes_the_next_call_ask_again(dg, sandbox):
+    allowed, _ = sandbox
+    p = str(allowed / "a.txt")
+    delete_now(dg, p, scope="class")
+
+    scopes = [g["scope"] for g in call(dg, "confirm_list")["result"]["grants"]]
+    assert scopes, "no grant was recorded to revoke"
+    out = call(dg, "confirm_grant_revoke", scope=scopes[0])
+    assert out["ok"] is True, out
+
+    res = ask(dg, "file.delete", path=str(allowed / "b.txt"))
+    assert res["result"].get("needs_confirmation"), (
+        "a revoked grant still cashed - revocation changed nothing")
+
+
+def test_revoking_an_unknown_scope_is_refused_loudly(dg, sandbox):
+    out = call(dg, "confirm_grant_revoke", scope="file.delete|no-such-root")
+    assert out["ok"] is False
+    assert "scope" in out["error"], (
+        f"the refusal does not say what was wrong: {out}")
+
+
+def test_a_revocation_is_audited(dg, sandbox):
+    allowed, _ = sandbox
+    delete_now(dg, str(allowed / "a.txt"), scope="class")
+    scope = call(dg, "confirm_list")["result"]["grants"][0]["scope"]
+    call(dg, "confirm_grant_revoke", scope=scope)
+    assert ("confirm.grant_revoke", "allow") in [
+        (t, dd) for t, dd, _ in decisions(dg)], (
+        "a revocation left no audit record")

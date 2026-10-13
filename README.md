@@ -1,11 +1,13 @@
-# Butleroy — LocalAIzed Concierge for Windows
+# ButlerOY — LocalAIzed Concierge for Windows
 
 A 24/7 assistant that lives on one Windows 11 machine, knows that machine, runs the administrative work that needs doing, and orchestrates software projects by delegating to a team of agents - with all reasoning and all memory on-device.
 
-> **Naming.** The product, the package (`butleroy`), the console script
-> (`butleroy`), the named pipes (`\\.\pipe\butleroy.*`) and the credential
-> variables (`BUTLEROY_*`) are all Butleroy — see DECISIONS.md D73. Two things
-> are deliberately **not**: the project directory is still `G:\localaized`,
+> **Naming.** The product is ButlerOY — see DECISIONS.md D73 and D102. The
+> package (`butleroy`), the console script (`butleroy`), the named pipes
+> (`\\.\pipe\butleroy.*`), the pystray identity and the credential variables
+> (`BUTLEROY_*`) keep their spellings deliberately: a path, a credential and
+> a platform identity are not display strings. Two more things are
+> deliberately **not** renamed: the project directory is still `G:\localaized`,
 > because a filesystem path is not a product name and moving the checkout would
 > invalidate the venv and every relative path; and `LOCALAIZED_*_PASSWORD` /
 > `LOCALAIZED_*_TOKEN` still work with a deprecation warning, because a rename

@@ -47,6 +47,9 @@ DEEP_MODEL = (
     ROOT / "models"
     / "Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf"
 )
+SPARE_MODEL = (
+    ROOT / "models" / "Qwen3.5-0.8B-Q4_0.gguf"
+)
 
 DEFAULT_MODEL = FAST_MODEL
 DEFAULT_CUDA_BIN = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
@@ -69,6 +72,7 @@ DEFAULT_CUDA_BIN = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bi
 TIERS: dict[str, dict[str, Any]] = {
     "fast": {"model": FAST_MODEL, "need_bytes": 7 * 1024 ** 3},
     "deep": {"model": DEEP_MODEL, "need_bytes": 7 * 1024 ** 3},
+    "spare": {"model": SPARE_MODEL, "need_bytes": 2 * 1024 ** 3},
 }
 
 # How long the child waits for the daemon to answer a lease request before giving

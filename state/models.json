@@ -1,0 +1,17 @@
+{
+  "_comment": "ButlerOY model configuration. Tier -> model filename (relative to models/) and the VRAM lease ceiling in bytes. Written by the settings window; safe to hand-edit, and a file that cannot be read falls back to the built-in defaults rather than stopping the daemon.",
+  "tiers": {
+    "deep": {
+      "model": "Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf",
+      "need_bytes": 7516192768
+    },
+    "fast": {
+      "model": "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf",
+      "need_bytes": 7516192768
+    },
+    "spare": {
+      "model": "Qwen3.5-0.8B-Q4_0.gguf",
+      "need_bytes": 2003386368
+    }
+  }
+}

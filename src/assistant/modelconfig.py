@@ -154,6 +154,10 @@ def defaults() -> dict[str, TierSetting]:
             model="Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf",
             need_bytes=7 * 1024 ** 3,
         ),
+        "spare": TierSetting(
+            model="Qwen3.5-0.8B-Q4_0.gguf",
+            need_bytes=2 * 1024 ** 3,
+        ),
     }
 
 

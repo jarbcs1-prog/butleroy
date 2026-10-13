@@ -5359,3 +5359,20 @@ new display defaults and the untouched identities side by side; the
 trademark-clearance note in the brand kit stands as written.
 ---
 
+## D103 - A stale empty egg-info shadowed the installed package
+
+`test_the_editable_install_still_points_at_this_checkout` failed with
+"importlib cannot resolve" while a correct `butleroy-0.3.0.dist-info` sat in
+site-packages. Cause: an EMPTY `src/butleroy.egg-info/` directory, a stale
+build artefact. Pytest's `pythonpath=["src"]` puts `src/` first on
+`sys.path`, so `importlib.metadata` found the shadow with no `Version` and
+returned `None`; outside pytest the real dist-info won and everything looked
+fine. The failure message blamed resolution, which pointed at reinstalling
+the venv — the expensive, destructive repair for a one-line deletion.
+
+Fixed by deleting the directory. No venv write, so no backup cycle: the
+rule is about writes to `.venv`, and the cheapest correct repair is the one
+that touches nothing it does not have to. The test now names shadow dists
+in its failure message so the next occurrence points at itself.
+---
+

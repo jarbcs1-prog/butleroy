@@ -391,8 +391,22 @@ def test_the_editable_install_still_points_at_this_checkout() -> None:
     # actually matters - and only *reports* the leftovers.
 
     import importlib.metadata as md
+    import sys
 
-    assert md.version("butleroy"), "importlib cannot resolve the butleroy package"
+    try:
+        version = md.version("butleroy")
+    except Exception:  # noqa: BLE001 - truly absent, not just shadowed
+        version = None
+    shadows = sorted(
+        str(p) for entry in sys.path
+        if entry and Path(entry).is_dir()
+        for p in Path(entry).glob("*.egg-info")
+    )
+    assert version, (
+        "importlib cannot resolve the butleroy package"
+        + (f"; shadow dist-infos on sys.path take precedence: {shadows}"
+           if shadows else "")
+    )
 
     # `entry_points()` returns EntryPoint objects here, not a mapping you can
     # index by name - indexing it raises `AttributeError: 'str' object has no

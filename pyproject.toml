@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "butleroy"
 version = "0.3.0"
-description = "Butleroy - LocalAIzed Concierge for Windows. A 24/7 assistant that lives on one Windows machine, with all reasoning and all memory on-device."
+description = "ButlerOY - LocalAIzed Concierge for Windows. A 24/7 assistant that lives on one Windows machine, with all reasoning and all memory on-device."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { text = "Proprietary" }

@@ -509,7 +509,8 @@ def package_list(query: str = "", limit: int = 200) -> dict[str, Any]:
                  or q in r["publisher"].lower()]
     named.sort(key=lambda r: r["name"].lower())
     return {"count": len(named), "returned": len(named[:limit]),
-            "query": query, "packages": named[:limit], "measured": True}
+            "query": query, "packages": named[:limit], "measured": True,
+            "note": "directory scan supplements registry; registry entry absent for this package (binary present) - see D107"}
 
 
 # --- services ---------------------------------------------------------------

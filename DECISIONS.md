@@ -5474,6 +5474,19 @@ and audio stays acknowledged-WIP. A mute toggle was refused as theatre:
 nothing auto-speaks today, so there is nothing for it to gate.
 ---
 
+## D107 - `system.package_list` reports zero for installed-but-unregistered packages
+
+Measured with the running daemon (`sysinfo.py` line 465): the registry-based
+`package_list` reads `HKLM`/`HKCU` Uninstall keys; `node.exe` exists at
+`C:\Program Files\nodejs` but the `nodejs` key is absent, so `count: 0` is
+accurate for that source and wrong for reality. Added `broader_package_inventory()`
+(scans ProgramData/Program Files directories for installed binaries that miss
+the registry) so the transcript reports `installed (ProgramFiles: nodejs)`
+separately. No authorization change — the user's "all full" direction (D106
+workspaces) is about tier access, and this inventory gap is independent of
+the gate.
+---
+
 ## D104 - Load/infer split per tier, and the spare 0.8B measured
 
 D99 reported wall totals only, n=1, through the daemon path. Measured here

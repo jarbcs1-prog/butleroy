@@ -261,6 +261,87 @@ Test-Case 'install.ps1 parses without syntax errors' {
     return $true
 }
 
+# ---------------------------------------------------------------------------
+# 7. No undefined variables. FULL installs died in ~6 seconds (exit 1) because
+#    Install-Brain read `$vcvars`, which is assigned nowhere - a name that only
+#    ever existed in a comment. A syntax check cannot see it; the engine parses
+#    cleanly and then throws at runtime, on the one install type nobody ran.
+# ---------------------------------------------------------------------------
+
+Test-Case 'every function reads only variables it defines' {
+    $toks = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $Engine, [ref]$toks, [ref]$errs)
+    $auto = @('_','?','^','$','args','input','foreach','switch','this','true',
+        'false','null','PID','Error','Matches','LastExitCode',
+        'ErrorActionPreference','MyInvocation','PSScriptRoot','PSCommandPath',
+        'PWD','HOME','IsWindows','IsLinux','IsMacOS','PSVersionTable','Host',
+        'ExecutionContext','PROFILE','PSItem','Event','Sender','PSBoundParameters')
+    $ns = 'System.Management.Automation.Language'
+    $fns = $ast.FindAll(
+        { param($n) $n -is "$ns.FunctionDefinitionAst" }, $true)
+    # Script-level facts, visible to every function: the param block, top-level
+    # assignments, and bare reads backed by a `$script:` assignment elsewhere
+    # (`$CudaRoot` reads what Test-Prereqs stores as `$script:CudaRoot`).
+    $scriptParams = @()
+    if ($ast.ParamBlock) {
+        $scriptParams = @($ast.ParamBlock.Parameters |
+            ForEach-Object { $_.Name.VariablePath.UserPath })
+    }
+    $topAssigns = @()
+    $scriptAssigns = @()
+    foreach ($a in $ast.FindAll(
+        { param($n) $n -is "$ns.AssignmentStatementAst" }, $true)) {
+        $lhs = $a.Left
+        if ($lhs -is "$ns.VariableExpressionAst") {
+            # Qualified paths ($env:, $script:) carry the qualifier in UserPath;
+            # DriveName is $null for $script: on an assignment left-hand side,
+            # so it cannot be used to tell them apart. Match on the colon.
+            if ($lhs.VariablePath.UserPath -match ':') {
+                $scriptAssigns += $lhs.VariablePath.UserPath
+            } else {
+                $inFn = $false
+                $p = $a.Parent
+                while ($p) {
+                    if ($p -is "$ns.FunctionDefinitionAst") { $inFn = $true; break }
+                    $p = $p.Parent
+                }
+                if (-not $inFn) { $topAssigns += $lhs.VariablePath.UserPath }
+            }
+        }
+    }
+    foreach ($fn in $fns) {
+        $params = @($fn.Parameters |
+            ForEach-Object { $_.Name.VariablePath.UserPath })
+        if ($fn.Body.ParamBlock) {
+            $params += @($fn.Body.ParamBlock.Parameters |
+                ForEach-Object { $_.Name.VariablePath.UserPath })
+        }
+        $assigned = @($fn.FindAll(
+            { param($n) $n -is "$ns.AssignmentStatementAst" }, $true) |
+            ForEach-Object { $_.Left } |
+            Where-Object { $_ -is "$ns.VariableExpressionAst" } |
+            ForEach-Object { $_.VariablePath.UserPath })
+        $loopVars = @($fn.FindAll(
+            { param($n) $n -is "$ns.ForEachStatementAst" }, $true) |
+            ForEach-Object { $_.Variable.VariablePath.UserPath })
+        $defined = @($params + $assigned + $loopVars + $scriptParams +
+                     $topAssigns + $auto)
+        foreach ($v in $fn.FindAll(
+            { param($n) $n -is "$ns.VariableExpressionAst" }, $true)) {
+            $vp = $v.VariablePath
+            if ($vp.UserPath -match ':') { continue }  # $env:, $script: - qualified
+            if ($vp.IsSplatted) { continue }
+            if ($defined -notcontains $vp.UserPath -and
+                $scriptAssigns -notcontains ("script:" + $vp.UserPath)) {
+                return ('$' + $vp.UserPath + ' in ' + $fn.Name +
+                        ' is assigned nowhere')
+            }
+        }
+    }
+    return $true
+}
+
 Write-Host ''
 Write-Host "  $script:Pass passed, $script:Fail failed" -ForegroundColor $(if ($script:Fail) { 'Red' } else { 'Green' })
 Write-Host ''

@@ -5376,3 +5376,86 @@ that touches nothing it does not have to. The test now names shadow dists
 in its failure message so the next occurrence points at itself.
 ---
 
+## D105 - FULL installs died in six seconds on an undefined variable
+
+The user's FULL install (all four components) exited 1 after ~6 seconds —
+a 20-minute build dying in 6 seconds means it never started the build. The
+Inno log proves it: `install.ps1 -WithBrain ...` launched 20:07:22, process
+exit code 1 at 20:07:28.
+
+Cause: `install.ps1` Install-Brain line 308 derived `VSCMD_ROOT` from
+`$vcvars`, a name assigned nowhere in the file — it existed only in
+comments. Under `$ErrorActionPreference = 'Stop'`, `Split-Path $null`
+throws, so Install-Brain died before invoking the bat. A syntax check
+cannot see it; the engine parses cleanly and throws at runtime, on the one
+install type nobody had run (minimal/standard skip the brain step).
+
+Fix: the line is deleted, not repaired. `build_phase0b.bat` is
+self-contained — it calls vcvars64 itself, sets its own `VSCMD_ROOT`, and
+honours a parent-provided `CMAKE_CUDA_COMPILER` (which install.ps1 keeps
+setting). A parent-side derivation would be D61's second copy. The comment
+on the deletion says so, aimed at the maintainer who will otherwise
+"restore" it.
+
+Regression: `install_self_test.ps1` gains test 19, an AST walk asserting
+every function reads only variables it defines (params on the definition
+*and* the body, in-function assigns, foreach vars, script params,
+top-level assigns, bare reads backed by a `$script:` assignment elsewhere,
+automatics). Failing-first met: it failed pre-fix naming exactly
+`$vcvars in Install-Brain`. Writing it found two test bugs of the usual
+family — `function F([string]$m)` params live on the definition, not the
+body, and `DriveName` is `$null` for `$script:` on an assignment LHS, so
+the qualifier must be matched in `UserPath`.
+
+Verified: self-test 19/19; `install.ps1 -WithModel -WithVoice -WithAutostart`
+exit 0 with verify 8/8 (brain step excluded — the 20-minute compile was not
+re-run; its pre-build section is now statically proven to reach the bat
+call); ISCC recompiled cleanly; full suite 1488 passed + 3 skipped with one
+`test_widgets_render` Tcl error of the known intermittent family (Phase A),
+green 7/7 on immediate rerun. Phase A stays closed.
+
+Same session, adjacent cause: the Start Menu/desktop shortcuts launched
+`python.exe`, so the console window *was* the daemon's lifetime — closing
+it killed the daemon with no `daemon.stop` audit record (seen in the
+user's own log: `brain.unload` then silence, no stop, pipe gone). Daily
+shortcuts now run `pythonw.exe`; a separate "(console)" entry keeps
+`python.exe` for diagnostics, which is what the old comment's warning was
+actually about.
+---
+
+## D104 - Load/infer split per tier, and the spare 0.8B measured
+
+D99 reported wall totals only, n=1, through the daemon path. Measured here
+directly against `llama_cpp` (one process per tier, n_ctx 4096,
+n_gpu_layers=-1, streaming paperclip prompt x3, quiet machine at 7% CPU),
+so load and inference are separate numbers:
+
+| tier | file | load | VRAM delta | offload | infer (96 tok) | prefill | gen |
+|---|---|---|---|---|---|---|---|
+| spare | 0.8B Q4_0, 0.52 GiB | 0.9 s | 1187 MiB | 25/25 | 0.22 s | 2326 tok/s | ~270 tok/s |
+| fast | 4B Q8_0, 4.17 GiB | 2.7 s | 5036 MiB | 33/33 | 1.7 s | 619 tok/s | 58.4 tok/s |
+| deep | 9B IQ4_XS, 5.96 GiB | 18.2 s | 6350 MiB | 33/33 | 2.1 s | 573 tok/s | 47 tok/s |
+
+Prefill/gen are `llama_perf_context_print`'s own figures, not estimates.
+VRAM returns to baseline after each process exits (885-888 before,
+~1000 after — the residual is the user's own software varying, not a leak;
+no holder survives its process).
+
+Three findings:
+
+* **The tier-swap cost is the load, not the inference.** Deep infer is only
+  0.4 s slower than fast; its 18.2 s load is 7x fast's. D99's 21.7 s deep
+  wall is consistent (18.2 + 2.1 + daemon overhead). Any future swap
+  optimisation buys load time or nothing.
+* **The spare is tool-competent.** First-try grammar-constrained call:
+  `{"tool": "file_list", "arguments": {"path":
+  "C:\\Users\\Public\\Documents"}}` — correct tool, correct path, parses.
+  At 0.9 s load and 1.16 GiB it is the only tier that fits alongside
+  anything. It is measured, not wired: `TIERS` still names fast/deep only,
+  and wiring a third tier is a product decision, not this measurement.
+* **D37's 57.85 tok/s stands.** Fast gen here is 58.4 tok/s on the same
+  model — agreement across sessions, different scripts.
+
+Probe: `measure_split.py` (one-shot, temp dir, not committed).
+---
+

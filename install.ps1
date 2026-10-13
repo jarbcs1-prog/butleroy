@@ -305,7 +305,10 @@ function Install-Brain {
     # "a second copy of a test is not a belt and braces"), the engine calls it and
     # passes the detected paths through the environment the script already reads.
     $env:CMAKE_CUDA_COMPILER = Join-Path $CudaRoot 'bin\nvcc.exe'
-    $env:VSCMD_ROOT = Split-Path (Split-Path (Split-Path (Split-Path $vcvars 2>$null)))
+    # No VSCMD_ROOT assignment here on purpose. build_phase0b.bat calls vcvars64
+    # itself and sets its own VSCMD_ROOT (2026-10-14: a line deriving it from an
+    # undefined `$vcvars` threw under 'Stop' and killed every FULL install in ~6
+    # seconds, before the build started). The bat honours this CMAKE_CUDA_COMPILER.
     Write-Info "nvcc pinned to $($env:CMAKE_CUDA_COMPILER)"
 
     Push-Location $Root

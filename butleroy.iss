@@ -109,13 +109,18 @@ Name: "{app}\models"
 Name: "{app}\logs"
 
 [Icons]
-; Launches the console entry point, not the tray: on a first run the tray may not
-; appear if the interpreter is missing, and a window showing an error beats a
-; silent no-op.
-Name: "{group}\{#AppName}"; Filename: "{app}\.venv\Scripts\python.exe"; Parameters: "-m assistant"; WorkingDir: "{app}"
+; The daily entries run pythonw: no console window. A resident assistant that
+; holds a console hostage is one the user kills to get their desktop back -
+; which is exactly what happened (2026-10-13: closing the console killed the
+; daemon with no daemon.stop record, because the console WAS the lifetime).
+; The "(console)" entries keep python.exe for diagnostics: on a first run the
+; tray may not appear if the interpreter is missing, and a window showing an
+; error beats a silent no-op.
+Name: "{group}\{#AppName}"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m assistant"; WorkingDir: "{app}"
+Name: "{group}\{#AppName} (console)"; Filename: "{app}\.venv\Scripts\python.exe"; Parameters: "-m assistant"; WorkingDir: "{app}"
 Name: "{group}\{#AppName} (preflight)"; Filename: "{app}\.venv\Scripts\python.exe"; Parameters: "-m assistant --check"; WorkingDir: "{app}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\.venv\Scripts\python.exe"; Parameters: "-m assistant"; WorkingDir: "{app}"; Tasks: desktopshortcut
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m assistant"; WorkingDir: "{app}"; Tasks: desktopshortcut
 
 [Run]
 ; -NoProfile: a user profile could shadow the engine with a function or alias,

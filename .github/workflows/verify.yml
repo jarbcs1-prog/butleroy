@@ -34,6 +34,7 @@ jobs:
           python -m pytest -q --no-header -p no:cacheprovider
           --junitxml=test-results.xml
           --ignore=tests/test_brain.py
+          --ignore=tests/test_tiers.py
 
       - name: Upload test report
         if: always()

@@ -30,4 +30,15 @@ jobs:
 
       - name: Run test suite
         shell: pwsh
-        run: python -m pytest -q --no-header -p no:cacheprovider
+        run: >-
+          python -m pytest -q --no-header -p no:cacheprovider
+          --junitxml=test-results.xml
+          --ignore=tests/test_brain.py
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: test-results.xml
+          if-no-files-found: warn

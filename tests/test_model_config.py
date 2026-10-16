@@ -96,7 +96,7 @@ def test_loading_with_no_file_reports_that_it_used_the_defaults(
     cfg = mc.load(cfg_path, models_dir=models_dir)
 
     assert cfg.provenance == "defaults"
-    assert set(cfg.tiers) == {"fast", "deep"}
+    assert set(cfg.tiers) == {"fast", "deep", "spare"}
     # And the paths still resolve, which is the property `serve` depends on.
     for tier in cfg.tiers.values():
         assert isinstance(tier.resolved(models_dir), Path)
@@ -133,7 +133,7 @@ def test_a_config_the_daemon_cannot_use_falls_back_and_says_why(
     cfg_path.write_text(content, encoding="utf-8")
     cfg = mc.load(cfg_path, models_dir=models_dir)
 
-    assert set(cfg.tiers) == {"fast", "deep"}, "the defaults were lost"
+    assert set(cfg.tiers) == {"fast", "deep", "spare"}, "the defaults were lost"
     assert cfg.provenance != "file"
     assert expected_fragment in cfg.provenance, (
         f"provenance {cfg.provenance!r} does not mention {expected_fragment!r}, so a "

@@ -115,6 +115,7 @@ class Overlay:
         self._poll_job: str | None = None
         self._tk: threading.Thread | None = None
         self._root_ready = threading.Event()
+        self._transcript_visible = True
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -322,6 +323,18 @@ class Overlay:
         if not self._closing:
             self._events.put(ev)
 
+    def _toggle_transcript_visibility(self, _event: Any = None) -> str:
+        """Toggle transcript visibility from the Ctrl+Alt+T chord."""
+        if self._root is None or getattr(self, "transcript", None) is None:
+            return "break"
+        if self._transcript_visible:
+            self.transcript.pack_forget()
+            self._transcript_visible = False
+        else:
+            self.transcript.pack(fill="both", expand=True, padx=18, pady=(8, 8))
+            self._transcript_visible = True
+        return "break"
+
     # --- construction ------------------------------------------------------
 
     def _build(self) -> tk.Tk:
@@ -356,6 +369,12 @@ class Overlay:
         self.transcript.tag_configure("bad", foreground=DANGER)
         self.transcript.tag_configure("accent", foreground=ACCENT)
         _attach_edit_menu(self.transcript, editable=False)
+        try:
+            root.bind("<Control-Alt-KeyPress-t>", self._toggle_transcript_visibility)
+            root.bind("<Control-Alt-KeyPress-T>", self._toggle_transcript_visibility)
+        except (AttributeError, tk.TclError):
+            # Headless test roots may not implement bind; real Tk does.
+            pass
 
         entry_row = tk.Frame(root, bg=BG)
         entry_row.pack(fill="x", padx=18, pady=(0, 12))

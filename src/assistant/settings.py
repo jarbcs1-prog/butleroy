@@ -853,7 +853,7 @@ class SpeechSection(Section):
         # confirmation dialog, user answers with audible flag, then executes.
         # The button here is the entry point; the gate is upstream in daemon.
         try:
-            res = self._call("voice.listen", seconds=10, device=None) or {}
+            res = self._call("tool_call", tool="voice.listen", args={"seconds": 10, "device": None}) or {}
         except Exception as exc:
             self._say(f"Listen failed: {exc}", "rust")
             return

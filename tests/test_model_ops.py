@@ -130,7 +130,7 @@ def test_reading_with_no_config_reports_the_defaults_and_says_so(desk) -> None:
 
     assert res["ok"], res
     result = res["result"]
-    assert set(result["tiers"]) == {"fast", "deep"}
+    assert set(result["tiers"]) == {"fast", "deep", "spare"}
     assert result["provenance"] == "defaults"
     assert result["provenance"] != "file", (
         "provenance must never claim a file that does not exist"
@@ -185,6 +185,7 @@ def test_writing_persists_and_reloads(desk, tmp_path: Path) -> None:
     res = _call(desk, "model_config_set", {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "large-IQ4_XS.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }})
 
     assert res["ok"], res
@@ -231,6 +232,7 @@ def test_a_model_that_is_not_on_disk_is_refused_and_nothing_is_written(
     res = _call(desk, "model_config_set", {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "typo-in-the-name.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }})
 
     assert not res["ok"]
@@ -251,6 +253,7 @@ def test_a_refused_write_leaves_a_working_config_untouched(desk, tmp_path: Path)
     good = {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "large-IQ4_XS.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }}
     assert _call(desk, "model_config_set", good)["ok"]
 
@@ -286,6 +289,7 @@ def test_a_write_does_not_restart_a_running_child(desk) -> None:
     res = _call(desk, "model_config_set", {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "large-IQ4_XS.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }})
 
     assert res["ok"], res
@@ -316,6 +320,7 @@ def test_a_write_is_recorded_in_the_audit_chain(desk) -> None:
     assert _call(desk, "model_config_set", {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "large-IQ4_XS.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }})["ok"]
 
     records = [json.loads(line) for line in
@@ -375,7 +380,7 @@ def test_a_corrupt_config_is_reported_not_hidden(desk, tmp_path: Path) -> None:
     res = _call(desk, "model_config")
 
     assert res["ok"], "a corrupt config stopped the op answering"
-    assert set(res["result"]["tiers"]) == {"fast", "deep"}
+    assert set(res["result"]["tiers"]) == {"fast", "deep", "spare"}
     assert "unreadable" in res["result"]["provenance"]
     assert res["result"]["provenance"] != "file"
 
@@ -393,6 +398,7 @@ def test_a_corrupt_config_does_not_stop_the_windows_from_overwriting_it(
     res = _call(desk, "model_config_set", {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "large-IQ4_XS.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }})
     assert res["ok"], res
 
@@ -417,6 +423,7 @@ def test_the_child_resolves_its_tier_from_the_file(desk, monkeypatch) -> None:
     assert _call(desk, "model_config_set", {"tiers": {
         "fast": {"model": "small-Q4_0.gguf", "need_bytes": 1 * GB},
         "deep": {"model": "large-IQ4_XS.gguf", "need_bytes": 7 * GB},
+        "spare": {"model": "small-Q4_0.gguf", "need_bytes": 2 * GB},
     }})["ok"]
 
     path, need = brain_server.resolve_tier("fast")

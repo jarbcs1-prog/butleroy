@@ -50,7 +50,7 @@ CEILING = 7 * 1024 ** 3
 
 
 def test_both_tiers_exist():
-    assert set(TIERS) == {"fast", "deep"}
+    assert set(TIERS) == {"fast", "deep", "spare"}
 
 
 def test_each_tier_requests_a_file_and_a_lease():

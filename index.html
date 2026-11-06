@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Butleroy / localaized — A private voice assistant for Windows. Local-first, offline-ready, with wake word, full voice control, and no cloud dependency. Privacy-first.">
+<meta name="keywords" content="voice assistant, Windows, local AI, offline, privacy, wake word, voice control">
+<meta name="author" content="Portfolio Portfolio Commercialization">
+<meta name="robots" content="index, follow">
+<title>Butleroy — Your Private Voice Assistant</title>
+<meta property="og:title" content="Butleroy — Your Private Voice Assistant">
+<meta property="og:description" content="A private voice assistant for Windows. Local-first, offline-ready, and completely under your control.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='12' fill='%232563EB'/><path d='M20 16 L32 8 L44 16' fill='none' stroke='%23FDE68A' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<style>
+:root{--bg:#ffffff;--fg:#111111;--muted:#6b7280;--accent:#2563EB;--accent-ink:#ffffff;--border:#e5e7eb;--card:#f9fafb}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Arial,sans-serif;background:var(--bg);color:var(--fg);line-height:1.6}
+a{color:var(--accent);text-decoration:none}
+.container{max-width:1100px;margin:0 auto;padding:0 24px}
+header{padding:40px 0 24px}
+.hero{display:flex;flex-direction:column;gap:12px}
+.hero h1{font-size:2.2rem;line-height:1.15}
+.hero p.lead{font-size:1.15rem;color:var(--muted);max-width:70ch}
+.ctas{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
+.btn{display:inline-block;padding:12px 20px;border-radius:8px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--fg)}
+.btn:hover{background:var(--card);text-decoration:none}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.primary:hover{background:#1D4ED8}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-top:40px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px}
+.card h3{margin-bottom:6px}
+.section{margin-top:48px}
+h2{font-size:1.5rem;margin-bottom:12px}
+.footer{margin-top:64px;padding-top:24px;border-top:1px solid var(--border);color:var(--muted);font-size:0.9rem}
+@media (max-width:640px){.hero h1{font-size:1.6rem}}
+</style>
+</head>
+<body>
+<header><div class="container hero"><h1>Butleroy</h1><p class="lead">Your private voice assistant. Local-first, offline-ready, and completely under your control. Butleroy listens when spoken to, acts on your commands, and never phones home.</p><div class="ctas"><a class="btn primary" href="#features">Features</a><a class="btn" href="#download">Download</a></div></div></header>
+<main class="container">
+<section class="features" id="features"><div class="card"><h3>Local-First Inference</h3><p>All voice processing runs locally. Wake word detection, STT (faster-whisper), TTS (piper) — everything stays on your machine. No cloud API, no telemetry.</p></div><div class="card"><h3>Always-Listening Wake Word</h3><p>Butleroy listens for its wake word and only activates when spoken to. The wake word model is local and lightweight.</p></div><div class="card"><h3>Full Voice Control</h3><p>Say commands, ask questions, set reminders, control your environment. Butleroy understands natural language and executes actions locally.</p></div><div class="card"><h3>Privacy-First</h3><p>No cloud account, no data collection, no telemetry. Your voice and your data stay yours.</p></div></section>
+<section class="section" id="download"><h2>Download</h2><p>Butleroy is a Windows application with an Inno Setup installer. Download the latest release or build from source.</p><ul style="margin-left:20px;list-style:none;"><li><strong>Platform</strong> — Windows 10/11 native installer (Inno Setup)</li><li><strong>Stack</strong> — Rust/Tauri front-end + Python back-end</li><li><strong>Inference</strong> — faster-whisper (CPU) + piper TTS</li></ul><a class="btn" href="#">Get the installer</a></section>
+<section><h2>Architecture</h2><p>Butleroy runs on your local machine with a Rust/Tauri front-end and a Python back-end. Voice is captured, wake word detected, STT decodes it locally, the assistant reasons, and TTS speaks the response — all in-process.</p><pre style="background:#f1f5f9;padding:16px;border-radius:8px;overflow-x:auto;font-size:0.85rem;">Butleroy (local)
+  |
+  v
+Wake word -> STT (faster-whisper) -> Agent -> TTS (piper)</pre></section>
+<section><h2>FAQ</h2><dl><dt>Does Butleroy need internet?</dt><dd>No. All voice processing is local. Internet is only needed for optional third-party capabilities.</dd><dt>Is it really private?</dt><dd>Yes. No cloud account, no data collection, no telemetry. Everything runs locally.</dd><dt>How do I activate it?</dt><dd>Say the wake word. Butleroy will listen and respond to your commands.</dd></dl></section>
+<footer class="footer"><div class="container"><p>Butleroy — your private voice assistant. &copy; 2026 Portfolio Commercialization.</p></div></footer>
+</body>
+</html>
